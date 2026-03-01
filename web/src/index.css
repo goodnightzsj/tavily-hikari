@@ -675,6 +675,14 @@
   line-height: 1;
 }
 
+.public-home-admin-button {
+  border-radius: 999px;
+  height: auto;
+  min-height: 42px;
+  padding: 0.72rem 1.05rem;
+  line-height: 1;
+}
+
 .token-access-icon {
   width: 20px;
   height: 20px;

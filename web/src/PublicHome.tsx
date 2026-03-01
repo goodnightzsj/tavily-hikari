@@ -19,6 +19,7 @@ import LanguageSwitcher from './components/LanguageSwitcher'
 import ThemeToggle from './components/ThemeToggle'
 import useUpdateAvailable from './hooks/useUpdateAvailable'
 import RollingNumber from './components/RollingNumber'
+import PublicHomeHeroCard from './components/PublicHomeHeroCard'
 import { useLanguage, useTranslate, type Language } from './i18n'
 
 type GuideLanguage = 'toml' | 'json' | 'bash'
@@ -431,64 +432,26 @@ function PublicHome(): JSX.Element {
           </div>
         </section>
       )}
-      <section className="surface public-home-hero">
-        <div className="language-switcher-row">
-          <ThemeToggle />
-          <LanguageSwitcher />
-        </div>
-        <h1 className="hero-title">{publicStrings.heroTitle}</h1>
-        <p className="public-home-description">{publicStrings.heroDescription}</p>
-        {error && <div className="surface error-banner" role="status">{error}</div>}
-        <div className="metrics-grid hero-metrics">
-          <div className="metric-card">
-            <h3>{publicStrings.metrics.monthly.title}</h3>
-            <div className="metric-value"><RollingNumber value={loading ? null : metrics?.monthlySuccess ?? 0} /></div>
-            <div className="metric-subtitle">{publicStrings.metrics.monthly.subtitle}</div>
-          </div>
-          <div className="metric-card">
-            <h3>{publicStrings.metrics.daily.title}</h3>
-            <div className="metric-value"><RollingNumber value={loading ? null : metrics?.dailySuccess ?? 0} /></div>
-            <div className="metric-subtitle">{publicStrings.metrics.daily.subtitle}</div>
-          </div>
-          <div className="metric-card">
-            <h3>{publicStrings.metrics.pool.title}</h3>
-            <div className="metric-value">
-              {loading ? '—' : availableKeys != null && totalKeys != null ? `${availableKeys}/${totalKeys}` : '—'}
-            </div>
-            <div className="metric-subtitle">{publicStrings.metrics.pool.subtitle}</div>
-          </div>
-        </div>
-        {(showLinuxDoLogin || isAdmin || builtinAuthEnabled) && (
-          <div className="public-home-actions">
-            {showLinuxDoLogin && (
-              <a href="/auth/linuxdo" className="linuxdo-login-button" aria-label={publicStrings.linuxDoLogin.button}>
-                <img
-                  src="/linuxdo-logo.svg"
-                  alt={publicStrings.linuxDoLogin.logoAlt}
-                  width={20}
-                  height={20}
-                />
-                <span>{publicStrings.linuxDoLogin.button}</span>
-              </a>
-            )}
-            {hideTokenPanels && (
-              <button type="button" className="token-access-button" onClick={openTokenAccessDialog}>
-                <Icon icon="mdi:key-outline" aria-hidden="true" className="token-access-icon" />
-                <span>{publicStrings.tokenAccess.button}</span>
-              </button>
-            )}
-            {(isAdmin || builtinAuthEnabled) && (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => { window.location.href = isAdmin ? '/admin' : '/login' }}
-              >
-                {isAdmin ? publicStrings.adminButton : publicStrings.adminLoginButton}
-              </button>
-            )}
-          </div>
+      <PublicHomeHeroCard
+        publicStrings={publicStrings}
+        loading={loading}
+        metrics={metrics}
+        availableKeys={availableKeys}
+        totalKeys={totalKeys}
+        error={error}
+        showLinuxDoLogin={showLinuxDoLogin}
+        showTokenAccessButton={hideTokenPanels}
+        showAdminAction={isAdmin || builtinAuthEnabled}
+        adminActionLabel={isAdmin ? publicStrings.adminButton : publicStrings.adminLoginButton}
+        topControls={(
+          <>
+            <ThemeToggle />
+            <LanguageSwitcher />
+          </>
         )}
-      </section>
+        onTokenAccessClick={openTokenAccessDialog}
+        onAdminActionClick={() => { window.location.href = isAdmin ? '/admin' : '/login' }}
+      />
       {!hideTokenPanels && (
         <>
           <section className="surface panel access-panel">

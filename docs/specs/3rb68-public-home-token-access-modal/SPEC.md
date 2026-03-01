@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 进行中（fast-track）
 - Created: 2026-02-28
-- Last: 2026-02-28
+- Last: 2026-03-02
 
 ## 背景 / 问题陈述
 
@@ -67,11 +67,12 @@
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
-- [ ] M1: Spec + i18n 文案补齐
-- [ ] M2: 首页隐藏逻辑 + token access modal 落地
-- [ ] M3: 构建验证 + 手工验收通过
+- [x] M1: Spec + i18n 文案补齐
+- [x] M2: 首页隐藏逻辑 + token access modal 落地
+- [x] M3: 构建验证 + 手工验收通过（含 Storybook 状态覆盖）
 - [ ] M4: fast-track 交付（push + PR + checks + review-loop）
 
 ## 变更记录（Change log）
 
 - 2026-02-28: 创建规格，冻结范围与验收口径。
+- 2026-03-02: 完成未登录无 token 隐藏面板、令牌访问弹窗入口、按钮样式统一；补充 Storybook 下首屏卡片全状态与页面级 Token 弹窗打开态预览。
