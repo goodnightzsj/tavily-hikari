@@ -619,7 +619,7 @@ export default function TokenDetail({ id, onBack }: { id: string; onBack?: () =>
   }
 
   return (
-    <main className="app-shell">
+    <div className="admin-detail-stack">
       <section className="surface app-header">
         <div className="title-group">
           <h1>Access Token Detail</h1>
@@ -938,7 +938,7 @@ export default function TokenDetail({ id, onBack }: { id: string; onBack?: () =>
         </div>
       </div>
     </dialog>
-    </main>
+    </div>
   )
 }
 

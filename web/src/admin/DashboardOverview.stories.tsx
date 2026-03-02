@@ -21,6 +21,7 @@ type Story = StoryObj<typeof meta>
 const strings = {
   title: 'Operations Dashboard',
   description: 'Global health, risk signals, and actionable activity in one place.',
+  loading: 'Loading dashboard data…',
   trendsTitle: 'Traffic Trends',
   trendsDescription: 'Recent request and error changes from latest logs.',
   requestTrend: 'Request volume',
@@ -45,6 +46,7 @@ const strings = {
 export const Default: Story = {
   args: {
     strings,
+    overviewReady: true,
     metrics: [
       { id: 'total', label: 'Total Requests', value: '12,406', subtitle: '—' },
       { id: 'success', label: 'Successful', value: '11,922', subtitle: '96.1%' },

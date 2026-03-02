@@ -11,6 +11,7 @@ export interface DashboardMetricCard {
 export interface DashboardOverviewStrings {
   title: string
   description: string
+  loading: string
   trendsTitle: string
   trendsDescription: string
   requestTrend: string
@@ -34,6 +35,7 @@ export interface DashboardOverviewStrings {
 
 interface DashboardOverviewProps {
   strings: DashboardOverviewStrings
+  overviewReady: boolean
   metrics: DashboardMetricCard[]
   trend: {
     request: number[]
@@ -76,6 +78,7 @@ function Sparkline({ values }: { values: number[] }): JSX.Element {
 
 export default function DashboardOverview({
   strings,
+  overviewReady,
   metrics,
   trend,
   tokenCoverage,
@@ -148,13 +151,17 @@ export default function DashboardOverview({
       </section>
 
       <section className="surface quick-stats-grid">
-        {metrics.map((metric) => (
-          <div key={metric.id} className="metric-card quick-stats-card">
-            <h3>{metric.label}</h3>
-            <div className="metric-value">{metric.value}</div>
-            <div className="metric-subtitle">{metric.subtitle}</div>
-          </div>
-        ))}
+        {metrics.length === 0 ? (
+          <div className="empty-state alert">{strings.loading}</div>
+        ) : (
+          metrics.map((metric) => (
+            <div key={metric.id} className="metric-card quick-stats-card">
+              <h3>{metric.label}</h3>
+              <div className="metric-value">{metric.value}</div>
+              <div className="metric-subtitle">{metric.subtitle}</div>
+            </div>
+          ))
+        )}
       </section>
 
       <section className="surface panel dashboard-trend-panel">
@@ -183,7 +190,9 @@ export default function DashboardOverview({
             <p className="panel-description">{strings.riskDescription}</p>
           </div>
         </div>
-        {riskItems.length === 0 ? (
+        {!overviewReady ? (
+          <div className="empty-state alert">{strings.loading}</div>
+        ) : riskItems.length === 0 ? (
           <div className="empty-state alert">{strings.riskEmpty}</div>
         ) : (
           <ul className="dashboard-risk-list">

@@ -69,6 +69,7 @@ const LOGS_PER_PAGE = 20
 const LOGS_MAX_PAGES = 10
 const DASHBOARD_RECENT_LOGS_PER_PAGE = 64
 const DASHBOARD_RECENT_JOBS_PER_PAGE = 20
+const DASHBOARD_OVERVIEW_SSE_REFRESH_INTERVAL_MS = 30_000
 // Auto-collapse behavior for the API keys batch overlay (empty textarea only):
 // The user wants "delay + close animation" to total 500ms.
 const KEYS_BATCH_CLOSE_ANIMATION_MS = 200
@@ -335,6 +336,7 @@ function AdminDashboard(): JSX.Element {
   const [tokens, setTokens] = useState<AuthToken[]>([])
   const [dashboardTokens, setDashboardTokens] = useState<AuthToken[]>([])
   const [dashboardTokenCoverage, setDashboardTokenCoverage] = useState<'ok' | 'truncated' | 'error'>('ok')
+  const [dashboardOverviewLoaded, setDashboardOverviewLoaded] = useState(false)
   const [tokensPage, setTokensPage] = useState(1)
   const tokensPerPage = 10
   const [tokensTotal, setTokensTotal] = useState(0)
@@ -366,6 +368,7 @@ function AdminDashboard(): JSX.Element {
   const routeRef = useRef<AdminPathRoute>(route)
   const loadDashboardOverviewRef = useRef<((signal?: AbortSignal) => Promise<void>) | null>(null)
   const dashboardOverviewInFlightRef = useRef(false)
+  const dashboardOverviewLastSseRefreshAtRef = useRef(0)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [version, setVersion] = useState<{ backend: string; frontend: string } | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
@@ -803,6 +806,10 @@ function AdminDashboard(): JSX.Element {
         setDashboardTokenCoverage('error')
         setDashboardLogs([])
         setDashboardJobs([])
+      } finally {
+        if (!(signal?.aborted ?? false)) {
+          setDashboardOverviewLoaded(true)
+        }
       }
     },
     [loadAllTokensForDashboard],
@@ -855,6 +862,7 @@ function AdminDashboard(): JSX.Element {
       return
     }
     const controller = new AbortController()
+    dashboardOverviewLastSseRefreshAtRef.current = Date.now()
     void loadDashboardOverview(controller.signal)
     return () => controller.abort()
   }, [route, loadDashboardOverview])
@@ -993,16 +1001,22 @@ function AdminDashboard(): JSX.Element {
           const data = JSON.parse(ev.data) as { summary: Summary; keys: ApiKeyStats[]; logs: RequestLog[] }
           setSummary(data.summary)
           setKeys(data.keys)
+          setDashboardLogs(data.logs)
           setLastUpdated(new Date())
           setError(null)
           setLoading(false)
+          const canRefreshOverview =
+            Date.now() - dashboardOverviewLastSseRefreshAtRef.current >=
+            DASHBOARD_OVERVIEW_SSE_REFRESH_INTERVAL_MS
           if (
             routeRef.current.name === 'module' &&
             routeRef.current.module === 'dashboard' &&
-            !dashboardOverviewInFlightRef.current
+            !dashboardOverviewInFlightRef.current &&
+            canRefreshOverview
           ) {
             const refreshOverview = loadDashboardOverviewRef.current
             if (refreshOverview) {
+              dashboardOverviewLastSseRefreshAtRef.current = Date.now()
               dashboardOverviewInFlightRef.current = true
               const controller = new AbortController()
               void refreshOverview(controller.signal).finally(() => {
@@ -2372,6 +2386,7 @@ function AdminDashboard(): JSX.Element {
       {showDashboard && (
         <DashboardOverview
           strings={adminStrings.dashboard}
+          overviewReady={dashboardOverviewLoaded}
           metrics={metrics}
           trend={trendBuckets}
           tokenCoverage={dashboardTokenCoverage}
@@ -3868,7 +3883,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
   }, [summary, keyDetailsStrings])
 
   return (
-    <main className="app-shell">
+    <div className="admin-detail-stack">
       <section className="surface app-header">
         <div className="title-group">
           <h1>{keyDetailsStrings.title}</h1>
@@ -4013,7 +4028,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
           )}
         </div>
       </section>
-    </main>
+    </div>
   )
 }
 

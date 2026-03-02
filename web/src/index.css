@@ -587,6 +587,11 @@
   min-width: 0;
 }
 
+.admin-detail-stack {
+  display: grid;
+  gap: 24px;
+}
+
 .dashboard-hero-panel {
   background:
     linear-gradient(145deg, hsl(var(--card) / 0.92), hsl(var(--card) / 0.72)),

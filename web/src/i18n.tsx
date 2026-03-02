@@ -184,6 +184,7 @@ interface AdminTranslationsShape {
   dashboard: {
     title: string
     description: string
+    loading: string
     trendsTitle: string
     trendsDescription: string
     requestTrend: string
@@ -849,6 +850,7 @@ export const translations: Record<Language, TranslationShape> = {
       dashboard: {
         title: 'Operations Dashboard',
         description: 'Global health, risk signals, and actionable activity in one place.',
+        loading: 'Loading dashboard data…',
         trendsTitle: 'Traffic Trends',
         trendsDescription: 'Recent request and error changes from latest logs.',
         requestTrend: 'Request volume',
@@ -1491,6 +1493,7 @@ export const translations: Record<Language, TranslationShape> = {
       dashboard: {
         title: '运营仪表盘',
         description: '在一个页面查看全局健康度、风险与可执行动作。',
+        loading: '正在加载仪表盘数据…',
         trendsTitle: '流量趋势',
         trendsDescription: '基于最新请求日志的请求量与错误变化。',
         requestTrend: '请求量趋势',
