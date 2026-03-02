@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import { Icon } from '@iconify/react'
+import CherryStudioMock from './components/CherryStudioMock'
 
 import {
   fetchProfile,
@@ -17,9 +18,43 @@ import LanguageSwitcher from './components/LanguageSwitcher'
 import RollingNumber from './components/RollingNumber'
 import { StatusBadge, type StatusTone } from './components/StatusBadge'
 import ThemeToggle from './components/ThemeToggle'
-import { useLanguage } from './i18n'
+import { useLanguage, useTranslate, type Language } from './i18n'
 
 const REPO_URL = 'https://github.com/IvanLi-CN/tavily-hikari'
+const CODEX_DOC_URL = 'https://github.com/openai/codex/blob/main/docs/config.md'
+const CLAUDE_DOC_URL = 'https://code.claude.com/docs/en/mcp'
+const VSCODE_DOC_URL = 'https://code.visualstudio.com/docs/copilot/customization/mcp-servers'
+const NOCODB_DOC_URL = 'https://nocodb.com/docs/product-docs/mcp'
+const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
+const ICONIFY_ENDPOINT = 'https://api.iconify.design'
+
+type GuideLanguage = 'toml' | 'json' | 'bash'
+type GuideKey = 'codex' | 'claude' | 'vscode' | 'claudeDesktop' | 'cursor' | 'windsurf' | 'cherryStudio' | 'other'
+
+interface GuideReference {
+  label: string
+  url: string
+}
+
+interface GuideContent {
+  title: string
+  steps: ReactNode[]
+  sampleTitle?: string
+  snippetLanguage?: GuideLanguage
+  snippet?: string
+  reference?: GuideReference
+}
+
+const GUIDE_KEY_ORDER: GuideKey[] = [
+  'codex',
+  'claude',
+  'vscode',
+  'claudeDesktop',
+  'cursor',
+  'windsurf',
+  'cherryStudio',
+  'other',
+]
 
 type ConsoleRoute =
   | { name: 'dashboard' }
@@ -30,6 +65,10 @@ const numberFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 
 
 function formatNumber(value: number): string {
   return numberFormatter.format(value)
+}
+
+function formatQuotaPair(used: number, limit: number): string {
+  return `${formatNumber(used)} / ${formatNumber(limit)}`
 }
 
 function parseRouteFromHash(): ConsoleRoute {
@@ -77,6 +116,7 @@ function tokenLabel(tokenId: string): string {
 
 export default function UserConsole(): JSX.Element {
   const language = useLanguage().language
+  const publicStrings = useTranslate().public
   const text = language === 'zh' ? ZH : EN
 
   const [profile, setProfile] = useState<Profile | null>(null)
@@ -89,11 +129,21 @@ export default function UserConsole(): JSX.Element {
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<Record<string, 'idle' | 'copied' | 'error'>>({})
+  const [activeGuide, setActiveGuide] = useState<GuideKey>('codex')
+  const [isMobileGuide, setIsMobileGuide] = useState(false)
 
   useEffect(() => {
     const onHash = () => setRoute(parseRouteFromHash())
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 640px)')
+    const apply = () => setIsMobileGuide(mq.matches)
+    apply()
+    mq.addEventListener('change', apply)
+    return () => mq.removeEventListener('change', apply)
   }, [])
 
   const reloadBase = useCallback(async (signal: AbortSignal) => {
@@ -179,6 +229,24 @@ export default function UserConsole(): JSX.Element {
     }
     return text.subtitle
   }, [profile?.userDisplayName, text.subtitle])
+
+  const guideToken = useMemo(() => {
+    if (route.name === 'token') {
+      return tokenLabel(route.id)
+    }
+    return 'th-xxxx-xxxxxxxxxxxx'
+  }, [route])
+
+  const guideDescription = useMemo<GuideContent>(() => {
+    const baseUrl = window.location.origin
+    const guides = buildGuideContent(language, baseUrl, guideToken)
+    return guides[activeGuide]
+  }, [activeGuide, guideToken, language])
+
+  const guideTabs = useMemo(
+    () => GUIDE_KEY_ORDER.map((id) => ({ id, label: publicStrings.guide.tabs[id] ?? id })),
+    [publicStrings.guide.tabs],
+  )
 
   const goDashboard = () => {
     window.location.hash = '#/dashboard'
@@ -279,20 +347,16 @@ export default function UserConsole(): JSX.Element {
           <div className="panel-header">
             <h2>{text.tokens.title}</h2>
           </div>
-          <div className="table-wrapper jobs-table-wrapper">
+          <div className="table-wrapper jobs-table-wrapper user-console-md-up">
             {tokens.length === 0 ? (
               <div className="empty-state alert">{text.tokens.empty}</div>
             ) : (
-              <table className="jobs-table tokens-table">
+              <table className="user-console-tokens-table">
                 <thead>
                   <tr>
                     <th>{text.tokens.table.id}</th>
-                    <th>{text.tokens.table.any}</th>
-                    <th>{text.tokens.table.hourly}</th>
-                    <th>{text.tokens.table.daily}</th>
-                    <th>{text.tokens.table.monthly}</th>
-                    <th>{text.tokens.table.dailySuccess}</th>
-                    <th>{text.tokens.table.dailyFailure}</th>
+                    <th>{text.tokens.table.quotas}</th>
+                    <th>{text.tokens.table.stats}</th>
                     <th>{text.tokens.table.actions}</th>
                   </tr>
                 </thead>
@@ -301,13 +365,45 @@ export default function UserConsole(): JSX.Element {
                     const state = copyState[item.tokenId] ?? 'idle'
                     return (
                       <tr key={item.tokenId}>
-                        <td><code>{item.tokenId}</code></td>
-                        <td>{formatNumber(item.hourlyAnyUsed)} / {formatNumber(item.hourlyAnyLimit)}</td>
-                        <td>{formatNumber(item.quotaHourlyUsed)} / {formatNumber(item.quotaHourlyLimit)}</td>
-                        <td>{formatNumber(item.quotaDailyUsed)} / {formatNumber(item.quotaDailyLimit)}</td>
-                        <td>{formatNumber(item.quotaMonthlyUsed)} / {formatNumber(item.quotaMonthlyLimit)}</td>
-                        <td>{formatNumber(item.dailySuccess)}</td>
-                        <td>{formatNumber(item.dailyFailure)}</td>
+                        <td>
+                          <code>{item.tokenId}</code>
+                        </td>
+                        <td>
+                          <div className="user-console-cell-stack">
+                            <div className="user-console-cell-item">
+                              <span>{text.tokens.table.any}</span>
+                              <strong>{formatQuotaPair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</strong>
+                            </div>
+                            <div className="user-console-cell-item">
+                              <span>{text.tokens.table.hourly}</span>
+                              <strong>{formatQuotaPair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</strong>
+                            </div>
+                            <div className="user-console-cell-item">
+                              <span>{text.tokens.table.daily}</span>
+                              <strong>{formatQuotaPair(item.quotaDailyUsed, item.quotaDailyLimit)}</strong>
+                            </div>
+                            <div className="user-console-cell-item">
+                              <span>{text.tokens.table.monthly}</span>
+                              <strong>{formatQuotaPair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</strong>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="user-console-cell-stack">
+                            <div className="user-console-cell-item">
+                              <span>{text.tokens.table.dailySuccess}</span>
+                              <strong>{formatNumber(item.dailySuccess)}</strong>
+                            </div>
+                            <div className="user-console-cell-item">
+                              <span>{text.tokens.table.dailyFailure}</span>
+                              <strong>{formatNumber(item.dailyFailure)}</strong>
+                            </div>
+                            <div className="user-console-cell-item">
+                              <span>{text.dashboard.monthlySuccess}</span>
+                              <strong>{formatNumber(item.monthlySuccess)}</strong>
+                            </div>
+                          </div>
+                        </td>
                         <td>
                           <div className="table-actions">
                             <button
@@ -327,6 +423,63 @@ export default function UserConsole(): JSX.Element {
                   })}
                 </tbody>
               </table>
+            )}
+          </div>
+          <div className="user-console-mobile-list user-console-md-down">
+            {tokens.length === 0 ? (
+              <div className="empty-state alert">{text.tokens.empty}</div>
+            ) : (
+              tokens.map((item) => {
+                const state = copyState[item.tokenId] ?? 'idle'
+                return (
+                  <article key={item.tokenId} className="user-console-mobile-card">
+                    <header className="user-console-mobile-card-header">
+                      <strong>{text.tokens.table.id}</strong>
+                      <code>{item.tokenId}</code>
+                    </header>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.tokens.table.any}</span>
+                      <strong>{formatQuotaPair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.tokens.table.hourly}</span>
+                      <strong>{formatQuotaPair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.tokens.table.daily}</span>
+                      <strong>{formatQuotaPair(item.quotaDailyUsed, item.quotaDailyLimit)}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.tokens.table.monthly}</span>
+                      <strong>{formatQuotaPair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.tokens.table.dailySuccess}</span>
+                      <strong>{formatNumber(item.dailySuccess)}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.tokens.table.dailyFailure}</span>
+                      <strong>{formatNumber(item.dailyFailure)}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.dashboard.monthlySuccess}</span>
+                      <strong>{formatNumber(item.monthlySuccess)}</strong>
+                    </div>
+                    <div className="table-actions user-console-mobile-actions">
+                      <button
+                        type="button"
+                        className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
+                        onClick={() => void copyToken(item.tokenId)}
+                      >
+                        {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
+                      </button>
+                      <button type="button" className="btn btn-primary btn-sm" onClick={() => goTokenDetail(item.tokenId)}>
+                        {text.tokens.detail}
+                      </button>
+                    </div>
+                  </article>
+                )
+              })
             )}
           </div>
         </section>
@@ -388,7 +541,7 @@ export default function UserConsole(): JSX.Element {
               </div>
             </div>
 
-            <div className="access-token-box">
+            <div className="access-token-box user-console-token-box">
               <label className="token-label">{text.detail.tokenLabel}</label>
               <div className="token-input-row">
                 <div className="token-input-shell">
@@ -406,27 +559,49 @@ export default function UserConsole(): JSX.Element {
             <div className="panel-header">
               <h2>{text.detail.logs}</h2>
             </div>
-            <div className="table-wrapper">
+            <div className="table-wrapper user-console-md-up">
               {detailLogs.length === 0 ? (
                 <div className="empty-state alert">{text.detail.emptyLogs}</div>
               ) : (
-                <table className="token-detail-table">
+                <table className="token-detail-table user-console-logs-table">
                   <thead>
                     <tr>
-                      <th>{text.detail.table.time}</th>
-                      <th>{text.detail.table.http}</th>
-                      <th>{text.detail.table.mcp}</th>
+                      <th>{text.detail.table.request}</th>
+                      <th>{text.detail.table.transport}</th>
                       <th>{text.detail.table.result}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {detailLogs.map((log) => (
                       <tr key={log.id}>
-                        <td>{formatTimestamp(log.created_at)}</td>
-                        <td>{log.http_status ?? '—'}</td>
-                        <td>{log.mcp_status ?? '—'}</td>
                         <td>
-                          <StatusBadge tone={statusTone(log.result_status)}>{log.result_status}</StatusBadge>
+                          <div className="user-console-log-stack">
+                            <strong className="user-console-log-main">{formatTimestamp(log.created_at)}</strong>
+                            <span className="user-console-log-meta">
+                              {log.method} {log.path}
+                              {log.query ? ` · ${log.query}` : ''}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="user-console-log-transport">
+                            <span className="user-console-log-transport-item">
+                              <em>H</em>
+                              <strong>{log.http_status ?? '—'}</strong>
+                            </span>
+                            <span className="user-console-log-transport-item">
+                              <em>M</em>
+                              <strong>{log.mcp_status ?? '—'}</strong>
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="user-console-log-result-line">
+                            <StatusBadge className="user-console-log-status" tone={statusTone(log.result_status)}>
+                              {log.result_status}
+                            </StatusBadge>
+                            <span className="user-console-log-error">{log.error_message ?? '—'}</span>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -434,16 +609,95 @@ export default function UserConsole(): JSX.Element {
                 </table>
               )}
             </div>
+            <div className="user-console-mobile-list user-console-md-down">
+              {detailLogs.length === 0 ? (
+                <div className="empty-state alert">{text.detail.emptyLogs}</div>
+              ) : (
+                detailLogs.map((log) => (
+                  <article key={log.id} className="user-console-mobile-card">
+                    <div className="user-console-mobile-kv">
+                      <span>{text.detail.table.request}</span>
+                      <strong>{formatTimestamp(log.created_at)}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.detail.table.path}</span>
+                      <strong>{log.method} {log.path}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.detail.table.http}</span>
+                      <strong>{log.http_status ?? '—'}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.detail.table.mcp}</span>
+                      <strong>{log.mcp_status ?? '—'}</strong>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.detail.table.result}</span>
+                      <StatusBadge className="user-console-mobile-status" tone={statusTone(log.result_status)}>
+                        {log.result_status}
+                      </StatusBadge>
+                    </div>
+                    <div className="user-console-mobile-kv">
+                      <span>{text.detail.table.error}</span>
+                      <strong>{log.error_message ?? text.detail.noError}</strong>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
           </section>
 
           <section className="surface panel public-home-guide">
-            <h2>{text.detail.guideTitle}</h2>
-            <p>{text.detail.guideDescription}</p>
-            <div className="mockup-code relative guide-code-shell">
-              <pre>
-                <code>{`[mcp_servers.tavily_hikari]\nurl = "${window.location.origin}/mcp"\nbearer_token_env_var = "TAVILY_HIKARI_TOKEN"`}</code>
-              </pre>
+            <h2>{publicStrings.guide.title}</h2>
+            {isMobileGuide && (
+              <div className="guide-select" aria-label="Client selector (mobile)">
+                <MobileGuideDropdown active={activeGuide} onChange={setActiveGuide} labels={guideTabs} />
+              </div>
+            )}
+            {!isMobileGuide && (
+              <div className="guide-tabs">
+                {guideTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    className={`guide-tab${activeGuide === tab.id ? ' active' : ''}`}
+                    onClick={() => setActiveGuide(tab.id)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="guide-panel">
+              <h3>{guideDescription.title}</h3>
+              <ol>
+                {guideDescription.steps.map((step, index) => (
+                  <li key={index}>{step}</li>
+                ))}
+              </ol>
+              {guideDescription.sampleTitle && guideDescription.snippet && (
+                <div className="guide-sample">
+                  <p className="guide-sample-title">{guideDescription.sampleTitle}</p>
+                  <div className="mockup-code relative guide-code-shell">
+                    <span className="guide-lang-badge badge badge-outline badge-sm">
+                      {(guideDescription.snippetLanguage ?? 'code').toUpperCase()}
+                    </span>
+                    <pre>
+                      <code dangerouslySetInnerHTML={{ __html: guideDescription.snippet }} />
+                    </pre>
+                  </div>
+                </div>
+              )}
+              {guideDescription.reference && (
+                <p className="guide-reference">
+                  {publicStrings.guide.dataSourceLabel}
+                  <a href={guideDescription.reference.url} target="_blank" rel="noreferrer">
+                    {guideDescription.reference.label}
+                  </a>
+                </p>
+              )}
             </div>
+            {activeGuide === 'cherryStudio' && <CherryStudioMock apiKeyExample={guideToken} />}
           </section>
 
           <footer className="surface public-home-footer">
@@ -456,6 +710,302 @@ export default function UserConsole(): JSX.Element {
       )}
     </main>
   )
+}
+
+function MobileGuideDropdown({
+  active,
+  onChange,
+  labels,
+}: {
+  active: GuideKey
+  onChange: (id: GuideKey) => void
+  labels: { id: GuideKey, label: string }[]
+}): JSX.Element {
+  const icon = (id: GuideKey) => {
+    const map: Record<GuideKey, string> = {
+      codex: 'simple-icons/openai',
+      claude: 'simple-icons/anthropic',
+      vscode: 'simple-icons/visualstudiocode',
+      claudeDesktop: 'simple-icons/anthropic',
+      cursor: 'simple-icons/cursor',
+      windsurf: 'simple-icons/codeium',
+      cherryStudio: 'mdi/cherry',
+      other: 'mdi/dots-horizontal',
+    }
+    const key = map[id] ?? 'mdi/dots-horizontal'
+    return `${ICONIFY_ENDPOINT}/${key}.svg?color=%23475569`
+  }
+
+  const current = labels.find((l) => l.id === active)
+  return (
+    <div className="dropdown w-full">
+      <div tabIndex={0} role="button" className="btn btn-outline w-full justify-between btn-sm md:btn-md">
+        <span className="inline-flex items-center gap-2">
+          <img src={icon(active)} alt="client" width={18} height={18} />
+          {current?.label ?? active}
+        </span>
+        <img src={`${ICONIFY_ENDPOINT}/mdi/chevron-down.svg?color=%23647589`} alt="open" width={16} height={16} />
+      </div>
+      <ul tabIndex={0} className="menu dropdown-content bg-base-100 rounded-box z-[1] w-60 p-2 shadow mt-2">
+        {labels.map((tab) => (
+          <li key={tab.id}>
+            <button type="button" onClick={() => onChange(tab.id)} className="flex items-center gap-2">
+              <img src={icon(tab.id)} alt="" width={16} height={16} />
+              <span className="truncate">{tab.label}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function buildGuideContent(language: Language, baseUrl: string, prettyToken: string): Record<GuideKey, GuideContent> {
+  const isEnglish = language === 'en'
+  const codexSnippet = buildCodexSnippet(baseUrl)
+  const claudeSnippet = buildClaudeSnippet(baseUrl, prettyToken, language)
+  const genericJsonSnippet = buildGenericJsonSnippet(baseUrl, prettyToken)
+  const curlSnippet = buildCurlSnippet(baseUrl, prettyToken)
+
+  return {
+    codex: {
+      title: 'Codex CLI',
+      steps: isEnglish
+        ? [
+            <>Set <code>experimental_use_rmcp_client = true</code> inside <code>~/.codex/config.toml</code>.</>,
+            <>Add <code>[mcp_servers.tavily_hikari]</code>, point <code>url</code> to <code>{baseUrl}/mcp</code>, and set <code>bearer_token_env_var = TAVILY_HIKARI_TOKEN</code>.</>,
+            <>Run <code>export TAVILY_HIKARI_TOKEN="{prettyToken}"</code>, then verify with <code>codex mcp list</code> or <code>codex mcp get tavily_hikari</code>.</>,
+          ]
+        : [
+            <>在 <code>~/.codex/config.toml</code> 设定 <code>experimental_use_rmcp_client = true</code>。</>,
+            <>添加 <code>[mcp_servers.tavily_hikari]</code>，将 <code>url</code> 指向 <code>{baseUrl}/mcp</code> 并声明 <code>bearer_token_env_var = TAVILY_HIKARI_TOKEN</code>。</>,
+            <>运行 <code>export TAVILY_HIKARI_TOKEN="{prettyToken}"</code> 后，执行 <code>codex mcp list</code> 或 <code>codex mcp get tavily_hikari</code> 验证。</>,
+          ],
+      sampleTitle: isEnglish ? 'Example: ~/.codex/config.toml' : '示例：~/.codex/config.toml',
+      snippetLanguage: 'toml',
+      snippet: codexSnippet,
+      reference: {
+        label: 'OpenAI Codex docs',
+        url: CODEX_DOC_URL,
+      },
+    },
+    claude: {
+      title: 'Claude Code CLI',
+      steps: isEnglish
+        ? [
+            <>Use <code>claude mcp add-json</code> to register Tavily Hikari as an HTTP MCP endpoint.</>,
+            <>Run <code>claude mcp get tavily-hikari</code> to confirm the connection or troubleshoot errors.</>,
+          ]
+        : [
+            <>参考下方命令，使用 <code>claude mcp add-json</code> 注册 Tavily Hikari HTTP MCP。</>,
+            <>运行 <code>claude mcp get tavily-hikari</code> 查看状态或排查错误。</>,
+          ],
+      sampleTitle: isEnglish ? 'Example: claude mcp add-json' : '示例：claude mcp add-json',
+      snippetLanguage: 'bash',
+      snippet: claudeSnippet,
+      reference: {
+        label: 'Claude Code MCP docs',
+        url: CLAUDE_DOC_URL,
+      },
+    },
+    vscode: {
+      title: 'VS Code / Copilot',
+      steps: isEnglish
+        ? [
+            <>Add Tavily Hikari to VS Code Copilot <code>mcp.json</code> (or <code>.code-workspace</code>/<code>devcontainer.json</code> under <code>customizations.vscode.mcp</code>).</>,
+            <>Set <code>type</code> to <code>"http"</code>, <code>url</code> to <code>{baseUrl}/mcp</code>, and place <code>Bearer {prettyToken}</code> in <code>headers.Authorization</code>.</>,
+            <>Reload Copilot Chat to apply changes, keeping it aligned with the <a href={VSCODE_DOC_URL} rel="noreferrer" target="_blank">official guide</a>.</>,
+          ]
+        : [
+            <>在 VS Code Copilot <code>mcp.json</code>（或 <code>.code-workspace</code>/<code>devcontainer.json</code> 的 <code>customizations.vscode.mcp</code>）添加服务器节点。</>,
+            <>设置 <code>type</code> 为 <code>"http"</code>、<code>url</code> 为 <code>{baseUrl}/mcp</code>，并在 <code>headers.Authorization</code> 写入 <code>Bearer {prettyToken}</code>。</>,
+            <>保存后重新打开 Copilot Chat，使配置与 <a href={VSCODE_DOC_URL} rel="noreferrer" target="_blank">官方指南</a> 保持一致。</>,
+          ],
+      sampleTitle: isEnglish ? 'Example: mcp.json' : '示例：mcp.json',
+      snippetLanguage: 'json',
+      snippet: buildVscodeSnippet(baseUrl, prettyToken),
+      reference: {
+        label: 'VS Code Copilot MCP docs',
+        url: VSCODE_DOC_URL,
+      },
+    },
+    claudeDesktop: {
+      title: 'Claude Desktop',
+      steps: isEnglish
+        ? [
+            <>Open <code>⌘+,</code> → <strong>Develop</strong> → <code>Edit Config</code>, then update <code>claude_desktop_config.json</code> following the official docs.</>,
+            <>Keep the endpoint defined below, save the file, and restart Claude Desktop to load the new tool list.</>,
+          ]
+        : [
+            <>打开 <code>⌘+,</code> → <strong>Develop</strong> → <code>Edit Config</code>，按照官方文档将 MCP JSON 写入本地 <code>claude_desktop_config.json</code>。</>,
+            <>在 JSON 中保留我们提供的 endpoint，保存后重启 Claude Desktop 以载入新的工具列表。</>,
+          ],
+      sampleTitle: isEnglish ? 'Example: claude_desktop_config.json' : '示例：claude_desktop_config.json',
+      snippetLanguage: 'json',
+      snippet: genericJsonSnippet,
+      reference: {
+        label: 'NocoDB MCP docs',
+        url: NOCODB_DOC_URL,
+      },
+    },
+    cursor: {
+      title: 'Cursor',
+      steps: isEnglish
+        ? [
+            <>Open Cursor Settings (<code>⇧+⌘+J</code>) → <strong>MCP → Add Custom MCP</strong> and edit the global <code>mcp.json</code>.</>,
+            <>Paste the configuration below, save it, and confirm “tools enabled” inside the MCP panel.</>,
+          ]
+        : [
+            <>在 Cursor 设置（<code>⇧+⌘+J</code>）中打开 <strong>MCP → Add Custom MCP</strong>，按照官方指南编辑全局 <code>mcp.json</code>。</>,
+            <>粘贴下方配置并保存，回到 MCP 面板确认条目显示 “tools enabled”。</>,
+          ],
+      sampleTitle: isEnglish ? 'Example: ~/.cursor/mcp.json' : '示例：~/.cursor/mcp.json',
+      snippetLanguage: 'json',
+      snippet: genericJsonSnippet,
+      reference: {
+        label: 'NocoDB MCP docs',
+        url: NOCODB_DOC_URL,
+      },
+    },
+    windsurf: {
+      title: 'Windsurf',
+      steps: isEnglish
+        ? [
+            <>In Windsurf, click the hammer icon in the MCP sidebar → <strong>Configure</strong>, then choose <strong>View raw config</strong> to open <code>mcp_config.json</code>.</>,
+            <>Insert the snippet under <code>mcpServers</code>, save, and click <strong>Refresh</strong> on Manage Plugins to reload tools.</>,
+          ]
+        : [
+            <>在 Windsurf 中点击 MCP 侧边栏的锤子图标 → <strong>Configure</strong>，再选择 <strong>View raw config</strong> 打开 <code>mcp_config.json</code>。</>,
+            <>将下方片段写入 <code>mcpServers</code>，保存后在 Manage Plugins 页点击 <strong>Refresh</strong> 以加载新工具。</>,
+          ],
+      sampleTitle: isEnglish ? 'Example: ~/.codeium/windsurf/mcp_config.json' : '示例：~/.codeium/windsurf/mcp_config.json',
+      snippetLanguage: 'json',
+      snippet: genericJsonSnippet,
+      reference: {
+        label: 'NocoDB MCP docs',
+        url: NOCODB_DOC_URL,
+      },
+    },
+    cherryStudio: {
+      title: isEnglish ? 'Cherry Studio' : 'Cherry Studio 桌面客户端',
+      steps: isEnglish
+        ? [
+            <>1. Copy your Tavily Hikari access token (for example <code>{prettyToken}</code>) for this client.</>,
+            <>2. In Cherry Studio, open <strong>Settings → Web Search</strong>.</>,
+            <>3. Choose the search provider <strong>Tavily (API key)</strong>.</>,
+            <>
+              4. Set <strong>API URL</strong> to <code>{baseUrl}/api/tavily</code>.
+            </>,
+            <>
+              5. Set <strong>API key</strong> to the Hikari access token from step 1 (the full <code>{prettyToken}</code> value),{' '}
+              <strong>not</strong> your Tavily official API key.
+            </>,
+            <>
+              6. Optionally tweak result count, answer/date options, etc. Cherry Studio will send these fields through to
+              Tavily, while Hikari rotates Tavily keys and enforces per-token quotas.
+            </>,
+          ]
+        : [
+            <>1）准备好当前客户端要使用的 Tavily Hikari 访问令牌（例如 <code>{prettyToken}</code>）。</>,
+            <>2）在 Cherry Studio 中打开 <strong>设置 → 网络搜索（Web Search）</strong>。</>,
+            <>3）将搜索服务商设置为 <strong>Tavily (API key)</strong>。</>,
+            <>
+              4）将 <strong>API 地址 / API URL</strong> 设置为 <code>{baseUrl}/api/tavily</code>。
+            </>,
+            <>
+              5）将 <strong>API 密钥 / API key</strong> 填写为步骤 1 中复制的 Hikari 访问令牌（完整的 <code>{prettyToken}</code>），而不是
+              Tavily 官方 API key。
+            </>,
+            <>6）可按需在 Cherry 中调整返回条数、是否附带答案/日期等选项。</>,
+          ],
+    },
+    other: {
+      title: isEnglish ? 'Other clients' : '其他 MCP 客户端',
+      steps: isEnglish
+        ? [
+            <>Endpoint: <code>{baseUrl}/mcp</code> (Streamable HTTP).</>,
+            <>Auth: HTTP header <code>Authorization: Bearer {prettyToken}</code>.</>,
+            <>Any MCP-compatible client can target this URL with the header attached.</>,
+          ]
+        : [
+            <>端点：<code>{baseUrl}/mcp</code>（Streamable HTTP）。</>,
+            <>认证：HTTP Header <code>Authorization: Bearer {prettyToken}</code>。</>,
+            <>适用于任意兼容客户端，直接指向该 URL 并附带上述头部即可。</>,
+          ],
+      sampleTitle: isEnglish ? 'Example: generic request' : '示例：通用请求',
+      snippetLanguage: 'bash',
+      snippet: curlSnippet,
+      reference: {
+        label: 'Model Context Protocol spec',
+        url: MCP_SPEC_URL,
+      },
+    },
+  }
+}
+
+function buildCodexSnippet(baseUrl: string): string {
+  return [
+    '<span class="hl-comment"># ~/.codex/config.toml</span>',
+    '<span class="hl-key">experimental_use_rmcp_client</span> = <span class="hl-boolean">true</span>',
+    '',
+    '[<span class="hl-section">mcp_servers.tavily_hikari</span>]',
+    `<span class="hl-key">url</span> = <span class="hl-string">"${baseUrl}/mcp"</span>`,
+    '<span class="hl-key">bearer_token_env_var</span> = <span class="hl-string">"TAVILY_HIKARI_TOKEN"</span>',
+  ].join('\n')
+}
+
+function buildClaudeSnippet(baseUrl: string, prettyToken: string, language: Language): string {
+  const verifyLabel = language === 'en' ? '# Verify' : '# 验证'
+  return [
+    '<span class="hl-comment"># claude mcp add-json</span>',
+    `claude mcp add-json tavily-hikari '{`,
+    `  <span class="hl-key">"type"</span>: <span class="hl-string">"http"</span>,`,
+    `  <span class="hl-key">"url"</span>: <span class="hl-string">"${baseUrl}/mcp"</span>,`,
+    '  <span class="hl-key">"headers"</span>: {',
+    `    <span class="hl-key">"Authorization"</span>: <span class="hl-string">"Bearer ${prettyToken}"</span>`,
+    '  }',
+    "}'",
+    '',
+    verifyLabel,
+    'claude mcp get tavily-hikari',
+  ].join('\n')
+}
+
+function buildVscodeSnippet(baseUrl: string, prettyToken: string): string {
+  return [
+    '{',
+    '  <span class="hl-key">"servers"</span>: {',
+    '    <span class="hl-key">"tavily-hikari"</span>: {',
+    '      <span class="hl-key">"type"</span>: <span class="hl-string">"http"</span>,',
+    `      <span class="hl-key">"url"</span>: <span class="hl-string">"${baseUrl}/mcp"</span>,`,
+    '      <span class="hl-key">"headers"</span>: {',
+    `        <span class="hl-key">"Authorization"</span>: <span class="hl-string">"Bearer ${prettyToken}"</span>`,
+    '      }',
+    '    }',
+    '  }',
+    '}',
+  ].join('\n')
+}
+
+function buildGenericJsonSnippet(baseUrl: string, prettyToken: string): string {
+  return `{
+  <span class="hl-key">"mcpServers"</span>: {
+    <span class="hl-key">"tavily-hikari"</span>: {
+      <span class="hl-key">"type"</span>: <span class="hl-string">"http"</span>,
+      <span class="hl-key">"url"</span>: <span class="hl-string">"${baseUrl}/mcp"</span>,
+      <span class="hl-key">"headers"</span>: {
+        <span class="hl-key">"Authorization"</span>: <span class="hl-string">"Bearer ${prettyToken}"</span>
+      }
+    }
+  }
+}`
+}
+
+function buildCurlSnippet(baseUrl: string, prettyToken: string): string {
+  return `curl -X POST \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${prettyToken}" \\
+  ${baseUrl}/mcp`
 }
 
 const EN = {
@@ -484,6 +1034,8 @@ const EN = {
     detail: 'Details',
     table: {
       id: 'Token ID',
+      quotas: 'Quota Windows',
+      stats: 'Usage Stats',
       any: 'Any Req (1h)',
       hourly: 'Hourly',
       daily: 'Daily',
@@ -503,11 +1055,17 @@ const EN = {
     guideTitle: 'Client Setup',
     guideDescription: 'Use the same MCP configuration as the public homepage.',
     table: {
+      request: 'Request',
+      transport: 'HTTP / MCP',
+      path: 'Path',
       time: 'Time',
       http: 'HTTP',
       mcp: 'MCP',
       result: 'Result',
+      error: 'Error',
     },
+    noQuery: 'No query string',
+    noError: 'No error message',
   },
   errors: {
     load: 'Failed to load console data',
@@ -541,6 +1099,8 @@ const ZH = {
     detail: '详情',
     table: {
       id: 'Token ID',
+      quotas: '配额窗口',
+      stats: '用量统计',
       any: '任意请求(1h)',
       hourly: '小时',
       daily: '日',
@@ -560,11 +1120,17 @@ const ZH = {
     guideTitle: '客户端接入',
     guideDescription: '沿用首页的 MCP 配置方式即可接入。',
     table: {
+      request: '请求',
+      transport: 'HTTP / MCP',
+      path: '路径',
       time: '时间',
       http: 'HTTP',
       mcp: 'MCP',
       result: '结果',
+      error: '错误',
     },
+    noQuery: '无查询参数',
+    noError: '无错误信息',
   },
   errors: {
     load: '加载控制台数据失败',
