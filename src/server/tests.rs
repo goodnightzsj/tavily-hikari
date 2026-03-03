@@ -1574,6 +1574,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tavily_http_search_rejects_negative_max_results() {
+        let db_path = temp_db_path("http-search-max-results-negative");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-http-search-max-results-key".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let access_token = proxy
+            .create_access_token(Some("http-search-max-results"))
+            .await
+            .expect("create token");
+
+        let proxy_addr = spawn_proxy_server(proxy, "http://127.0.0.1:9".to_string()).await;
+        let client = Client::new();
+        let url = format!("http://{}/api/tavily/search", proxy_addr);
+        let resp = client
+            .post(url)
+            .json(&serde_json::json!({
+                "api_key": access_token.token,
+                "query": "negative max_results should be rejected",
+                "max_results": -1
+            }))
+            .send()
+            .await
+            .expect("request sent");
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let payload: Value = resp.json().await.expect("json response");
+        assert_eq!(
+            payload.get("error"),
+            Some(&serde_json::Value::String("invalid_request".into()))
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn tavily_http_map_skips_hourly_any_request_limiter() {
+        let db_path = temp_db_path("http-map-hourly-any-bypass");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let previous_limit = std::env::var("TOKEN_HOURLY_REQUEST_LIMIT").ok();
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "1");
+        }
+
+        let expected_api_key = "tvly-http-map-hourly-any-key";
+        let proxy = TavilyProxy::with_endpoint(
+            vec![expected_api_key.to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let access_token = proxy
+            .create_access_token(Some("hourly-any-map"))
+            .await
+            .expect("create token");
+
+        let upstream_addr = spawn_http_map_mock_asserting_api_key(expected_api_key.to_string()).await;
+        let usage_base = format!("http://{}", upstream_addr);
+        let proxy_addr = spawn_proxy_server(proxy.clone(), usage_base).await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/tavily/map", proxy_addr);
+
+        let first = client
+            .post(url.clone())
+            .json(&serde_json::json!({
+                "api_key": access_token.token,
+                "url": "https://example.com"
+            }))
+            .send()
+            .await
+            .expect("first request");
+        assert!(first.status().is_success(), "first request should pass");
+
+        let second = client
+            .post(url)
+            .json(&serde_json::json!({
+                "api_key": access_token.token,
+                "url": "https://example.com/second"
+            }))
+            .send()
+            .await
+            .expect("second request");
+        assert!(
+            second.status().is_success(),
+            "map should not be blocked by hourly-any limit, got {}",
+            second.status()
+        );
+
+        unsafe {
+            if let Some(prev) = previous_limit {
+                std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", prev);
+            } else {
+                std::env::remove_var("TOKEN_HOURLY_REQUEST_LIMIT");
+            }
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn tavily_http_search_replaces_body_api_key_with_tavily_key() {
         let db_path = temp_db_path("http-search-replace-key");
         let db_str = db_path.to_string_lossy().to_string();

@@ -98,3 +98,4 @@
 
 - 2026-03-04: 创建规格，冻结“最小风险模块化 + 成功响应契约稳定”实施边界。
 - 2026-03-04: 完成 `src/server.rs` 拆分到 `src/server/**`；新增 `tests/server_http_contract.rs` 黑盒契约测试；本地 `cargo fmt`、`cargo clippy -- -D warnings`、`cargo test` 通过。
+- 2026-03-04: review-loop 第 1 轮补齐测试健壮性：`BackendGuard` 统一清理子进程；新增 `max_results < 0` 与 map hourly-any 分支回归测试。

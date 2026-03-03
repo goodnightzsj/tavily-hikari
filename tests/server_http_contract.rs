@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use axum::extract::Json;
@@ -15,6 +15,19 @@ use tokio::sync::oneshot;
 
 fn temp_db_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{}-{}.db", prefix, nanoid!(8)))
+}
+
+struct BackendGuard {
+    child: Child,
+    db_path: PathBuf,
+}
+
+impl Drop for BackendGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.db_path);
+    }
 }
 
 async fn spawn_mock_upstream(
@@ -92,19 +105,15 @@ async fn wait_for_health(port: u16) {
     panic!("server did not become healthy in time");
 }
 
-fn spawn_backend_process(
-    port: u16,
-    upstream_addr: SocketAddr,
-    db_path: &PathBuf,
-) -> std::process::Child {
+fn spawn_backend_process(port: u16, upstream_addr: SocketAddr, db_path: PathBuf) -> BackendGuard {
     let binary = env!("CARGO_BIN_EXE_tavily-hikari");
-    std::process::Command::new(binary)
+    let child = std::process::Command::new(binary)
         .arg("--bind")
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
         .arg("--db-path")
-        .arg(db_path)
+        .arg(&db_path)
         .arg("--keys")
         .arg("tvly-test-key")
         .arg("--upstream")
@@ -115,7 +124,8 @@ fn spawn_backend_process(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn backend")
+        .expect("spawn backend");
+    BackendGuard { child, db_path }
 }
 
 #[tokio::test]
@@ -127,7 +137,7 @@ async fn health_endpoint_is_stable_after_modularization() {
     drop(listener);
 
     let db_path = temp_db_path("server-http-contract-health");
-    let mut child = spawn_backend_process(port, upstream_addr, &db_path);
+    let _backend = spawn_backend_process(port, upstream_addr, db_path);
 
     wait_for_health(port).await;
 
@@ -137,10 +147,6 @@ async fn health_endpoint_is_stable_after_modularization() {
         .await
         .expect("health request");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -152,7 +158,7 @@ async fn search_endpoint_rewrites_upstream_credentials() {
     drop(listener);
 
     let db_path = temp_db_path("server-http-contract-search");
-    let mut child = spawn_backend_process(port, upstream_addr, &db_path);
+    let _backend = spawn_backend_process(port, upstream_addr, db_path);
 
     wait_for_health(port).await;
 
@@ -174,8 +180,4 @@ async fn search_endpoint_rewrites_upstream_credentials() {
         .expect("receive forwarded credentials");
     assert_eq!(forwarded_auth, "Bearer tvly-test-key");
     assert_eq!(forwarded_api_key, "tvly-test-key");
-
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_file(db_path);
 }
