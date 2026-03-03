@@ -11,6 +11,7 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tavily_hikari::DEFAULT_UPSTREAM;
     use tokio::net::TcpListener;
 
@@ -19,18 +20,29 @@ mod tests {
         std::env::temp_dir().join(file)
     }
 
+    fn env_var_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<String>,
+        _lock: MutexGuard<'static, ()>,
     }
 
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            let lock = env_var_test_lock().lock().expect("env var test lock poisoned");
             let previous = std::env::var(key).ok();
             unsafe {
                 std::env::set_var(key, value);
             }
-            Self { key, previous }
+            Self {
+                key,
+                previous,
+                _lock: lock,
+            }
         }
     }
 

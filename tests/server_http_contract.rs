@@ -91,7 +91,7 @@ async fn spawn_mock_upstream(
     (addr, rx)
 }
 
-async fn wait_for_health(port: u16) {
+async fn wait_for_health_ready(port: u16) -> bool {
     let client = Client::new();
     for _ in 0..80 {
         if let Ok(resp) = client
@@ -101,15 +101,11 @@ async fn wait_for_health(port: u16) {
             .await
             && resp.status().is_success()
         {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("server did not become healthy in time");
-}
-
-fn spawn_backend_process(port: u16, upstream_addr: SocketAddr, db_path: PathBuf) -> BackendGuard {
-    spawn_backend_process_with_mode(port, upstream_addr, db_path, true)
+    false
 }
 
 fn spawn_backend_process_with_mode(
@@ -144,6 +140,35 @@ fn spawn_backend_process_with_mode(
     BackendGuard { child, db_path }
 }
 
+async fn spawn_backend_ready(
+    upstream_addr: SocketAddr,
+    db_path: PathBuf,
+    dev_open_admin: bool,
+) -> (BackendGuard, u16) {
+    const MAX_RETRIES: usize = 5;
+    for attempt in 1..=MAX_RETRIES {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let backend =
+            spawn_backend_process_with_mode(port, upstream_addr, db_path.clone(), dev_open_admin);
+        if wait_for_health_ready(port).await {
+            return (backend, port);
+        }
+
+        drop(backend);
+        if attempt < MAX_RETRIES {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    panic!(
+        "backend did not become healthy after {} retries",
+        MAX_RETRIES
+    );
+}
+
 async fn assert_upstream_rewrite_contract(
     api_path: &str,
     upstream_path: &'static str,
@@ -151,14 +176,8 @@ async fn assert_upstream_rewrite_contract(
 ) {
     let (upstream_addr, rx) = spawn_mock_upstream("tvly-test-key".to_string(), upstream_path).await;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
     let db_path = temp_db_path("server-http-contract-endpoint");
-    let _backend = spawn_backend_process(port, upstream_addr, db_path);
-
-    wait_for_health(port).await;
+    let (_backend, port) = spawn_backend_ready(upstream_addr, db_path, true).await;
 
     let resp = Client::new()
         .post(format!("http://127.0.0.1:{port}{api_path}"))
@@ -201,14 +220,8 @@ async fn insert_auth_token(db_path: &Path, id: &str, secret: &str) {
 async fn health_endpoint_is_stable_after_modularization() {
     let (upstream_addr, _rx) = spawn_mock_upstream("tvly-test-key".to_string(), "/search").await;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
     let db_path = temp_db_path("server-http-contract-health");
-    let _backend = spawn_backend_process(port, upstream_addr, db_path);
-
-    wait_for_health(port).await;
+    let (_backend, port) = spawn_backend_ready(upstream_addr, db_path, true).await;
 
     let resp = Client::new()
         .get(format!("http://127.0.0.1:{port}/health"))
@@ -270,14 +283,8 @@ async fn extract_crawl_map_endpoints_rewrite_upstream_credentials() {
 async fn search_endpoint_requires_valid_token_when_dev_open_admin_disabled() {
     let (upstream_addr, _rx) = spawn_mock_upstream("tvly-test-key".to_string(), "/search").await;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
     let db_path = temp_db_path("server-http-contract-auth");
-    let _backend = spawn_backend_process_with_mode(port, upstream_addr, db_path.clone(), false);
-
-    wait_for_health(port).await;
+    let (_backend, port) = spawn_backend_ready(upstream_addr, db_path.clone(), false).await;
 
     let client = Client::new();
     let invalid = client
