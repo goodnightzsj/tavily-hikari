@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Duration;
 
@@ -7,9 +7,11 @@ use axum::extract::Json;
 use axum::http::HeaderMap;
 use axum::routing::{any, post};
 use axum::{Router, body::Body, http::StatusCode};
+use chrono::Utc;
 use nanoid::nanoid;
 use reqwest::Client;
 use serde_json::Value;
+use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
@@ -32,12 +34,13 @@ impl Drop for BackendGuard {
 
 async fn spawn_mock_upstream(
     expected_api_key: String,
+    upstream_path: &'static str,
 ) -> (SocketAddr, oneshot::Receiver<(String, String)>) {
     let (tx, rx) = oneshot::channel::<(String, String)>();
     let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
     let app = Router::new()
         .route(
-            "/search",
+            upstream_path,
             post({
                 let tx = tx.clone();
                 move |headers: HeaderMap, Json(body): Json<Value>| {
@@ -106,9 +109,18 @@ async fn wait_for_health(port: u16) {
 }
 
 fn spawn_backend_process(port: u16, upstream_addr: SocketAddr, db_path: PathBuf) -> BackendGuard {
+    spawn_backend_process_with_mode(port, upstream_addr, db_path, true)
+}
+
+fn spawn_backend_process_with_mode(
+    port: u16,
+    upstream_addr: SocketAddr,
+    db_path: PathBuf,
+    dev_open_admin: bool,
+) -> BackendGuard {
     let binary = env!("CARGO_BIN_EXE_tavily-hikari");
-    let child = std::process::Command::new(binary)
-        .arg("--bind")
+    let mut cmd = std::process::Command::new(binary);
+    cmd.arg("--bind")
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
@@ -119,8 +131,12 @@ fn spawn_backend_process(port: u16, upstream_addr: SocketAddr, db_path: PathBuf)
         .arg("--upstream")
         .arg(format!("http://{upstream_addr}/mcp"))
         .arg("--usage-base")
-        .arg(format!("http://{upstream_addr}"))
-        .arg("--dev-open-admin")
+        .arg(format!("http://{upstream_addr}"));
+    if dev_open_admin {
+        cmd.arg("--dev-open-admin");
+    }
+
+    let child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -128,9 +144,62 @@ fn spawn_backend_process(port: u16, upstream_addr: SocketAddr, db_path: PathBuf)
     BackendGuard { child, db_path }
 }
 
+async fn assert_upstream_rewrite_contract(
+    api_path: &str,
+    upstream_path: &'static str,
+    request_body: Value,
+) {
+    let (upstream_addr, rx) = spawn_mock_upstream("tvly-test-key".to_string(), upstream_path).await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let db_path = temp_db_path("server-http-contract-endpoint");
+    let _backend = spawn_backend_process(port, upstream_addr, db_path);
+
+    wait_for_health(port).await;
+
+    let resp = Client::new()
+        .post(format!("http://127.0.0.1:{port}{api_path}"))
+        .json(&request_body)
+        .send()
+        .await
+        .expect("endpoint request");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let (forwarded_auth, forwarded_api_key) = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("mock upstream timeout")
+        .expect("receive forwarded credentials");
+    assert_eq!(forwarded_auth, "Bearer tvly-test-key");
+    assert_eq!(forwarded_api_key, "tvly-test-key");
+}
+
+async fn insert_auth_token(db_path: &Path, id: &str, secret: &str) {
+    let db_url = format!("sqlite://{}", db_path.display());
+    let pool = SqlitePool::connect(&db_url).await.expect("connect sqlite");
+    let now = Utc::now().timestamp();
+    sqlx::query(
+        r#"
+        INSERT INTO auth_tokens
+            (id, secret, enabled, note, group_name, total_requests, created_at, last_used_at, deleted_at)
+        VALUES
+            (?, ?, 1, '', NULL, 0, ?, NULL, NULL)
+        "#,
+    )
+    .bind(id)
+    .bind(secret)
+    .bind(now)
+    .execute(&pool)
+    .await
+    .expect("insert auth token");
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn health_endpoint_is_stable_after_modularization() {
-    let (upstream_addr, _rx) = spawn_mock_upstream("tvly-test-key".to_string()).await;
+    let (upstream_addr, _rx) = spawn_mock_upstream("tvly-test-key".to_string(), "/search").await;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -151,33 +220,88 @@ async fn health_endpoint_is_stable_after_modularization() {
 
 #[tokio::test]
 async fn search_endpoint_rewrites_upstream_credentials() {
-    let (upstream_addr, rx) = spawn_mock_upstream("tvly-test-key".to_string()).await;
+    assert_upstream_rewrite_contract(
+        "/api/tavily/search",
+        "/search",
+        serde_json::json!({
+            "query": "modularization contract",
+            "api_key": "th-demo-token",
+            "max_results": 3
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn extract_crawl_map_endpoints_rewrite_upstream_credentials() {
+    let scenarios = vec![
+        (
+            "/api/tavily/extract",
+            "/extract",
+            serde_json::json!({
+                "api_key": "th-demo-token",
+                "urls": ["https://example.com/a"]
+            }),
+        ),
+        (
+            "/api/tavily/crawl",
+            "/crawl",
+            serde_json::json!({
+                "api_key": "th-demo-token",
+                "url": "https://example.com"
+            }),
+        ),
+        (
+            "/api/tavily/map",
+            "/map",
+            serde_json::json!({
+                "api_key": "th-demo-token",
+                "url": "https://example.com"
+            }),
+        ),
+    ];
+
+    for (api_path, upstream_path, payload) in scenarios {
+        assert_upstream_rewrite_contract(api_path, upstream_path, payload).await;
+    }
+}
+
+#[tokio::test]
+async fn search_endpoint_requires_valid_token_when_dev_open_admin_disabled() {
+    let (upstream_addr, _rx) = spawn_mock_upstream("tvly-test-key".to_string(), "/search").await;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
-    let db_path = temp_db_path("server-http-contract-search");
-    let _backend = spawn_backend_process(port, upstream_addr, db_path);
+    let db_path = temp_db_path("server-http-contract-auth");
+    let _backend = spawn_backend_process_with_mode(port, upstream_addr, db_path.clone(), false);
 
     wait_for_health(port).await;
 
-    let resp = Client::new()
+    let client = Client::new();
+    let invalid = client
         .post(format!("http://127.0.0.1:{port}/api/tavily/search"))
         .json(&serde_json::json!({
-            "query": "modularization contract",
-            "api_key": "th-demo-token",
-            "max_results": 3
+            "query": "contract invalid token",
+            "api_key": "th-bad1-invalid1234"
         }))
         .send()
         .await
-        .expect("search request");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        .expect("invalid token request");
+    assert_eq!(invalid.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    let (forwarded_auth, forwarded_api_key) = tokio::time::timeout(Duration::from_secs(2), rx)
+    insert_auth_token(&db_path, "a1b2", "abcdefghijkl").await;
+
+    let valid = client
+        .post(format!("http://127.0.0.1:{port}/api/tavily/search"))
+        .json(&serde_json::json!({
+            "query": "contract valid token",
+            "api_key": "th-a1b2-abcdefghijkl",
+            "max_results": 1
+        }))
+        .send()
         .await
-        .expect("mock upstream timeout")
-        .expect("receive forwarded credentials");
-    assert_eq!(forwarded_auth, "Bearer tvly-test-key");
-    assert_eq!(forwarded_api_key, "tvly-test-key");
+        .expect("valid token request");
+    assert_eq!(valid.status(), reqwest::StatusCode::OK);
 }
