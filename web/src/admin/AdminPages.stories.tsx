@@ -1405,60 +1405,95 @@ function UserDetailPageCanvas(): JSX.Element {
           <table className="jobs-table admin-users-table admin-user-tokens-table">
             <thead>
               <tr>
-                <th>{users.tokens.table.id}</th>
-                <th>{users.tokens.table.note}</th>
-                <th>{users.tokens.table.status}</th>
-                <th>{users.tokens.table.hourlyAny}</th>
-                <th>{users.tokens.table.hourly}</th>
-                <th>{users.tokens.table.daily}</th>
-                <th>{users.tokens.table.monthly}</th>
-                <th>{users.tokens.table.successDaily}</th>
-                <th>{users.tokens.table.successMonthly}</th>
-                <th>{users.tokens.table.lastUsed}</th>
+                <th>{`${users.tokens.table.id} · ${users.tokens.table.note}`}</th>
+                <th>{`${users.tokens.table.status} · ${users.tokens.table.lastUsed}`}</th>
+                <th>{`${users.tokens.table.hourlyAny} · ${users.tokens.table.hourly}`}</th>
+                <th>{`${users.tokens.table.daily} · ${users.tokens.table.monthly}`}</th>
+                <th>{`${users.tokens.table.successDaily} · ${users.tokens.table.successMonthly}`}</th>
                 <th>{users.tokens.table.actions}</th>
               </tr>
             </thead>
             <tbody>
-              {detail.tokens.map((token) => (
-                <tr key={token.tokenId}>
-                  <td>
-                    <code>{token.tokenId}</code>
-                  </td>
-                  <td>{token.note || '—'}</td>
-                  <td>
-                    <StatusBadge tone={token.enabled ? 'success' : 'neutral'}>
-                      {token.enabled ? users.status.enabled : users.status.disabled}
-                    </StatusBadge>
-                  </td>
-                  <td>
-                    {formatNumber(token.hourlyAnyUsed)} / {formatNumber(token.hourlyAnyLimit)}
-                  </td>
-                  <td>
-                    {formatNumber(token.quotaHourlyUsed)} / {formatNumber(token.quotaHourlyLimit)}
-                  </td>
-                  <td>
-                    {formatNumber(token.quotaDailyUsed)} / {formatNumber(token.quotaDailyLimit)}
-                  </td>
-                  <td>
-                    {formatNumber(token.quotaMonthlyUsed)} / {formatNumber(token.quotaMonthlyLimit)}
-                  </td>
-                  <td>
-                    {formatNumber(token.dailySuccess)} / {formatNumber(token.dailyFailure)}
-                  </td>
-                  <td>{formatNumber(token.monthlySuccess)}</td>
-                  <td>{formatTimestamp(token.lastUsedAt)}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="btn btn-circle btn-ghost btn-sm"
-                      title={users.tokens.actions.view}
-                      aria-label={users.tokens.actions.view}
-                    >
-                      <Icon icon="mdi:eye-outline" width={16} height={16} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {detail.tokens.map((token) => {
+                const hourlyAnyText = `${formatNumber(token.hourlyAnyUsed)} / ${formatNumber(token.hourlyAnyLimit)}`
+                const hourlyText = `${formatNumber(token.quotaHourlyUsed)} / ${formatNumber(token.quotaHourlyLimit)}`
+                const dailyText = `${formatNumber(token.quotaDailyUsed)} / ${formatNumber(token.quotaDailyLimit)}`
+                const monthlyText = `${formatNumber(token.quotaMonthlyUsed)} / ${formatNumber(token.quotaMonthlyLimit)}`
+                const successDailyText = `${formatNumber(token.dailySuccess)} / ${formatNumber(token.dailyFailure)}`
+                const successMonthlyText = formatNumber(token.monthlySuccess)
+                return (
+                  <tr key={token.tokenId}>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <code className="token-compact-value">{token.tokenId}</code>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-value">{token.note || '—'}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <StatusBadge tone={token.enabled ? 'success' : 'neutral'}>
+                            {token.enabled ? users.status.enabled : users.status.disabled}
+                          </StatusBadge>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-value">{formatTimestamp(token.lastUsedAt)}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.hourlyAny}</span>
+                          <span className="token-compact-value">{hourlyAnyText}</span>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.hourly}</span>
+                          <span className="token-compact-value">{hourlyText}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.daily}</span>
+                          <span className="token-compact-value">{dailyText}</span>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.monthly}</span>
+                          <span className="token-compact-value">{monthlyText}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.successDaily}</span>
+                          <span className="token-compact-value">{successDailyText}</span>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.successMonthly}</span>
+                          <span className="token-compact-value">{successMonthlyText}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-circle btn-ghost btn-sm"
+                        title={users.tokens.actions.view}
+                        aria-label={users.tokens.actions.view}
+                      >
+                        <Icon icon="mdi:eye-outline" width={16} height={16} />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

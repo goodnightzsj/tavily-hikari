@@ -3249,14 +3249,56 @@ tbody tr:hover {
 }
 
 .jobs-table.admin-user-tokens-table {
-  min-width: 1320px;
+  min-width: 940px;
+}
+
+.jobs-table.admin-user-tokens-table th:nth-child(1),
+.jobs-table.admin-user-tokens-table td:nth-child(1) {
+  min-width: 13rem;
 }
 
 .jobs-table.admin-user-tokens-table th:nth-child(2),
-.jobs-table.admin-user-tokens-table td:nth-child(2) {
-  max-width: 16rem;
+.jobs-table.admin-user-tokens-table td:nth-child(2),
+.jobs-table.admin-user-tokens-table th:nth-child(3),
+.jobs-table.admin-user-tokens-table td:nth-child(3),
+.jobs-table.admin-user-tokens-table th:nth-child(4),
+.jobs-table.admin-user-tokens-table td:nth-child(4),
+.jobs-table.admin-user-tokens-table th:nth-child(5),
+.jobs-table.admin-user-tokens-table td:nth-child(5) {
+  min-width: 10.5rem;
+}
+
+.token-compact-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.token-compact-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.token-compact-label {
+  flex-shrink: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.76rem;
+}
+
+.token-compact-value {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-compact-pair .status-badge {
+  width: fit-content;
 }
 
 .user-console-tokens-table,
