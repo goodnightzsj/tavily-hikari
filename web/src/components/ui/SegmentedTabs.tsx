@@ -1,5 +1,6 @@
 import * as React from 'react'
 
+import { useViewportMode } from '../../lib/responsive'
 import { cn } from '../../lib/utils'
 
 export interface SegmentedTabsOption<T extends string = string> {
@@ -16,6 +17,15 @@ interface SegmentedTabsProps<T extends string = string> {
   className?: string
 }
 
+function labelToPlainText(node: React.ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map((item) => labelToPlainText(item)).join('').trim()
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return labelToPlainText(node.props.children).trim()
+  }
+  return ''
+}
+
 export default function SegmentedTabs<T extends string = string>({
   value,
   onChange,
@@ -23,6 +33,27 @@ export default function SegmentedTabs<T extends string = string>({
   ariaLabel,
   className,
 }: SegmentedTabsProps<T>): JSX.Element {
+  const viewportMode = useViewportMode()
+
+  if (viewportMode === 'small') {
+    return (
+      <div className={cn('segmented-tabs segmented-tabs-mobile', className)}>
+        <select
+          className="segmented-tabs-select"
+          value={value}
+          onChange={(event) => onChange(event.target.value as T)}
+          aria-label={ariaLabel}
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value} disabled={option.disabled}>
+              {labelToPlainText(option.label) || option.value}
+            </option>
+          ))}
+        </select>
+      </div>
+    )
+  }
+
   return (
     <div className={cn('segmented-tabs', className)} role="radiogroup" aria-label={ariaLabel}>
       {options.map((option) => {
