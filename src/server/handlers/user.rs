@@ -111,7 +111,11 @@ async fn start_linuxdo_auth(
     )?;
     Ok((
         [(SET_COOKIE, binding_cookie)],
-        Redirect::temporary(url.as_ref()),
+        // Use 303 to force the subsequent request to be a GET.
+        //
+        // This avoids browsers preserving the original POST body when following the redirect,
+        // which can break OAuth authorize endpoints (GET-only) and risk leaking form fields.
+        Redirect::to(url.as_ref()),
     )
         .into_response())
 }

@@ -724,6 +724,38 @@ mod tests {
     }
 
 
+    async fn spawn_linuxdo_authorize_method_probe_server(
+        method_probe: Arc<Mutex<Option<Method>>>,
+    ) -> SocketAddr {
+        let app = Router::new().route(
+            "/oauth2/authorize",
+            any({
+                let method_probe = method_probe.clone();
+                move |method: Method| {
+                    let method_probe = method_probe.clone();
+                    async move {
+                        *method_probe.lock().expect("method probe lock poisoned") =
+                            Some(method.clone());
+                        if method == Method::GET {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::METHOD_NOT_ALLOWED
+                        }
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
     async fn spawn_linuxdo_oauth_mock_server(
         provider_user_id: &str,
         username: &str,
@@ -1670,7 +1702,7 @@ mod tests {
             .await
             .expect("post linuxdo auth");
 
-        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.status(), reqwest::StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(reqwest::header::LOCATION)
@@ -1704,6 +1736,47 @@ mod tests {
             bind_token_id.as_deref(),
             Some(preferred.id.as_str()),
             "preferred token id should be persisted in oauth state"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn post_linuxdo_auth_follow_redirect_uses_get_method() {
+        let db_path = temp_db_path("linuxdo-auth-post-follow-redirect-method");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let preferred = proxy
+            .create_access_token(Some("linuxdo:preferred"))
+            .await
+            .expect("create preferred token");
+
+        let method_probe = Arc::new(Mutex::new(None));
+        let oauth_upstream = spawn_linuxdo_authorize_method_probe_server(method_probe.clone()).await;
+        let mut oauth_options = linuxdo_oauth_options_for_test();
+        oauth_options.authorize_url = format!("http://{oauth_upstream}/oauth2/authorize");
+
+        let addr = spawn_user_oauth_server_with_options(proxy, oauth_options).await;
+        let client = Client::new();
+        let auth_url = format!("http://{}/auth/linuxdo", addr);
+        let response = client
+            .post(&auth_url)
+            .form(&[("token", preferred.token.clone())])
+            .send()
+            .await
+            .expect("post linuxdo auth");
+
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "redirect follow should succeed when authorize endpoint receives GET"
+        );
+        assert_eq!(
+            *method_probe.lock().expect("method probe lock poisoned"),
+            Some(Method::GET),
+            "authorize endpoint should be called with GET (303 See Other redirect)"
         );
 
         let _ = std::fs::remove_file(db_path);
@@ -1781,7 +1854,7 @@ mod tests {
             .send()
             .await
             .expect("start linuxdo oauth");
-        assert_eq!(auth_resp.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(auth_resp.status(), reqwest::StatusCode::SEE_OTHER);
 
         let location = auth_resp
             .headers()

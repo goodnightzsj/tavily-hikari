@@ -13,10 +13,11 @@
 
 ### Response
 
-- `302/307` 重定向到 LinuxDo authorize endpoint。
+- `303` 重定向到 LinuxDo authorize endpoint。
 - 行为：
   - 当 `token` 合法且可解析时，服务端在 oauth state 中写入 `bind_token_id`。
   - 当 `token` 缺失/非法/不可用时，不写入 `bind_token_id`，继续普通登录流程。
+  - 必须使用 `303 See Other`，避免浏览器在跟随重定向时保留原始 POST body（可能导致上游 authorize 端点 GET-only 返回 405，并有泄露表单字段风险）。
 
 ### Error
 
