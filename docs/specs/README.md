@@ -9,6 +9,7 @@
 
 |    ID | Title                                                  | Status           | Spec                                                 | Last       | Notes                                                                                            |
 | ----: | ------------------------------------------------------ | ---------------- | ---------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------ |
+| 6xeyh | 多 Token 绑定保留已分配 token（不做历史回补）          | 进行中（快车道） | `6xeyh-multi-token-binding-preserve/SPEC.md`         | 2026-03-06 | PR #95；共享测试机 E2E 回归通过；review-loop 已完成并按契约保留“最新绑定优先”语义                |
 | vr67d | LinuxDo 登录复用既有 Token + 强制重登录 + 历史误建自愈 | 已完成（快车道） | `vr67d-linuxdo-token-rebind-relogin/SPEC.md`         | 2026-03-05 | hotfix: `/auth/linuxdo` use 303 to avoid POST body leak + fix upstream 405                       |
 | w2t73 | 批量 Key 导入稳定性修复                                | 已完成（快车道） | `w2t73-batch-key-upsert-stability/SPEC.md`           | 2026-03-04 | rollback+retry hardening landed; flaky case loop 50/50; PR #87 checks green; review-loop clear   |
 | 8brtz | Server.rs 最小风险模块化重构                           | 已完成（快车道） | `8brtz-server-rs-modularization/SPEC.md`             | 2026-03-04 | fast-track: modularized `src/server/**`; PR #88 checks green; review-loop converged              |
