@@ -278,16 +278,29 @@ async fn proxy_handler(
                                 }
                             }
 
+                            let mut injected_include_usage = false;
+                            if !params.contains_key("arguments") {
+                                params.insert(
+                                    "arguments".to_string(),
+                                    Value::Object(serde_json::Map::new()),
+                                );
+                                injected_include_usage = true;
+                            }
+
                             let args_entry = params
-                                .entry("arguments".to_string())
-                                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                            if !args_entry.is_object() {
-                                *args_entry = Value::Object(serde_json::Map::new());
-                            }
+                                .get_mut("arguments")
+                                .expect("arguments must exist after insertion when absent");
                             if let Value::Object(args) = args_entry {
-                                args.insert("include_usage".to_string(), Value::Bool(true));
+                                let already_true = args
+                                    .get("include_usage")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                if !already_true {
+                                    args.insert("include_usage".to_string(), Value::Bool(true));
+                                    injected_include_usage = true;
+                                }
                             }
-                            *mutated = true;
+                            *mutated |= injected_include_usage;
 
                             if tool == "tavily-search" {
                                 let expected = tavily_search_expected_credits(args_entry);
