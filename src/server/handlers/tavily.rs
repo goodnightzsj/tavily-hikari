@@ -44,7 +44,7 @@ impl TavilyEndpointConfig {
         Self {
             upstream_path: "/map",
             mode: TavilyUpstreamMode::Json,
-            enforce_hourly_any_limit: false,
+            enforce_hourly_any_limit: true,
             validate_max_results: false,
         }
     }
@@ -57,6 +57,51 @@ impl TavilyEndpointConfig {
             validate_max_results: false,
         }
     }
+}
+
+fn tavily_search_expected_credits(options: &Value) -> i64 {
+    let depth = options
+        .get("search_depth")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if depth == "advanced" {
+        2
+    } else {
+        // basic / fast / ultra-fast / unknown defaults to the low-cost tier
+        1
+    }
+}
+
+fn tavily_research_min_credits(options: &Value) -> i64 {
+    let model = options
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match model.as_str() {
+        "pro" => 15,
+        // auto is billed variably upstream; we use the minimum to enforce & fallback.
+        "mini" | "auto" | "" => 4,
+        _ => 4,
+    }
+}
+
+fn quota_exhausted_now(verdict: &TokenQuotaVerdict) -> bool {
+    verdict.hourly_used >= verdict.hourly_limit
+        || verdict.daily_used >= verdict.daily_limit
+        || verdict.monthly_used >= verdict.monthly_limit
+}
+
+fn quota_would_exceed(verdict: &TokenQuotaVerdict, delta: i64) -> bool {
+    if delta <= 0 {
+        return false;
+    }
+    verdict.hourly_used + delta > verdict.hourly_limit
+        || verdict.daily_used + delta > verdict.daily_limit
+        || verdict.monthly_used + delta > verdict.monthly_limit
 }
 
 #[axum::debug_handler]
@@ -201,7 +246,7 @@ async fn tavily_http_research_result(
                             None,
                             Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64),
                             None,
-                            true,
+                            false,
                             "error",
                             Some(msg.as_str()),
                         )
@@ -271,59 +316,9 @@ async fn tavily_http_research_result(
         }
     }
 
-    if let Some(ref tid) = auth_token_id
-        && !state.dev_open_admin
-    {
-        match state.proxy.check_token_quota(tid).await {
-            Ok(verdict) => {
-                if !verdict.allowed {
-                    let _ = state
-                        .proxy
-                        .record_token_attempt(
-                            tid,
-                            &method,
-                            &path,
-                            None,
-                            Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64),
-                            None,
-                            true,
-                            "quota_exhausted",
-                            Some("daily / hourly limit reached for this token"),
-                        )
-                        .await;
-                    let payload = json!({
-                        "error": "quota_exhausted",
-                        "message": "daily / hourly limit reached for this token",
-                    });
-                    let resp = Response::builder()
-                        .status(StatusCode::TOO_MANY_REQUESTS)
-                        .header(CONTENT_TYPE, "application/json; charset=utf-8")
-                        .body(Body::from(payload.to_string()))
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                    return Ok(resp);
-                }
-            }
-            Err(err) => {
-                eprintln!("quota check failed for {path}: {err}");
-                let msg = err.to_string();
-                let _ = state
-                    .proxy
-                    .record_token_attempt(
-                        tid,
-                        &method,
-                        &path,
-                        None,
-                        Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64),
-                        None,
-                        true,
-                        "error",
-                        Some(msg.as_str()),
-                    )
-                    .await;
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            }
-        }
-    }
+    // NOTE: `GET /api/tavily/research/:request_id` is a *result retrieval* endpoint.
+    // Billing is charged on `POST /api/tavily/research` (via /usage diff), so this endpoint
+    // must not consume business quota nor block due to exhausted credits quota.
 
     let mut headers = clone_headers(&parts.headers);
     headers.remove(axum::http::header::AUTHORIZATION);
@@ -356,7 +351,7 @@ async fn tavily_http_research_result(
                         None,
                         Some(http_code),
                         analysis.tavily_status_code,
-                        true,
+                        false,
                         analysis.status,
                         None,
                     )
@@ -377,7 +372,7 @@ async fn tavily_http_research_result(
                         None,
                         None,
                         None,
-                        true,
+                        false,
                         "error",
                         Some(msg.as_str()),
                     )
@@ -508,6 +503,26 @@ async fn proxy_tavily_http_endpoint(
     }
 
     let token_id_for_logs = auth_token_id.clone();
+    let expected_search_credits = (config.upstream_path == "/search").then(|| {
+        // Search billing is predictable based on `search_depth`.
+        tavily_search_expected_credits(&options)
+    });
+    let research_min_credits = (config.upstream_path == "/research").then(|| {
+        // Research billing is computed via /usage diff; enforce using the minimum upfront.
+        tavily_research_min_credits(&options)
+    });
+
+    // Serialize billable requests per token within this process so `peek -> upstream -> charge`
+    // cannot be interleaved by concurrent requests from the same token.
+    let _token_billing_guard = if !state.dev_open_admin {
+        if let Some(tid) = auth_token_id.as_deref() {
+            Some(state.proxy.lock_token_billing(tid).await)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     if config.enforce_hourly_any_limit
         && let Some(ref tid) = auth_token_id
@@ -568,37 +583,48 @@ async fn proxy_tavily_http_endpoint(
     }
 
     if let Some(ref tid) = auth_token_id {
-        match state.proxy.check_token_quota(tid).await {
+        match state.proxy.peek_token_quota(tid).await {
             Ok(verdict) => {
-                if !state.dev_open_admin && !verdict.allowed {
-                    let _ = state
-                        .proxy
-                        .record_token_attempt(
-                            tid,
-                            &method,
-                            &path,
-                            None,
-                            Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64),
-                            None,
-                            true,
-                            "quota_exhausted",
-                            Some("daily / hourly limit reached for this token"),
-                        )
-                        .await;
-                    let payload = json!({
-                        "error": "quota_exhausted",
-                        "message": "daily / hourly limit reached for this token",
-                    });
-                    let resp = Response::builder()
-                        .status(StatusCode::TOO_MANY_REQUESTS)
-                        .header(CONTENT_TYPE, "application/json; charset=utf-8")
-                        .body(Body::from(payload.to_string()))
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                    return Ok(resp);
+                if !state.dev_open_admin {
+                    let blocked = if config.upstream_path == "/search" {
+                        quota_would_exceed(&verdict, expected_search_credits.unwrap_or(1))
+                    } else if config.upstream_path == "/research" {
+                        quota_would_exceed(&verdict, research_min_credits.unwrap_or(4))
+                    } else {
+                        // Unpredictable endpoints: only block when already exhausted.
+                        quota_exhausted_now(&verdict)
+                    };
+
+                    if blocked {
+                        let _ = state
+                            .proxy
+                            .record_token_attempt(
+                                tid,
+                                &method,
+                                &path,
+                                None,
+                                Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64),
+                                None,
+                                true,
+                                "quota_exhausted",
+                                Some("credits quota exhausted for this token"),
+                            )
+                            .await;
+                        let payload = json!({
+                            "error": "quota_exhausted",
+                            "message": "quota exhausted for this token",
+                        });
+                        let resp = Response::builder()
+                            .status(StatusCode::TOO_MANY_REQUESTS)
+                            .header(CONTENT_TYPE, "application/json; charset=utf-8")
+                            .body(Body::from(payload.to_string()))
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                        return Ok(resp);
+                    }
                 }
             }
             Err(err) => {
-                eprintln!("quota check failed for {path}: {err}");
+                eprintln!("quota peek failed for {path}: {err}");
                 if let Some(tid) = auth_token_id.as_deref() {
                     let msg = err.to_string();
                     let _ = state
@@ -623,6 +649,111 @@ async fn proxy_tavily_http_endpoint(
 
     let mut headers = clone_headers(&parts.headers);
     headers.remove(axum::http::header::AUTHORIZATION);
+
+    if config.upstream_path == "/research" {
+        let result = state
+            .proxy
+            .proxy_http_research_with_usage_diff(
+                &state.usage_base,
+                auth_token_id.as_deref(),
+                &method,
+                &path,
+                options,
+                &headers,
+                true,
+            )
+            .await;
+
+        match result {
+            Ok((resp, analysis, usage_delta)) => {
+                let mut billing_error: Option<String> = None;
+                let mut usage_probe_warning: Option<&'static str> = None;
+                if resp.status.is_success()
+                    && analysis.status == "success"
+                    && let Some(tid) = token_id_for_logs.as_deref()
+                {
+                    let credits = if let Some(delta) = usage_delta {
+                        delta
+                    } else {
+                        // /usage probe is best-effort; when unavailable, charge the model minimum
+                        // and attach a warning for auditability.
+                        usage_probe_warning =
+                            Some("research usage diff unavailable; charged minimum credits");
+                        eprintln!("research /usage diff unavailable; charging minimum credits");
+                        research_min_credits.unwrap_or(4)
+                    };
+                    if credits > 0
+                        && let Err(err) = state.proxy.charge_token_quota(tid, credits).await
+                    {
+                        let msg = format!("charge_token_quota failed for {path}: {err}");
+                        eprintln!("{msg}");
+                        billing_error = Some(msg);
+                    }
+                }
+
+                if let Some(tid) = token_id_for_logs.as_deref() {
+                    let http_code = resp.status.as_u16() as i64;
+                    let _ = state
+                        .proxy
+                        .record_token_attempt(
+                            tid,
+                            &method,
+                            &path,
+                            None,
+                            Some(http_code),
+                            analysis.tavily_status_code,
+                            true,
+                            analysis.status,
+                            billing_error.as_deref().or(usage_probe_warning),
+                        )
+                        .await;
+                }
+                // Always return the upstream response, even if local billing persistence fails.
+                // Returning a 5xx here can trigger client retries and cause duplicate upstream charges.
+                return Ok(build_response(resp));
+            }
+            Err(err) => {
+                eprintln!("tavily http {} proxy error: {err}", config.upstream_path);
+                if let Some(tid) = token_id_for_logs.as_deref() {
+                    let msg = err.to_string();
+                    let _ = state
+                        .proxy
+                        .record_token_attempt(
+                            tid,
+                            &method,
+                            &path,
+                            None,
+                            None,
+                            None,
+                            false,
+                            "error",
+                            Some(msg.as_str()),
+                        )
+                        .await;
+                }
+
+                let status = match err {
+                    ProxyError::Http(_) | ProxyError::NoAvailableKeys => StatusCode::BAD_GATEWAY,
+                    ProxyError::Database(_)
+                    | ProxyError::InvalidEndpoint { .. }
+                    | ProxyError::QuotaDataMissing { .. }
+                    | ProxyError::UsageHttp { .. }
+                    | ProxyError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+
+                let payload = json!({
+                    "error": "proxy_error",
+                    "message": "upstream unavailable",
+                });
+                let resp = Response::builder()
+                    .status(status)
+                    .header(CONTENT_TYPE, "application/json; charset=utf-8")
+                    .body(Body::from(payload.to_string()))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                return Ok(resp);
+            }
+        }
+    }
 
     let result = match config.mode {
         TavilyUpstreamMode::Search => {
@@ -657,6 +788,35 @@ async fn proxy_tavily_http_endpoint(
 
     match result {
         Ok((resp, analysis)) => {
+            let mut billing_error: Option<String> = None;
+            if resp.status.is_success()
+                && analysis.status == "success"
+                && let Some(tid) = token_id_for_logs.as_deref()
+            {
+                let credits = if config.upstream_path == "/search" {
+                    extract_usage_credits_from_json_bytes(&resp.body)
+                        .unwrap_or_else(|| expected_search_credits.unwrap_or(1))
+                } else {
+                    match extract_usage_credits_from_json_bytes(&resp.body) {
+                        Some(credits) => credits,
+                        None => {
+                            eprintln!(
+                                "missing usage.credits for {} response; skipping billing",
+                                config.upstream_path
+                            );
+                            0
+                        }
+                    }
+                };
+                if credits > 0
+                    && let Err(err) = state.proxy.charge_token_quota(tid, credits).await
+                {
+                    let msg = format!("charge_token_quota failed for {path}: {err}");
+                    eprintln!("{msg}");
+                    billing_error = Some(msg);
+                }
+            }
+
             if let Some(tid) = token_id_for_logs.as_deref() {
                 let http_code = resp.status.as_u16() as i64;
                 let _ = state
@@ -670,10 +830,12 @@ async fn proxy_tavily_http_endpoint(
                         analysis.tavily_status_code,
                         true,
                         analysis.status,
-                        None,
+                        billing_error.as_deref(),
                     )
                     .await;
             }
+            // Always return the upstream response, even if local billing persistence fails.
+            // Returning a 5xx here can trigger client retries and cause duplicate upstream charges.
             Ok(build_response(resp))
         }
         Err(err) => {

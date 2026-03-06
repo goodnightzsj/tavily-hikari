@@ -131,35 +131,6 @@ fn extract_token_from_query(raw_query: Option<&str>) -> (Option<String>, Option<
     (query, token)
 }
 
-fn mcp_request_counts_toward_business_quota(path: &str, body: &[u8]) -> bool {
-    // Only apply special handling for /mcp traffic. Other endpoints (such as
-    // /api/tavily/*) are always treated as business-costful.
-    if !path.starts_with("/mcp") {
-        return true;
-    }
-
-    // Non-business whitelist: only the following methods are treated as "no business cost".
-    // Everything else is considered business-costful and will consume business quota.
-    match serde_json::from_slice::<Value>(body) {
-        Ok(Value::Object(map)) => {
-            let method = map.get("method").and_then(|v| v.as_str()).unwrap_or("");
-            let is_non_business = matches!(
-                method,
-                "tools/list"
-                    | "resources/list"
-                    | "resources/templates/list"
-                    | "resources/read"
-                    | "prompts/list"
-                    | "prompts/get"
-            ) || method.starts_with("notifications/");
-            // Return semantics: true = count towards business quota; false = only hourly-any limiter.
-            !is_non_business
-        }
-        // 对于无法解析或缺少 method 的请求，保守起见视为“有业务成本”。
-        _ => true,
-    }
-}
-
 async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -229,7 +200,246 @@ async fn proxy_handler(
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let billable_flag = mcp_request_counts_toward_business_quota(&path, &body_bytes);
+    // Billing plan (1:1 upstream credits):
+    // - Non-business whitelist methods are ignored by business quota.
+    // - tools/call for tavily-* injects include_usage=true so upstream returns usage.credits.
+    // - Only tavily-search uses a predictable cost check (search_depth -> expected credits).
+    // - For unknown / batch / positional request shapes, default to billable to avoid bypass.
+    let mut billable_flag = false;
+    let mut expected_search_credits: Option<i64> = None;
+    let mut forwarded_body = body_bytes.clone();
+    let mut lockable_tool = false;
+    let mut billable_mcp_ids: HashSet<String> = HashSet::new();
+    let mut billable_search_mcp_ids: HashSet<String> = HashSet::new();
+    let mut has_billable_mcp_without_id = false;
+    let mut has_search_mcp_without_id = false;
+    let mut expected_search_credits_by_id: HashMap<String, i64> = HashMap::new();
+    let mut expected_search_credits_without_id_total: i64 = 0;
+    let mut invalid_mcp_request_message: Option<String> = None;
+    if path.starts_with("/mcp") {
+        match serde_json::from_slice::<Value>(&body_bytes) {
+            Ok(mut value) => {
+                // Default to billable unless we can *prove* it's a non-billable control plane call.
+                let mut any_billable = false;
+                let mut any_lockable = false;
+                let mut all_non_billable = true;
+                let mut mutated = false;
+                let mut expected_search_total = 0i64;
+
+                let is_non_billable_method = |method: &str| {
+                    matches!(method, "initialize" | "ping" | "tools/list")
+                        || method.starts_with("resources/")
+                        || method.starts_with("prompts/")
+                        || method.starts_with("notifications/")
+                };
+
+                let handle_tool_call = |map: &mut serde_json::Map<String, Value>,
+                                        any_billable: &mut bool,
+                                        any_lockable: &mut bool,
+                                        all_non_billable: &mut bool,
+                                        mutated: &mut bool,
+                                        expected_search_total: &mut i64,
+                                        billable_mcp_ids: &mut HashSet<String>,
+                                        billable_search_mcp_ids: &mut HashSet<String>,
+                                        has_billable_mcp_without_id: &mut bool,
+                                        has_search_mcp_without_id: &mut bool,
+                                        expected_search_credits_by_id: &mut HashMap<String, i64>,
+                                        expected_search_credits_without_id_total: &mut i64| {
+                    // tools/call is treated as billable by default unless we can prove it's
+                    // a non-Tavily tool call (name does not start with `tavily-`).
+                    *any_lockable = true;
+
+                    let id_key = map
+                        .get("id")
+                        .filter(|v| !v.is_null())
+                        .map(|v| v.to_string());
+
+                    if let Some(Value::Object(params)) = map.get_mut("params") {
+                        let tool = params
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+
+                        if tool.starts_with("tavily-") {
+                            *any_billable = true;
+                            *all_non_billable = false;
+
+                            if let Some(id_key) = id_key.as_ref() {
+                                billable_mcp_ids.insert(id_key.clone());
+                                if tool == "tavily-search" {
+                                    billable_search_mcp_ids.insert(id_key.clone());
+                                }
+                            } else {
+                                *has_billable_mcp_without_id = true;
+                                if tool == "tavily-search" {
+                                    *has_search_mcp_without_id = true;
+                                }
+                            }
+
+                            let args_entry = params
+                                .entry("arguments".to_string())
+                                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                            if !args_entry.is_object() {
+                                *args_entry = Value::Object(serde_json::Map::new());
+                            }
+                            if let Value::Object(args) = args_entry {
+                                args.insert("include_usage".to_string(), Value::Bool(true));
+                            }
+                            *mutated = true;
+
+                            if tool == "tavily-search" {
+                                let expected = tavily_search_expected_credits(args_entry);
+                                *expected_search_total =
+                                    (*expected_search_total).saturating_add(expected);
+                                if let Some(id_key) = id_key.as_ref() {
+                                    expected_search_credits_by_id
+                                        .entry(id_key.clone())
+                                        .and_modify(|current| {
+                                            *current = (*current).saturating_add(expected)
+                                        })
+                                        .or_insert(expected);
+                                } else {
+                                    *expected_search_credits_without_id_total =
+                                        (*expected_search_credits_without_id_total)
+                                            .saturating_add(expected);
+                                }
+                            }
+                        } else if tool.is_empty() {
+                            // Unknown tool name: billable safe default.
+                            *any_billable = true;
+                            *all_non_billable = false;
+
+                            if let Some(id_key) = id_key.as_ref() {
+                                billable_mcp_ids.insert(id_key.clone());
+                            } else {
+                                *has_billable_mcp_without_id = true;
+                            }
+                        } else {
+                            // Proven non-Tavily tool call: do not charge business quota.
+                        }
+                    } else {
+                        // Missing params: billable safe default.
+                        *any_billable = true;
+                        *all_non_billable = false;
+
+                        if let Some(id_key) = id_key.as_ref() {
+                            billable_mcp_ids.insert(id_key.clone());
+                        } else {
+                            *has_billable_mcp_without_id = true;
+                        }
+                    }
+                };
+
+                match value {
+                    Value::Object(ref mut map) => {
+                        let method = map.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                        let non_billable = is_non_billable_method(method);
+                        if !non_billable {
+                            all_non_billable = false;
+                        }
+
+                        if method == "tools/call" {
+                            handle_tool_call(
+                                map,
+                                &mut any_billable,
+                                &mut any_lockable,
+                                &mut all_non_billable,
+                                &mut mutated,
+                                &mut expected_search_total,
+                                &mut billable_mcp_ids,
+                                &mut billable_search_mcp_ids,
+                                &mut has_billable_mcp_without_id,
+                                &mut has_search_mcp_without_id,
+                                &mut expected_search_credits_by_id,
+                                &mut expected_search_credits_without_id_total,
+                            );
+                        } else if !non_billable {
+                            // Unknown object-shaped method: treat as billable (safe default).
+                            any_billable = true;
+                            any_lockable = true;
+                        }
+                    }
+                    Value::Array(ref mut items) => {
+                        // JSON-RPC batch: only treat as non-billable if *every* item is provably
+                        // a control-plane method or a non-Tavily tool call.
+                        let mut seen_ids: HashSet<String> = HashSet::new();
+                        for item in items.iter_mut() {
+                            let Some(map) = item.as_object_mut() else {
+                                // Positional/batch junk: billable safe default.
+                                any_billable = true;
+                                any_lockable = true;
+                                all_non_billable = false;
+                                continue;
+                            };
+
+                            if map
+                                .get("id")
+                                .filter(|v| !v.is_null())
+                                .map(|v| v.to_string())
+                                .is_some_and(|id_key| !seen_ids.insert(id_key))
+                            {
+                                invalid_mcp_request_message.get_or_insert_with(|| {
+                                    "duplicate JSON-RPC id in batch".to_string()
+                                });
+                            }
+
+                            let method =
+                                map.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                            let non_billable = is_non_billable_method(method);
+                            if !non_billable {
+                                all_non_billable = false;
+                            }
+
+                            if method == "tools/call" {
+                                handle_tool_call(
+                                    map,
+                                    &mut any_billable,
+                                    &mut any_lockable,
+                                    &mut all_non_billable,
+                                    &mut mutated,
+                                    &mut expected_search_total,
+                                    &mut billable_mcp_ids,
+                                    &mut billable_search_mcp_ids,
+                                    &mut has_billable_mcp_without_id,
+                                    &mut has_search_mcp_without_id,
+                                    &mut expected_search_credits_by_id,
+                                    &mut expected_search_credits_without_id_total,
+                                );
+                            } else if !non_billable {
+                                any_billable = true;
+                                any_lockable = true;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Unknown / non-object: treat as billable to avoid bypass.
+                        any_billable = true;
+                        any_lockable = true;
+                        all_non_billable = false;
+                    }
+                }
+
+                billable_flag = any_billable && !all_non_billable;
+                lockable_tool = any_lockable && billable_flag;
+                if expected_search_total > 0 {
+                    expected_search_credits = Some(expected_search_total);
+                }
+
+                if mutated
+                    && let Ok(encoded) = serde_json::to_vec(&value)
+                {
+                    forwarded_body = bytes::Bytes::from(encoded);
+                }
+            }
+            Err(_) => {
+                // Non-JSON / unparseable: treat as billable to avoid bypass.
+                billable_flag = true;
+                lockable_tool = true;
+            }
+        }
+    }
 
     let auth_token_id = if state.dev_open_admin {
         Some("dev".to_string())
@@ -245,7 +455,7 @@ async fn proxy_handler(
         path: path.clone(),
         query,
         headers,
-        body: body_bytes.clone(),
+        body: forwarded_body.clone(),
         auth_token_id,
     };
 
@@ -256,6 +466,18 @@ async fn proxy_handler(
             .strip_prefix("th-")
             .and_then(|rest| rest.split('-').next())
             .map(|s| s.to_string())
+    };
+
+    // Serialize per-token billable tool calls to keep `peek -> upstream -> charge` consistent.
+    let _token_billing_guard = if !state.dev_open_admin
+        && billable_flag
+        && lockable_tool
+        && invalid_mcp_request_message.is_none()
+        && let Some(tid) = token_id.as_deref()
+    {
+        Some(state.proxy.lock_token_billing(tid).await)
+    } else {
+        None
     };
 
     let mut _quota_verdict: Option<TokenQuotaVerdict> = None;
@@ -291,33 +513,79 @@ async fn proxy_handler(
             }
         }
 
+        // Reject billable MCP calls that cannot be safely attributed/billed.
+        if billable_flag
+            && invalid_mcp_request_message.is_some()
+            && path.starts_with("/mcp")
+        {
+            let message = invalid_mcp_request_message
+                .clone()
+                .unwrap_or_else(|| "invalid MCP request".to_string());
+
+            if let Some(tid) = token_id.as_deref() {
+                let _ = state
+                    .proxy
+                    .record_token_attempt(
+                        tid,
+                        &method,
+                        &path,
+                        parts.uri.query(),
+                        Some(StatusCode::BAD_REQUEST.as_u16() as i64),
+                        None,
+                        billable_flag,
+                        "error",
+                        Some(&message),
+                    )
+                    .await;
+            }
+
+            let payload = json!({
+                "error": "invalid_request",
+                "message": message,
+            });
+            let resp = Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(CONTENT_TYPE, "application/json; charset=utf-8")
+                .body(Body::from(payload.to_string()))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            return Ok(resp);
+        }
+
         // 2) 业务配额（小时 / 日 / 月）只对 MCP 工具调用生效。
         if billable_flag {
-            match state.proxy.check_token_quota(tid).await {
+            match state.proxy.peek_token_quota(tid).await {
                 Ok(verdict) => {
-                    if !state.dev_open_admin && !verdict.allowed {
-                        let message = build_quota_error_message(&verdict);
-                        let _ = state
-                            .proxy
-                            .record_token_attempt(
-                                tid,
-                                &method,
-                                &path,
-                                parts.uri.query(),
-                                Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64),
-                                None,
-                                true,
-                                "quota_exhausted",
-                                Some(&message),
-                            )
-                            .await;
-                        let response = quota_exceeded_response(&verdict)?;
-                        return Ok(response);
+                    if !state.dev_open_admin {
+                        let blocked = if let Some(expected) = expected_search_credits {
+                            quota_would_exceed(&verdict, expected)
+                        } else {
+                            quota_exhausted_now(&verdict)
+                        };
+
+                        if blocked {
+                            let message = build_quota_error_message(&verdict);
+                            let _ = state
+                                .proxy
+                                .record_token_attempt(
+                                    tid,
+                                    &method,
+                                    &path,
+                                    parts.uri.query(),
+                                    Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64),
+                                    None,
+                                    true,
+                                    "quota_exhausted",
+                                    Some(&message),
+                                )
+                                .await;
+                            let response = quota_exceeded_response(&verdict)?;
+                            return Ok(response);
+                        }
                     }
                     _quota_verdict = Some(verdict);
                 }
                 Err(err) => {
-                    eprintln!("quota check failed: {err}");
+                    eprintln!("quota peek failed: {err}");
                     return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 }
             }
@@ -326,45 +594,112 @@ async fn proxy_handler(
 
     match state.proxy.proxy_request(proxy_request).await {
         Ok(resp) => {
+            let mut billing_error: Option<String> = None;
             if let Some(tid) = token_id.as_deref() {
-                // 尝试从 Tavily JSON 回复中解析结构化状态码
-                let mut tavily_code: Option<i64> = None;
-                let mut result_status = "success";
-                #[allow(clippy::collapsible_if)]
+                let analysis = analyze_mcp_attempt(resp.status, &resp.body);
+                let tavily_code: Option<i64> = analysis.tavily_status_code;
+                let result_status = analysis.status;
+
+                // Charge credits after a successful billable Tavily tool call.
+                //
+                // NOTE: We also charge when the overall attempt is marked `quota_exhausted`,
+                // because JSON-RPC batches can contain a mix of successes and quota errors. In
+                // that case we only charge credits we can actually observe from `usage.credits`
+                // to avoid guessing partial failures.
+                let allow_empty_body_search_fallback =
+                    resp.body.is_empty() && expected_search_credits.is_some();
+                if billable_flag
+                    && resp.status.is_success()
+                    && (matches!(result_status, "success" | "quota_exhausted")
+                        || allow_empty_body_search_fallback)
                 {
-                    if let Ok(text) = std::str::from_utf8(&resp.body) {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                            if let Some(sc) = value
-                                .get("result")
-                                .and_then(|v| v.get("structuredContent"))
-                                .and_then(|v| v.get("status"))
-                                .and_then(|v| v.as_i64())
-                            {
-                                tavily_code = Some(sc);
-                                result_status = if sc == 432 {
-                                    "quota_exhausted"
-                                } else if sc >= 400 {
-                                    "error"
+                    let credits = if has_billable_mcp_without_id {
+                        let mut response_has_error = mcp_response_has_any_error(&resp.body);
+                        if allow_empty_body_search_fallback {
+                            response_has_error = false;
+                        }
+
+                        // Without JSON-RPC ids we cannot reliably separate billable vs non-billable
+                        // response items, so we fall back to total extraction (safe default).
+                        match extract_usage_credits_total_from_json_bytes(&resp.body) {
+                            Some(credits) => {
+                                if response_has_error {
+                                    credits
+                                } else if let Some(expected) = expected_search_credits {
+                                    credits.max(expected)
                                 } else {
-                                    "success"
-                                };
-                            } else if value
-                                .get("result")
-                                .and_then(|v| v.get("structuredContent"))
-                                .and_then(|v| v.get("isError"))
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                            {
-                                result_status = "error";
+                                    credits
+                                }
+                            }
+                            None => {
+                                if response_has_error {
+                                    0
+                                } else if let Some(expected) = expected_search_credits {
+                                    expected
+                                } else {
+                                    eprintln!(
+                                        "missing usage.credits for MCP tool response; skipping billing"
+                                    );
+                                    0
+                                }
                             }
                         }
+                    } else {
+                        let errors_by_id = extract_mcp_has_error_by_id_from_bytes(&resp.body);
+                        let mut billable_has_error = billable_mcp_ids.is_empty()
+                            || billable_mcp_ids
+                                .iter()
+                                .any(|id| *errors_by_id.get(id).unwrap_or(&true));
+                        if allow_empty_body_search_fallback {
+                            billable_has_error = false;
+                        }
+
+                        let credits_by_id = extract_mcp_usage_credits_by_id_from_bytes(&resp.body);
+                        let mut total = 0i64;
+                        let mut any_usage = false;
+
+                        for id in billable_mcp_ids.iter() {
+                            if let Some(credits) = credits_by_id.get(id) {
+                                total = total.saturating_add(*credits);
+                                any_usage = true;
+                            }
+                        }
+
+                        if billable_has_error {
+                            if any_usage {
+                                total
+                            } else {
+                                0
+                            }
+                        } else {
+                            // Search is predictable: when usage is missing, fall back to the
+                            // request-derived expected credits *per search call*.
+                            for (id, expected) in expected_search_credits_by_id.iter() {
+                                if billable_search_mcp_ids.contains(id)
+                                    && !credits_by_id.contains_key(id)
+                                {
+                                    total = total.saturating_add(*expected);
+                                }
+                            }
+
+                            if has_search_mcp_without_id
+                                && expected_search_credits_without_id_total > 0
+                            {
+                                total = total.saturating_add(expected_search_credits_without_id_total);
+                            }
+
+                            total
+                        }
+                    };
+
+                    if credits > 0
+                        && let Err(err) = state.proxy.charge_token_quota(tid, credits).await
+                    {
+                        let msg = format!("charge_token_quota failed for {path}: {err}");
+                        eprintln!("{msg}");
+                        billing_error = Some(msg);
                     }
                 }
-
-                if result_status == "success" && !resp.status.is_success() {
-                    result_status = "error";
-                }
-
                 let http_code = resp.status.as_u16() as i64;
                 let _ = state
                     .proxy
@@ -377,10 +712,12 @@ async fn proxy_handler(
                         tavily_code,
                         billable_flag,
                         result_status,
-                        None,
+                        billing_error.as_deref(),
                     )
                     .await;
             }
+            // Always return the upstream response, even if local billing persistence fails.
+            // Returning a 5xx here can trigger client retries and cause duplicate upstream charges.
             Ok(build_response(resp))
         }
         Err(err) => {
@@ -507,10 +844,10 @@ fn build_quota_error_message(verdict: &TokenQuotaVerdict) -> String {
 }
 
 fn quota_window_stats(verdict: &TokenQuotaVerdict) -> (i64, i64) {
-    match verdict.exceeded_window.unwrap_or(QuotaWindow::Hour) {
-        QuotaWindow::Hour => (verdict.hourly_limit, verdict.hourly_used),
-        QuotaWindow::Day => (verdict.daily_limit, verdict.daily_used),
-        QuotaWindow::Month => (verdict.monthly_limit, verdict.monthly_used),
+    match verdict.window_name().unwrap_or("hour") {
+        "month" => (verdict.monthly_limit, verdict.monthly_used),
+        "day" => (verdict.daily_limit, verdict.daily_used),
+        _ => (verdict.hourly_limit, verdict.hourly_used),
     }
 }
 
