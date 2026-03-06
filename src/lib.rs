@@ -691,15 +691,23 @@ impl TavilyProxy {
         pending.sort_unstable();
         pending.dedup();
         for log_id in pending {
-            match self.key_store.apply_pending_billing_log(log_id).await? {
-                PendingBillingSettleOutcome::Charged
-                | PendingBillingSettleOutcome::AlreadySettled => {}
-                PendingBillingSettleOutcome::RetryLater => {
-                    let msg = format!(
-                        "pending billing claim miss for auth_token_logs.id={log_id}; will retry",
-                    );
-                    eprintln!("{msg}");
-                    let _ = self.annotate_pending_billing_attempt(log_id, &msg).await;
+            let mut retry_later_attempts = 0;
+            loop {
+                match self.key_store.apply_pending_billing_log(log_id).await? {
+                    PendingBillingSettleOutcome::Charged
+                    | PendingBillingSettleOutcome::AlreadySettled => break,
+                    PendingBillingSettleOutcome::RetryLater => {
+                        retry_later_attempts += 1;
+                        if retry_later_attempts >= 2 {
+                            let msg = format!(
+                                "pending billing claim miss for auth_token_logs.id={log_id}; blocking request until replay succeeds",
+                            );
+                            eprintln!("{msg}");
+                            let _ = self.annotate_pending_billing_attempt(log_id, &msg).await;
+                            return Err(ProxyError::Other(msg));
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                 }
             }
         }
@@ -13358,7 +13366,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
     }
 
     #[tokio::test]
-    async fn pending_billing_claim_miss_is_observable_but_does_not_block_future_replay() {
+    async fn pending_billing_claim_miss_is_retry_later_until_next_replay() {
         let db_path = temp_db_path("pending-billing-claim-miss-retry");
         let db_str = db_path.to_string_lossy().to_string();
 
@@ -13388,11 +13396,11 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
 
         proxy.force_pending_billing_claim_miss_once(log_id).await;
 
-        let guard = proxy
-            .lock_token_billing(&token.id)
+        let outcome = proxy
+            .settle_pending_billing_attempt(log_id)
             .await
-            .expect("reconcile should not block on retry-later outcome");
-        drop(guard);
+            .expect("forced claim miss should surface retry-later outcome");
+        assert_eq!(outcome, PendingBillingSettleOutcome::RetryLater);
 
         let billing_state: String =
             sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
@@ -13402,26 +13410,13 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 .expect("read pending billing state");
         assert_eq!(billing_state, BILLING_STATE_PENDING);
 
-        let error_message: Option<String> =
-            sqlx::query_scalar("SELECT error_message FROM auth_token_logs WHERE id = ? LIMIT 1")
-                .bind(log_id)
-                .fetch_one(&proxy.key_store.pool)
-                .await
-                .expect("read pending billing error message");
-        assert!(
-            error_message
-                .as_deref()
-                .is_some_and(|msg| msg.contains("will retry")),
-            "retry-later path should be observable in the pending billing log"
-        );
-
         let verdict = proxy.peek_token_quota(&token.id).await.expect("peek quota");
         assert_eq!(verdict.hourly_used, 0);
 
         let guard = proxy
             .lock_token_billing(&token.id)
             .await
-            .expect("next billing lock should replay the pending charge");
+            .expect("next billing lock should replay the pending charge before precheck");
         drop(guard);
 
         let billing_state: String =
