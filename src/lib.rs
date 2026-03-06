@@ -20,6 +20,8 @@ use reqwest::{
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
+#[cfg(test)]
+use std::collections::HashSet;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use url::form_urlencoded;
@@ -584,6 +586,13 @@ impl TokenBillingGuard {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingBillingSettleOutcome {
+    Charged,
+    AlreadySettled,
+    RetryLater,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiKeyUpsertStatus {
     Created,
     Undeleted,
@@ -682,7 +691,17 @@ impl TavilyProxy {
         pending.sort_unstable();
         pending.dedup();
         for log_id in pending {
-            self.key_store.apply_pending_billing_log(log_id).await?;
+            match self.key_store.apply_pending_billing_log(log_id).await? {
+                PendingBillingSettleOutcome::Charged
+                | PendingBillingSettleOutcome::AlreadySettled => {}
+                PendingBillingSettleOutcome::RetryLater => {
+                    let msg = format!(
+                        "pending billing claim miss for auth_token_logs.id={log_id}; will retry",
+                    );
+                    eprintln!("{msg}");
+                    let _ = self.annotate_pending_billing_attempt(log_id, &msg).await;
+                }
+            }
         }
         Ok(())
     }
@@ -2024,7 +2043,10 @@ impl TavilyProxy {
             .await
     }
 
-    pub async fn settle_pending_billing_attempt(&self, log_id: i64) -> Result<(), ProxyError> {
+    pub async fn settle_pending_billing_attempt(
+        &self,
+        log_id: i64,
+    ) -> Result<PendingBillingSettleOutcome, ProxyError> {
         self.key_store.apply_pending_billing_log(log_id).await
     }
 
@@ -2036,6 +2058,16 @@ impl TavilyProxy {
         self.key_store
             .annotate_pending_billing_log(log_id, message)
             .await
+    }
+
+    #[cfg(test)]
+    async fn force_pending_billing_claim_miss_once(&self, log_id: i64) {
+        let mut forced = self
+            .key_store
+            .forced_pending_claim_miss_log_ids
+            .lock()
+            .await;
+        forced.insert(log_id);
     }
 
     /// Token summary since a timestamp
@@ -3052,6 +3084,8 @@ fn is_transient_sqlite_write_error(err: &ProxyError) -> bool {
 struct KeyStore {
     pool: SqlitePool,
     token_binding_cache: RwLock<HashMap<String, TokenBindingCacheEntry>>,
+    #[cfg(test)]
+    forced_pending_claim_miss_log_ids: Mutex<HashSet<i64>>,
 }
 
 impl KeyStore {
@@ -3071,6 +3105,8 @@ impl KeyStore {
         let store = Self {
             pool,
             token_binding_cache: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            forced_pending_claim_miss_log_ids: Mutex::new(HashSet::new()),
         };
         store.initialize_schema().await?;
         Ok(store)
@@ -7468,21 +7504,36 @@ impl KeyStore {
         .map_err(ProxyError::from)
     }
 
-    async fn apply_pending_billing_log(&self, log_id: i64) -> Result<(), ProxyError> {
+    async fn apply_pending_billing_log(
+        &self,
+        log_id: i64,
+    ) -> Result<PendingBillingSettleOutcome, ProxyError> {
         let mut tx = self.pool.begin().await?;
-        let claimed = sqlx::query_as::<_, (i64, Option<String>, i64)>(
-            r#"
-            UPDATE auth_token_logs
-            SET billing_state = ?
-            WHERE id = ? AND billing_state = ?
-            RETURNING COALESCE(business_credits, 0), billing_subject, created_at
-            "#,
-        )
-        .bind(BILLING_STATE_CHARGED)
-        .bind(log_id)
-        .bind(BILLING_STATE_PENDING)
-        .fetch_optional(&mut *tx)
-        .await?;
+        #[cfg(test)]
+        let force_claim_miss = {
+            let mut forced = self.forced_pending_claim_miss_log_ids.lock().await;
+            forced.remove(&log_id)
+        };
+        #[cfg(not(test))]
+        let force_claim_miss = false;
+
+        let claimed = if force_claim_miss {
+            None
+        } else {
+            sqlx::query_as::<_, (i64, Option<String>, i64)>(
+                r#"
+                UPDATE auth_token_logs
+                SET billing_state = ?
+                WHERE id = ? AND billing_state = ?
+                RETURNING COALESCE(business_credits, 0), billing_subject, created_at
+                "#,
+            )
+            .bind(BILLING_STATE_CHARGED)
+            .bind(log_id)
+            .bind(BILLING_STATE_PENDING)
+            .fetch_optional(&mut *tx)
+            .await?
+        };
 
         let Some((credits, billing_subject, created_at)) = claimed else {
             let billing_state = sqlx::query_scalar::<_, String>(
@@ -7492,9 +7543,13 @@ impl KeyStore {
             .fetch_optional(&mut *tx)
             .await?;
             match billing_state.as_deref() {
-                Some(BILLING_STATE_CHARGED) | Some(BILLING_STATE_PENDING) => {
+                Some(BILLING_STATE_CHARGED) => {
                     tx.commit().await?;
-                    return Ok(());
+                    return Ok(PendingBillingSettleOutcome::AlreadySettled);
+                }
+                Some(BILLING_STATE_PENDING) => {
+                    tx.commit().await?;
+                    return Ok(PendingBillingSettleOutcome::RetryLater);
                 }
                 Some(other) => {
                     tx.rollback().await.ok();
@@ -7515,7 +7570,7 @@ impl KeyStore {
 
         if credits <= 0 {
             tx.commit().await?;
-            return Ok(());
+            return Ok(PendingBillingSettleOutcome::Charged);
         }
 
         let Some(billing_subject) = billing_subject else {
@@ -7650,7 +7705,7 @@ impl KeyStore {
         }
 
         tx.commit().await?;
-        Ok(())
+        Ok(PendingBillingSettleOutcome::Charged)
     }
 
     async fn annotate_pending_billing_log(
@@ -13298,6 +13353,90 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 .await
                 .expect("read billing state");
         assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pending_billing_claim_miss_is_observable_but_does_not_block_future_replay() {
+        let db_path = temp_db_path("pending-billing-claim-miss-retry");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("pending-billing-claim-miss-retry"))
+            .await
+            .expect("create token");
+
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("forced claim miss"),
+                3,
+            )
+            .await
+            .expect("record pending billing attempt");
+
+        proxy.force_pending_billing_claim_miss_once(log_id).await;
+
+        let guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("reconcile should not block on retry-later outcome");
+        drop(guard);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read pending billing state");
+        assert_eq!(billing_state, BILLING_STATE_PENDING);
+
+        let error_message: Option<String> =
+            sqlx::query_scalar("SELECT error_message FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read pending billing error message");
+        assert!(
+            error_message
+                .as_deref()
+                .is_some_and(|msg| msg.contains("will retry")),
+            "retry-later path should be observable in the pending billing log"
+        );
+
+        let verdict = proxy.peek_token_quota(&token.id).await.expect("peek quota");
+        assert_eq!(verdict.hourly_used, 0);
+
+        let guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("next billing lock should replay the pending charge");
+        drop(guard);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read charged billing state");
+        assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        let verdict = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota after replay");
+        assert_eq!(verdict.hourly_used, 3);
 
         let _ = std::fs::remove_file(db_path);
     }

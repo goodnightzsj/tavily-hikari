@@ -737,14 +737,29 @@ async fn proxy_tavily_http_endpoint(
                         {
                             Ok(log_id) => {
                                 attempt_logged = true;
-                                if let Err(err) = state.proxy.settle_pending_billing_attempt(log_id).await {
-                                    let msg = format!("charge_token_quota failed for {path}: {err}");
-                                    eprintln!("{msg}");
-                                    let _ = state
-                                        .proxy
-                                        .annotate_pending_billing_attempt(log_id, &msg)
-                                        .await;
-                                    billing_error = Some(msg);
+                                match state.proxy.settle_pending_billing_attempt(log_id).await {
+                                    Ok(PendingBillingSettleOutcome::Charged)
+                                    | Ok(PendingBillingSettleOutcome::AlreadySettled) => {}
+                                    Ok(PendingBillingSettleOutcome::RetryLater) => {
+                                        let msg = format!(
+                                            "charge_token_quota delayed for {path}: pending billing claim miss; will retry"
+                                        );
+                                        eprintln!("{msg}");
+                                        let _ = state
+                                            .proxy
+                                            .annotate_pending_billing_attempt(log_id, &msg)
+                                            .await;
+                                        billing_error = Some(msg);
+                                    }
+                                    Err(err) => {
+                                        let msg = format!("charge_token_quota failed for {path}: {err}");
+                                        eprintln!("{msg}");
+                                        let _ = state
+                                            .proxy
+                                            .annotate_pending_billing_attempt(log_id, &msg)
+                                            .await;
+                                        billing_error = Some(msg);
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -916,14 +931,29 @@ async fn proxy_tavily_http_endpoint(
                     {
                         Ok(log_id) => {
                             attempt_logged = true;
-                            if let Err(err) = state.proxy.settle_pending_billing_attempt(log_id).await {
-                                let msg = format!("charge_token_quota failed for {path}: {err}");
-                                eprintln!("{msg}");
-                                let _ = state
-                                    .proxy
-                                    .annotate_pending_billing_attempt(log_id, &msg)
-                                    .await;
-                                billing_error = Some(msg);
+                            match state.proxy.settle_pending_billing_attempt(log_id).await {
+                                Ok(PendingBillingSettleOutcome::Charged)
+                                | Ok(PendingBillingSettleOutcome::AlreadySettled) => {}
+                                Ok(PendingBillingSettleOutcome::RetryLater) => {
+                                    let msg = format!(
+                                        "charge_token_quota delayed for {path}: pending billing claim miss; will retry"
+                                    );
+                                    eprintln!("{msg}");
+                                    let _ = state
+                                        .proxy
+                                        .annotate_pending_billing_attempt(log_id, &msg)
+                                        .await;
+                                    billing_error = Some(msg);
+                                }
+                                Err(err) => {
+                                    let msg = format!("charge_token_quota failed for {path}: {err}");
+                                    eprintln!("{msg}");
+                                    let _ = state
+                                        .proxy
+                                        .annotate_pending_billing_attempt(log_id, &msg)
+                                        .await;
+                                    billing_error = Some(msg);
+                                }
                             }
                         }
                         Err(err) => {
