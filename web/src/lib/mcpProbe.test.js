@@ -42,6 +42,17 @@ describe('mcpProbe helpers', () => {
     expect(payload.result.tools[0]?.name).toBe('tavily_search')
   })
 
+  it('ignores non-JSON SSE events before the response envelope', () => {
+    const payload = parseMcpProbePayload(
+      'event: endpoint\n' +
+      'data: /mcp/messages?sessionId=abc\n\n' +
+      'event: message\n' +
+      'data: {"jsonrpc":"2.0","id":"tools","result":{"tools":[{"name":"tavily_search"}]}}\n\n',
+    )
+
+    expect(payload.result.tools[0]?.name).toBe('tavily_search')
+  })
+
   it('detects quota-exhausted windows from payloads', () => {
     expect(getQuotaExceededWindow({ error: 'quota_exceeded', window: 'day' })).toBe('day')
     expect(getQuotaExceededWindow({ error: 'quota_exceeded', window: 'month' })).toBe('month')

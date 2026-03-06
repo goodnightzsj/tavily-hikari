@@ -82,7 +82,7 @@
 
 - Given token 已达业务配额上限（hour/day/month 任一窗口）
   When 用户在 `/console#/tokens/:id` 点击 `检测 MCP`
-  Then UI 先用详情页 quota snapshot 做前置判定；若缓存命中 blocked，会先复核最新 token detail 再决定是否跳过 billable `ping`，并继续执行 `tools/list` 做非计费连通验证，最终给出部分通过或受阻状态。
+  Then UI 先用详情页 quota snapshot 做前置判定；若缓存命中 blocked，会先复核最新 token detail 再决定是否跳过 billable `ping`；若现场 `ping` 返回 `quota_exceeded`，也会立即刷新 detail 供后续点击复用 blocked 状态，并继续执行 `tools/list` 做非计费连通验证，最终给出部分通过或受阻状态。
 
 ## 质量门槛（Quality Gates）
 

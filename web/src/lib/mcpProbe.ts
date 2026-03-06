@@ -67,13 +67,19 @@ export function parseMcpProbePayload(raw: string): unknown {
       throw new Error('Invalid MCP probe payload')
     }
 
-    const parsedPayloads = ssePayloads.map((payload) => parseMcpProbePayload(payload))
-    const responsePayload = parsedPayloads.find((payload) => isMcpProbeEnvelope(payload))
-    if (responsePayload !== undefined) {
-      return responsePayload
+    let lastPayload: unknown | undefined
+    for (const payload of ssePayloads) {
+      try {
+        const parsedPayload = parseMcpProbePayload(payload)
+        lastPayload = parsedPayload
+        if (isMcpProbeEnvelope(parsedPayload)) {
+          return parsedPayload
+        }
+      } catch {
+        continue
+      }
     }
 
-    const lastPayload = parsedPayloads.at(-1)
     if (lastPayload === undefined) {
       throw new Error('Invalid MCP probe payload')
     }

@@ -522,6 +522,14 @@ export default function UserConsole(): JSX.Element {
             ? getQuotaExceededWindow(err.payload)
             : null
           if (quotaWindow) {
+            try {
+              const refreshedDetail = await fetchUserTokenDetail(route.id)
+              if (!isActiveRun()) return
+              setDetail(refreshedDetail)
+            } catch {
+              if (!isActiveRun()) return
+            }
+
             completedItems.push({
               ...runningItem,
               status: 'blocked',
