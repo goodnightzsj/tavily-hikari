@@ -4,7 +4,7 @@
 
 - Status: 已完成（fast-track）
 - Created: 2026-03-02
-- Last: 2026-03-02
+- Last: 2026-03-06
 
 ## 背景 / 问题陈述
 
@@ -76,6 +76,14 @@
 - Given 进入 `/console#/tokens`
   Then 能看到 token 列表列（token id、统计与限额、复制、详情入口）。
 
+- Given 用户在 `/console#/tokens/:id` 点击 `检测 MCP`
+  When 浏览器发起 `tools/list` 探测
+  Then 请求必须显式声明 `Accept: application/json, text/event-stream`，且前端可同时解析 JSON 与 SSE `data:` 响应体。
+
+- Given token 已达业务配额上限（hour/day/month 任一窗口）
+  When 用户在 `/console#/tokens/:id` 点击 `检测 MCP`
+  Then UI 不再盲发 billable `ping`，而是将该步标记为“受阻/blocked”，继续执行 `tools/list` 做非计费连通验证，并给出部分通过或受阻状态。
+
 ## 质量门槛（Quality Gates）
 
 - `cargo fmt`
@@ -93,6 +101,7 @@
 
 ## 变更记录
 
+- 2026-03-06: 修复用户控制台 MCP 探测合同：浏览器 probe 显式发送双 Accept，兼容 SSE `tools/list`，并在 token 配额耗尽时前置标记为受阻而非误报全失败。
 - 2026-03-02: 初始化规格，冻结范围、接口与验收口径。
 - 2026-03-02: 完成账户级配额迁移与用户控制台交付，补齐登录跳转与用户接口链路。
 - 2026-03-02: 完成 review-loop 收敛，修复快照查询批量化、详情页切换闪旧数据与登录回退边界。
