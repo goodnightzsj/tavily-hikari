@@ -471,7 +471,7 @@ async fn proxy_handler(
     let proxy_request = ProxyRequest {
         method: method.clone(),
         path: path.clone(),
-        query,
+        query: query.clone(),
         headers,
         body: forwarded_body.clone(),
         auth_token_id,
@@ -487,7 +487,7 @@ async fn proxy_handler(
     };
 
     // Serialize per-token billable tool calls to keep `peek -> upstream -> charge` consistent.
-    let _token_billing_guard = if !state.dev_open_admin
+    let token_billing_guard = if !state.dev_open_admin
         && billable_flag
         && lockable_tool
         && invalid_mcp_request_message.is_none()
@@ -506,6 +506,9 @@ async fn proxy_handler(
     } else {
         None
     };
+    let billing_subject = token_billing_guard
+        .as_ref()
+        .map(|guard| guard.billing_subject().to_string());
 
     let mut _quota_verdict: Option<TokenQuotaVerdict> = None;
     if let Some(tid) = token_id.as_deref() {
@@ -521,7 +524,7 @@ async fn proxy_handler(
                                 tid,
                                 &method,
                                 &path,
-                                parts.uri.query(),
+                                query.as_deref(),
                                 Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64),
                                 None,
                                 false,
@@ -556,7 +559,7 @@ async fn proxy_handler(
                         tid,
                         &method,
                         &path,
-                        parts.uri.query(),
+                        query.as_deref(),
                         Some(StatusCode::BAD_REQUEST.as_u16() as i64),
                         None,
                         billable_flag,
@@ -580,7 +583,11 @@ async fn proxy_handler(
 
         // 2) 业务配额（小时 / 日 / 月）只对 MCP 工具调用生效。
         if billable_flag {
-            match state.proxy.peek_token_quota(tid).await {
+            match if let Some(subject) = billing_subject.as_deref() {
+                state.proxy.peek_token_quota_for_subject(subject).await
+            } else {
+                state.proxy.peek_token_quota(tid).await
+            } {
                 Ok(verdict) => {
                     if !state.dev_open_admin {
                         let blocked = if let Some(expected) = expected_search_credits {
@@ -597,7 +604,7 @@ async fn proxy_handler(
                                     tid,
                                     &method,
                                     &path,
-                                    parts.uri.query(),
+                                    query.as_deref(),
                                     Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64),
                                     None,
                                     true,
@@ -708,21 +715,40 @@ async fn proxy_handler(
                     };
 
                     if credits > 0 {
-                        match state
-                            .proxy
-                            .record_pending_billing_attempt(
-                                tid,
-                                &method,
-                                &path,
-                                parts.uri.query(),
-                                Some(resp.status.as_u16() as i64),
-                                tavily_code,
-                                billable_flag,
-                                result_status,
-                                None,
-                                credits,
-                            )
-                            .await
+                        match if let Some(subject) = billing_subject.as_deref() {
+                            state
+                                .proxy
+                                .record_pending_billing_attempt_for_subject(
+                                    tid,
+                                    &method,
+                                    &path,
+                                    query.as_deref(),
+                                    Some(resp.status.as_u16() as i64),
+                                    tavily_code,
+                                    billable_flag,
+                                    result_status,
+                                    None,
+                                    credits,
+                                    subject,
+                                )
+                                .await
+                        } else {
+                            state
+                                .proxy
+                                .record_pending_billing_attempt(
+                                    tid,
+                                    &method,
+                                    &path,
+                                    query.as_deref(),
+                                    Some(resp.status.as_u16() as i64),
+                                    tavily_code,
+                                    billable_flag,
+                                    result_status,
+                                    None,
+                                    credits,
+                                )
+                                .await
+                        }
                         {
                             Ok(log_id) => {
                                 attempt_logged = true;
@@ -754,7 +780,7 @@ async fn proxy_handler(
                             tid,
                             &method,
                             &path,
-                            parts.uri.query(),
+                            query.as_deref(),
                             Some(http_code),
                             tavily_code,
                             billable_flag,
@@ -778,7 +804,7 @@ async fn proxy_handler(
                         tid,
                         &method,
                         &path,
-                        parts.uri.query(),
+                        query.as_deref(),
                         None,
                         None,
                         billable_flag,

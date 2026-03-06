@@ -514,7 +514,7 @@ async fn proxy_tavily_http_endpoint(
 
     // Serialize billable requests per quota subject so `peek -> upstream -> charge` stays
     // consistent across local concurrency and other instances sharing the same SQLite database.
-    let _token_billing_guard = if !state.dev_open_admin {
+    let token_billing_guard = if !state.dev_open_admin {
         if let Some(tid) = auth_token_id.as_deref() {
             Some(
                 state
@@ -532,6 +532,9 @@ async fn proxy_tavily_http_endpoint(
     } else {
         None
     };
+    let billing_subject = token_billing_guard
+        .as_ref()
+        .map(|guard| guard.billing_subject().to_string());
 
     if config.enforce_hourly_any_limit
         && let Some(ref tid) = auth_token_id
@@ -580,7 +583,7 @@ async fn proxy_tavily_http_endpoint(
                             None,
                             Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64),
                             None,
-                            true,
+                            false,
                             "error",
                             Some(msg.as_str()),
                         )
@@ -592,7 +595,11 @@ async fn proxy_tavily_http_endpoint(
     }
 
     if let Some(ref tid) = auth_token_id {
-        match state.proxy.peek_token_quota(tid).await {
+        match if let Some(subject) = billing_subject.as_deref() {
+            state.proxy.peek_token_quota_for_subject(subject).await
+        } else {
+            state.proxy.peek_token_quota(tid).await
+        } {
             Ok(verdict) => {
                 if !state.dev_open_admin {
                     let blocked = if config.upstream_path == "/search" {
@@ -693,21 +700,40 @@ async fn proxy_tavily_http_endpoint(
                         research_min_credits.unwrap_or(4)
                     };
                     if credits > 0 {
-                        match state
-                            .proxy
-                            .record_pending_billing_attempt(
-                                tid,
-                                &method,
-                                &path,
-                                None,
-                                Some(resp.status.as_u16() as i64),
-                                analysis.tavily_status_code,
-                                true,
-                                analysis.status,
-                                usage_probe_warning,
-                                credits,
-                            )
-                            .await
+                        match if let Some(subject) = billing_subject.as_deref() {
+                            state
+                                .proxy
+                                .record_pending_billing_attempt_for_subject(
+                                    tid,
+                                    &method,
+                                    &path,
+                                    None,
+                                    Some(resp.status.as_u16() as i64),
+                                    analysis.tavily_status_code,
+                                    true,
+                                    analysis.status,
+                                    usage_probe_warning,
+                                    credits,
+                                    subject,
+                                )
+                                .await
+                        } else {
+                            state
+                                .proxy
+                                .record_pending_billing_attempt(
+                                    tid,
+                                    &method,
+                                    &path,
+                                    None,
+                                    Some(resp.status.as_u16() as i64),
+                                    analysis.tavily_status_code,
+                                    true,
+                                    analysis.status,
+                                    usage_probe_warning,
+                                    credits,
+                                )
+                                .await
+                        }
                         {
                             Ok(log_id) => {
                                 attempt_logged = true;
@@ -853,21 +879,40 @@ async fn proxy_tavily_http_endpoint(
                     }
                 };
                 if credits > 0 {
-                    match state
-                        .proxy
-                        .record_pending_billing_attempt(
-                            tid,
-                            &method,
-                            &path,
-                            None,
-                            Some(resp.status.as_u16() as i64),
-                            analysis.tavily_status_code,
-                            true,
-                            analysis.status,
-                            None,
-                            credits,
-                        )
-                        .await
+                    match if let Some(subject) = billing_subject.as_deref() {
+                        state
+                            .proxy
+                            .record_pending_billing_attempt_for_subject(
+                                tid,
+                                &method,
+                                &path,
+                                None,
+                                Some(resp.status.as_u16() as i64),
+                                analysis.tavily_status_code,
+                                true,
+                                analysis.status,
+                                None,
+                                credits,
+                                subject,
+                            )
+                            .await
+                    } else {
+                        state
+                            .proxy
+                            .record_pending_billing_attempt(
+                                tid,
+                                &method,
+                                &path,
+                                None,
+                                Some(resp.status.as_u16() as i64),
+                                analysis.tavily_status_code,
+                                true,
+                                analysis.status,
+                                None,
+                                credits,
+                            )
+                            .await
+                    }
                     {
                         Ok(log_id) => {
                             attempt_logged = true;

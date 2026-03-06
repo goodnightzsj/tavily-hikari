@@ -8738,6 +8738,59 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test]
+    async fn mcp_query_token_is_stripped_from_persisted_logs() {
+        let db_path = temp_db_path("e2e-query-token-log-redaction");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let expected_api_key = "tvly-e2e-query-token-log-redaction-key";
+        let upstream_addr = spawn_mock_upstream(expected_api_key.to_string()).await;
+        let upstream = format!("http://{}", upstream_addr);
+
+        let proxy =
+            TavilyProxy::with_endpoint(vec![expected_api_key.to_string()], &upstream, &db_str)
+                .await
+                .expect("proxy created");
+        let access_token = proxy
+            .create_access_token(Some("e2e-query-token-log-redaction"))
+            .await
+            .expect("create access token");
+
+        let proxy_addr = spawn_proxy_server(proxy.clone(), upstream.clone()).await;
+
+        let client = Client::new();
+        let url = format!(
+            "http://{}/mcp?foo=1&tavilyApiKey={}&bar=2",
+            proxy_addr, access_token.token
+        );
+        let resp = client
+            .post(url)
+            .json(&serde_json::json!({ "method": "tools/list" }))
+            .send()
+            .await
+            .expect("request to proxy succeeds");
+
+        assert!(resp.status().is_success(), "expected successful MCP response");
+
+        let logs = proxy
+            .token_recent_logs(&access_token.id, 5, None)
+            .await
+            .expect("read token logs");
+        let latest = logs.first().expect("a request log should be recorded");
+
+        assert_eq!(latest.path, "/mcp");
+        assert_eq!(latest.query.as_deref(), Some("foo=1&bar=2"));
+        assert!(
+            latest
+                .query
+                .as_deref()
+                .is_none_or(|query| !query.contains(&access_token.token)),
+            "persisted query log should never contain the raw access token"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn extract_token_from_query_none_or_empty() {
         let (q, t) = extract_token_from_query(None);
