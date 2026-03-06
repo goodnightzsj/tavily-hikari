@@ -5679,6 +5679,8 @@ mod tests {
         let db_path = temp_db_path("http-extract-replace-key");
         let db_str = db_path.to_string_lossy().to_string();
 
+        let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
+
         let expected_api_key = "tvly-http-extract-key";
         let proxy = TavilyProxy::with_endpoint(
             vec![expected_api_key.to_string()],
@@ -5722,6 +5724,8 @@ mod tests {
     async fn tavily_http_crawl_replaces_body_api_key_with_tavily_key() {
         let db_path = temp_db_path("http-crawl-replace-key");
         let db_str = db_path.to_string_lossy().to_string();
+
+        let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
 
         let expected_api_key = "tvly-http-crawl-key";
         let proxy = TavilyProxy::with_endpoint(
