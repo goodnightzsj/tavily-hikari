@@ -102,3 +102,4 @@
 - 2026-03-06: review fix：credits cutover 改为仅写入迁移标记、不再清空既有业务 quota 计数，避免升级时给现有主体意外重置额度。
 - 2026-03-06: review fix：锁定后的 billing subject 贯穿 precheck 与 pending billing 落账，billing-critical subject lookup 改为跨实例 fresh DB 读取，且 SQLite quota subject lease 在 replay 前即启动续租；pending settle 改为原子 claim，跨月 replay 的旧 log 也不再回灌到当前月 quota，避免并发或 crash recovery 下的误扣/重扣。
 - 2026-03-06: review fix：`/mcp` 使用 query 参数鉴权时，日志与 pending billing 落盘统一改写为脱敏后的 query，避免 `tavilyApiKey=<access token>` 被持久化；新增回归测试覆盖。
+- 2026-03-06: review fix：pending billing replay 若出现“claim miss 但状态仍为 pending”的异常，不再静默视为成功，而是保留 pending 状态并返回错误，避免极端并发/故障路径下漏扣。

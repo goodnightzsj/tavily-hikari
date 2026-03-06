@@ -7492,9 +7492,15 @@ impl KeyStore {
             .fetch_optional(&mut *tx)
             .await?;
             match billing_state.as_deref() {
-                Some(BILLING_STATE_CHARGED) | Some(BILLING_STATE_PENDING) => {
+                Some(BILLING_STATE_CHARGED) => {
                     tx.commit().await?;
                     return Ok(());
+                }
+                Some(BILLING_STATE_PENDING) => {
+                    tx.rollback().await.ok();
+                    return Err(ProxyError::Other(format!(
+                        "pending billing log still pending after claim miss: {log_id}",
+                    )));
                 }
                 Some(other) => {
                     tx.rollback().await.ok();
