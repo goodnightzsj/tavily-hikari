@@ -536,9 +536,12 @@
   }
 
   .quota-input {
-    width: 140px;
-    min-width: 140px;
+    width: 156px;
+    min-width: 156px;
     text-align: right;
+    font-size: 1.08rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
     font-variant-numeric: tabular-nums;
   }
 
