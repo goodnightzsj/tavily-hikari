@@ -1389,10 +1389,14 @@ function UserDetailPageCanvas(): JSX.Element {
                     autoComplete="off"
                     className="input input-bordered quota-input"
                     value={formatQuotaDraftInput(draftValue)}
-                    onChange={(event) => setQuotaDraft((prev) => ({
-                      ...prev,
-                      [item.field]: normalizeQuotaDraftInput(event.target.value),
-                    }))}
+                    onChange={(event) => {
+                      const normalizedValue = normalizeQuotaDraftInput(event.target.value)
+                      if (normalizedValue == null) return
+                      setQuotaDraft((prev) => ({
+                        ...prev,
+                        [item.field]: normalizedValue,
+                      }))
+                    }}
                     aria-label={`${item.label} input`}
                   />
                 </div>

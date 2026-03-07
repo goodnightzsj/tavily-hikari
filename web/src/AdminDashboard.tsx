@@ -1985,6 +1985,7 @@ function AdminDashboard(): JSX.Element {
 
   const updateQuotaDraftField = (field: QuotaSliderField, value: string) => {
     const normalizedValue = normalizeQuotaDraftInput(value)
+    if (normalizedValue == null) return
     setUserQuotaDraft((previous) => {
       if (!previous) return previous
       return { ...previous, [field]: normalizedValue }

@@ -31,9 +31,16 @@ export function getQuotaSliderDefaultBaseline(field: QuotaSliderField): number {
   return QUOTA_SLIDER_DEFAULT_BASELINES[field]
 }
 
-export function normalizeQuotaDraftInput(value: string | undefined): string {
-  const digitsOnly = (value ?? '').replace(/[^\d]/g, '')
-  if (!digitsOnly) return ''
+function trimQuotaDraftSeparators(value: string | undefined): string {
+  return (value ?? '').replace(/[\s,_']/g, '').trim()
+}
+
+export function normalizeQuotaDraftInput(value: string | undefined): string | null {
+  const trimmed = trimQuotaDraftSeparators(value)
+  if (!trimmed) return ''
+  if (!/^\d{1,3}(,?\d{3})*$|^\d+$/.test(trimmed)) return null
+
+  const digitsOnly = trimmed.replace(/,/g, '')
   const normalized = digitsOnly.replace(/^0+(?=\d)/, '')
   return normalized || '0'
 }
@@ -47,7 +54,8 @@ export function formatQuotaDraftInput(value: string | undefined): string {
 }
 
 export function parseQuotaDraftValue(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseInt(normalizeQuotaDraftInput(value), 10)
+  const normalized = normalizeQuotaDraftInput(value)
+  const parsed = Number.parseInt(normalized ?? '', 10)
   if (!Number.isFinite(parsed)) return coerceQuotaInteger(fallback, 1)
   return coerceQuotaInteger(parsed, 1)
 }
