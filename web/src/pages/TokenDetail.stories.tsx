@@ -1,5 +1,7 @@
 import { useLayoutEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { addons } from "storybook/preview-api";
+import { SELECT_STORY } from "storybook/internal/core-events";
 
 import TokenDetail from "./TokenDetail";
 
@@ -205,12 +207,7 @@ function installEventSourceMock(): () => void {
 }
 
 function openStoryInManager(storyId: string): void {
-  const target = `${window.location.origin}/?path=/story/${storyId}`;
-  if (window.top && window.top !== window) {
-    window.top.location.assign(target);
-    return;
-  }
-  window.location.assign(target);
+  addons.getChannel().emit(SELECT_STORY, { storyId });
 }
 
 function TokenDetailStoryCanvas({
