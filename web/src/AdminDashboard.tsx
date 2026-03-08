@@ -2768,19 +2768,25 @@ function AdminDashboard(): JSX.Element {
                   {tokenLeaderboardView.map((item) => (
                     <tr key={item.id}>
                       <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <button type="button" className="link-button" onClick={() => navigateToken(item.id)}>
-                            <code>{item.id}</code>
+                        <div className="token-id-cell">
+                          <button type="button" className="link-button token-id-link" onClick={() => navigateToken(item.id)}>
+                            <code className="token-id-code">{item.id}</code>
                           </button>
-                          {!item.enabled && (
-                            <Icon
-                              className="token-status-icon"
-                              icon="mdi:pause-circle-outline"
-                              width={14}
-                              height={14}
-                              aria-label={tokenStrings.statusBadges.disabled}
-                            />
-                          )}
+                          <span
+                            className="token-status-slot"
+                            aria-hidden={item.enabled ? true : undefined}
+                            title={item.enabled ? undefined : tokenStrings.statusBadges.disabled}
+                          >
+                            {!item.enabled && (
+                              <Icon
+                                className="token-status-icon"
+                                icon="mdi:pause-circle-outline"
+                                width={14}
+                                height={14}
+                                aria-label={tokenStrings.statusBadges.disabled}
+                              />
+                            )}
+                          </span>
                         </div>
                       </td>
                       <td>{item.group && item.group.trim().length > 0 ? item.group : '—'}</td>
@@ -3208,14 +3214,14 @@ function AdminDashboard(): JSX.Element {
                   return (
                     <tr key={t.id}>
                       <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div className="token-id-cell">
                           <button
                             type="button"
                             title={tokenStrings.table.id}
-                            className="link-button"
+                            className="link-button token-id-link"
                             onClick={() => navigateToken(t.id)}
                           >
-                            <code>{t.id}</code>
+                            <code className="token-id-code">{t.id}</code>
                           </button>
                           <span
                             className="token-status-slot"

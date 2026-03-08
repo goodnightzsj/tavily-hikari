@@ -3411,6 +3411,35 @@ tbody tr:hover {
   text-overflow: ellipsis;
 }
 
+
+.token-id-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+.token-id-link {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.token-id-code {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-id-cell .status-badge,
+.token-id-cell .token-status-slot {
+  flex-shrink: 0;
+}
+
 .tokens-table th:nth-child(1),
 .tokens-table td:nth-child(1) {
   width: 10%;

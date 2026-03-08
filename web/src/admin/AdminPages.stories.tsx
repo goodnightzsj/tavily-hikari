@@ -718,9 +718,23 @@ function TokensPageCanvas(): JSX.Element {
               {MOCK_TOKENS.map((token) => (
                 <tr key={token.id}>
                   <td>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <code>{token.id}</code>
-                      {!token.enabled && <StatusBadge tone="warning">{tokenStrings.statusBadges.disabled}</StatusBadge>}
+                    <div className="token-id-cell">
+                      <code className="token-id-code">{token.id}</code>
+                      <span
+                        className="token-status-slot"
+                        aria-hidden={token.enabled ? true : undefined}
+                        title={token.enabled ? undefined : tokenStrings.statusBadges.disabled}
+                      >
+                        {!token.enabled && (
+                          <Icon
+                            className="token-status-icon"
+                            icon="mdi:pause-circle-outline"
+                            width={14}
+                            height={14}
+                            aria-label={tokenStrings.statusBadges.disabled}
+                          />
+                        )}
+                      </span>
                     </div>
                   </td>
                   <td>
