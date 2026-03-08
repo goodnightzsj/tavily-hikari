@@ -378,7 +378,7 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
       window.location.hash = previousHash
       setReady(false)
     }
-  }, [storyState.probeMode, storyState.routeHash, storyState.tokenListEmpty])
+  }, [storyState.isAdmin, storyState.probeMode, storyState.routeHash, storyState.tokenListEmpty])
 
   useEffect(() => {
     if (!ready || !storyState.autoProbeTarget) return
