@@ -98,8 +98,15 @@
 - 假设：管理员在 `/admin` 下始终允许直接访问 `/console`，无需再判断是否存在有效用户 session。
 - 假设：固定返回 `/console` 即可满足当前产品诉求，本轮不追踪最近一次用户控制台子路由。
 
+## Visual Evidence (PR)
+
+![管理控制台页头展示返回用户控制台入口](./assets/admin-dashboard-return-to-console.png)
+
+![用户控制台落地页保持既有 fallback](./assets/user-console-landing-fallback.png)
+
 ## 变更记录（Change log）
 
 - 2026-03-09: 创建 spec，冻结“页头全局、始终显示、固定跳转 `/console`、不改后端接口”的实现边界。
 - 2026-03-09: 已完成共享 return CTA、admin header/detail 接入、i18n 与 responsive 调整；通过 `cd web && bun test`、`cd web && bun run build`，并在本地浏览器验证 `/admin`、`/admin/tokens/leaderboard`、`/admin/tokens/demo-token`、`/admin/keys/demo-key`、`/admin/users/demo-user` 的入口与 `/console` 跳转。
 - 2026-03-09: PR `#108` 已创建且 GitHub checks 全绿；`codex review` 因多次 `502 Bad Gateway` 重试未返回最终结论，M5 暂维持未完成。
+- 2026-03-09: 补充管理界面与用户控制台落地页截图到 spec 资产，作为 PR 视觉验收证据。
