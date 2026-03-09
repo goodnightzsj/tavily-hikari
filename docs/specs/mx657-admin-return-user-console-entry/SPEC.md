@@ -94,6 +94,7 @@
 ## 风险 / 开放问题 / 假设
 
 - 风险：admin 移动端页头高度较紧，新 CTA 若处理不当会挤压 refresh/back 控件。
+- 开放问题：`codex review` 在快车道收敛阶段出现上游 `502 Bad Gateway` 重试，当前尚未拿到最终 review 结论，因此 M5 继续保持 pending。
 - 假设：管理员在 `/admin` 下始终允许直接访问 `/console`，无需再判断是否存在有效用户 session。
 - 假设：固定返回 `/console` 即可满足当前产品诉求，本轮不追踪最近一次用户控制台子路由。
 
@@ -101,3 +102,4 @@
 
 - 2026-03-09: 创建 spec，冻结“页头全局、始终显示、固定跳转 `/console`、不改后端接口”的实现边界。
 - 2026-03-09: 已完成共享 return CTA、admin header/detail 接入、i18n 与 responsive 调整；通过 `cd web && bun test`、`cd web && bun run build`，并在本地浏览器验证 `/admin`、`/admin/tokens/leaderboard`、`/admin/tokens/demo-token`、`/admin/keys/demo-key`、`/admin/users/demo-user` 的入口与 `/console` 跳转。
+- 2026-03-09: PR `#108` 已创建且 GitHub checks 全绿；`codex review` 因多次 `502 Bad Gateway` 重试未返回最终结论，M5 暂维持未完成。
