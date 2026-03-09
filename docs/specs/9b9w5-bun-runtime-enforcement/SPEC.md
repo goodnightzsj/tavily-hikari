@@ -9,7 +9,7 @@
 ## 背景 / 问题陈述
 
 - 旧的 `docs/plan/9b9w5:bun-migration/PLAN.md` 已经完成了 package manager、lockfile 与 CI 的 Bun 迁移，但仓库日常命令仍可能因为 `node_modules/.bin/*` 的 shebang 回落到 `node` runtime。
-- 当前 root / `web/` 的 `package.json` 都已固定 `packageManager: bun@1.3.9`，CI / release workflow 也已切到 `oven-sh/setup-bun@v2`；因此新的问题不再是“是否迁移到 Bun”，而是“如何把 Bun 作为默认执行 runtime 收口到位”。
+- 当前 root / `web/` 的 `package.json` 都已固定 `packageManager: bun@1.3.10`，CI / release workflow 也已切到 `oven-sh/setup-bun@v2`；因此新的问题不再是“是否迁移到 Bun”，而是“如何把 Bun 作为默认执行 runtime 收口到位”。
 - 本轮已确认 `commitlint`、`dprint`、`tsc`、`vite build`、`storybook build` 可以在 `bun --bun` 下执行成功，因此不需要为了“去 Node”重写整套前端工具链。
 
 ## 目标 / 非目标
@@ -120,7 +120,7 @@
 
 - 创建一个临时 `node` shim 并前置到 `PATH`，该 shim 必须立即失败。
 - 在该 shim 环境下，至少复验：
-  - root 工具命令
+  - root hook/tool 实际命令路径（`bunx --bun dprint fmt`、`bunx --bun commitlint --edit`）
   - `cd web && bun run build`
   - `cd web && bun run build-storybook`
 
@@ -154,3 +154,5 @@
 - 2026-03-09: 已通过 `bun install --frozen-lockfile`、`cd web && bun install --frozen-lockfile`、`cd web && bun run build`、`bun run validate:no-node-runtime`；浏览器确认 `/`、`/admin`、`/console`、`/login` 与 `/api/summary`、`/health`、`/mcp` 开发代理链路可用（`/mcp` 指向本地 mock upstream）。
 - 2026-03-09: PR #111 已补齐 `type:skip` + `channel:stable` 标签，CI checks 全绿；clean-room `codex review --base main` 复跑确认无阻塞缺陷，spec 与索引同步收口为已完成。
 - 2026-03-09: 按“适当消除、不硬改”继续收口：`commitlint.config.mjs` 改为 ESM、`web/tailwind.config.ts` 改为 TS config、`web/components.json` 同步新路径，`web/scripts/write-version.mjs` 改成 Bun-native 版本写入脚本；`web/postcss.config.cjs`、`vite.config.ts` 与 `@types/node` 暂保留。
+- 2026-03-09: `scripts/validate-no-node-runtime.sh` 改为真实执行 hook 命令路径（`dprint fmt` / `commitlint --edit`），避免仅查版本号导致的 no-node 假阳性。
+- 2026-03-09: Bun pin 升级到 `1.3.10`；共享测试机上验证到 `1.3.9` 在 Linux 下执行 `bunx --bun dprint fmt` 仍会回落到 `node_modules/.bin/dprint`，升级后 no-node proof 通过。
