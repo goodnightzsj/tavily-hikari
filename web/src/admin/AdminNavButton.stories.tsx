@@ -3,7 +3,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import AdminNavButton from './AdminNavButton'
 
 const meta = {
-  title: 'Admin/AdminNavButton',
+  title: 'Admin/Wrappers/AdminNavButton',
   component: AdminNavButton,
   parameters: {
     layout: 'padded',

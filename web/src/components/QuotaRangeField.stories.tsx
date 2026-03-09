@@ -32,7 +32,7 @@ function QuotaRangeFieldStory(): JSX.Element {
 }
 
 const meta = {
-  title: 'Admin/QuotaRangeField',
+  title: 'Admin/Wrappers/QuotaRangeField',
   component: QuotaRangeField,
   parameters: {
     layout: 'padded',

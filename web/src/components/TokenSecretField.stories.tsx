@@ -32,7 +32,7 @@ function TokenSecretFieldStory(props: { visible?: boolean; copyState?: TokenSecr
 }
 
 const meta = {
-  title: 'Components/TokenSecretField',
+  title: 'Public/Wrappers/TokenSecretField',
   parameters: {
     layout: 'padded',
   },

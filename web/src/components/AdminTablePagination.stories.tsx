@@ -25,7 +25,7 @@ function PaginationStory(): JSX.Element {
 }
 
 const meta = {
-  title: 'Admin/AdminTablePagination',
+  title: 'Admin/Wrappers/AdminTablePagination',
   component: AdminTablePagination,
   parameters: {
     layout: 'padded',

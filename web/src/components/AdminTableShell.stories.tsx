@@ -4,7 +4,7 @@ import AdminTableShell from './AdminTableShell'
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table'
 
 const meta = {
-  title: 'Admin/AdminTableShell',
+  title: 'Admin/Wrappers/AdminTableShell',
   component: AdminTableShell,
   parameters: {
     layout: 'padded',
