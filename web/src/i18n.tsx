@@ -170,6 +170,7 @@ interface AdminTranslationsShape {
     updatedPrefix: string
     refreshNow: string
     refreshing: string
+    returnToConsole: string
   }
   nav: {
     dashboard: string
@@ -921,6 +922,7 @@ export const translations: Record<Language, TranslationShape> = {
         updatedPrefix: 'Updated',
         refreshNow: 'Refresh Now',
         refreshing: 'Refreshing…',
+        returnToConsole: 'Back to User Console',
       },
       nav: {
         dashboard: 'Dashboard',
@@ -1660,6 +1662,7 @@ export const translations: Record<Language, TranslationShape> = {
         updatedPrefix: '更新于',
         refreshNow: '立即刷新',
         refreshing: '刷新中…',
+        returnToConsole: '返回用户控制台',
       },
       nav: {
         dashboard: '仪表盘',

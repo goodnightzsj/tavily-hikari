@@ -108,6 +108,8 @@ function PanelHeaderLayoutStory(): JSX.Element {
         isRefreshing={false}
         refreshLabel="Refresh Now"
         refreshingLabel="Refreshing"
+        userConsoleLabel="Back to User Console"
+        userConsoleHref="/console"
         onRefresh={() => undefined}
       />
       <LayoutBody title="Scheduled Jobs" description="Responsive layout fixture for shell and header verification." />
@@ -134,6 +136,8 @@ function TokenUsageLayoutStory(): JSX.Element {
         backLabel="Back"
         refreshLabel="Refresh Now"
         refreshingLabel="Refreshing"
+        userConsoleLabel="Back to User Console"
+        userConsoleHref="/console"
         isRefreshing={false}
         period={period}
         focus={focus}

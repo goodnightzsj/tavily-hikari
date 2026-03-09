@@ -572,6 +572,8 @@ function AdminPageFrame({ activeModule, children }: AdminPageFrameProps): JSX.El
         isRefreshing={false}
         refreshLabel={admin.header.refreshNow}
         refreshingLabel={admin.header.refreshing}
+        userConsoleLabel={admin.header.returnToConsole}
+        userConsoleHref="/console"
         onRefresh={() => {}}
       />
       {children}

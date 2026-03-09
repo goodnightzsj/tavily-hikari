@@ -1884,6 +1884,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -1968,6 +1969,62 @@
 
 .admin-panel-refresh-button .icon-spin {
   animation-duration: 0.8s;
+}
+
+.admin-return-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 2.1rem;
+  padding: 0 0.82rem;
+  border-radius: 10px;
+  border: 1px solid hsl(var(--secondary) / 0.28);
+  background:
+    linear-gradient(180deg, hsl(var(--secondary) / 0.16) 0%, hsl(var(--secondary) / 0.08) 100%),
+    hsl(var(--card) / 0.9);
+  color: hsl(var(--foreground) / 0.86);
+  text-decoration: none;
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 hsl(var(--background) / 0.84);
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.admin-return-link:hover {
+  border-color: hsl(var(--secondary) / 0.44);
+  background:
+    linear-gradient(180deg, hsl(var(--secondary) / 0.24) 0%, hsl(var(--secondary) / 0.14) 100%),
+    hsl(var(--card) / 0.95);
+  color: hsl(var(--foreground));
+  transform: translateY(-1px);
+}
+
+.admin-return-link svg {
+  color: currentColor;
+  flex-shrink: 0;
+}
+
+.admin-return-link--header {
+  align-self: flex-start;
+}
+
+.admin-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.token-detail-controls {
+  justify-content: flex-end;
 }
 
 .token-usage-header {
@@ -4524,7 +4581,7 @@ tbody .log-details-row:hover {
   .token-usage-header-utility {
     width: 100%;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
     align-items: center;
     gap: 8px;
   }
@@ -5432,6 +5489,21 @@ tbody .log-details-row:hover {
   background: hsl(var(--primary) / 0.24);
 }
 
+.dark .admin-return-link {
+  border-color: hsl(var(--secondary) / 0.42);
+  background:
+    linear-gradient(180deg, hsl(var(--secondary) / 0.22) 0%, hsl(var(--secondary) / 0.12) 100%),
+    hsl(var(--card) / 0.88);
+  color: hsl(var(--foreground) / 0.9);
+}
+
+.dark .admin-return-link:hover {
+  border-color: hsl(var(--secondary) / 0.6);
+  background:
+    linear-gradient(180deg, hsl(var(--secondary) / 0.3) 0%, hsl(var(--secondary) / 0.18) 100%),
+    hsl(var(--card) / 0.92);
+}
+
 .dark .token-usage-header .theme-toggle-trigger {
   background: hsl(var(--card) / 0.88);
   border-color: hsl(var(--border) / 0.9);
@@ -6070,7 +6142,8 @@ tbody .log-details-row:hover {
   .admin-main-content .admin-shell-content > .admin-panel-header .user-badge,
   .admin-main-content .admin-shell-content > .admin-panel-header .theme-toggle-label,
   .admin-main-content .admin-shell-content > .admin-panel-header .language-switcher-trigger > svg:last-child,
-  .admin-main-content .admin-shell-content > .admin-panel-header .admin-panel-refresh-button span {
+  .admin-main-content .admin-shell-content > .admin-panel-header .admin-panel-refresh-button span,
+  .admin-main-content .admin-shell-content > .admin-panel-header .admin-return-link span {
     display: none;
   }
 
@@ -6081,7 +6154,8 @@ tbody .log-details-row:hover {
 
   .admin-main-content .admin-shell-content > .admin-panel-header .theme-toggle-trigger,
   .admin-main-content .admin-shell-content > .admin-panel-header .language-switcher-trigger,
-  .admin-main-content .admin-shell-content > .admin-panel-header .admin-panel-refresh-button {
+  .admin-main-content .admin-shell-content > .admin-panel-header .admin-panel-refresh-button,
+  .admin-main-content .admin-shell-content > .admin-panel-header .admin-return-link {
     min-height: 32px;
     height: 32px;
     min-width: 32px;
@@ -6146,19 +6220,41 @@ tbody .log-details-row:hover {
 
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-back-button span,
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-refresh-button span,
-  .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-label {
+  .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-label,
+  .admin-main-content .admin-shell-content > .token-usage-header .admin-return-link span {
     display: none;
   }
 
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-back-button,
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-refresh-button,
-  .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-trigger {
+  .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-trigger,
+  .admin-main-content .admin-shell-content > .token-usage-header .admin-return-link {
     min-height: 32px;
     height: 32px;
     min-width: 32px;
     padding-inline: 0.5rem;
     justify-content: center;
     border-radius: 9px;
+  }
+
+  .app-header .admin-return-link span,
+  .panel-header .admin-return-link span {
+    display: none;
+  }
+
+  .app-header .admin-return-link,
+  .panel-header .admin-return-link {
+    min-height: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding-inline: 0.5rem;
+    justify-content: center;
+    border-radius: 9px;
+  }
+
+  .admin-inline-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
 
@@ -6222,7 +6318,8 @@ tbody .log-details-row:hover {
 
   .admin-main-content .admin-shell-content > .admin-panel-header .theme-toggle-trigger,
   .admin-main-content .admin-shell-content > .admin-panel-header .language-switcher-trigger,
-  .admin-main-content .admin-shell-content > .admin-panel-header .admin-panel-refresh-button {
+  .admin-main-content .admin-shell-content > .admin-panel-header .admin-panel-refresh-button,
+  .admin-main-content .admin-shell-content > .admin-panel-header .admin-return-link {
     min-width: 30px;
     min-height: 30px;
     height: 30px;
@@ -6238,7 +6335,8 @@ tbody .log-details-row:hover {
 
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-back-button,
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-refresh-button,
-  .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-trigger {
+  .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-trigger,
+  .admin-main-content .admin-shell-content > .token-usage-header .admin-return-link {
     min-width: 30px;
     min-height: 30px;
     height: 30px;

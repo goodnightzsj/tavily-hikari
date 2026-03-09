@@ -4,6 +4,7 @@ import { ApiKeysValidationDialog } from './components/ApiKeysValidationDialog'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ThemeToggle from './components/ThemeToggle'
+import AdminReturnToConsoleLink from './components/AdminReturnToConsoleLink'
 import AdminPanelHeader from './components/AdminPanelHeader'
 import SegmentedTabs from './components/ui/SegmentedTabs'
 import TokenUsageHeader from './components/TokenUsageHeader'
@@ -36,6 +37,7 @@ import {
 } from './admin/routes'
 import { useTranslate, type AdminTranslations } from './i18n'
 import { extractTvlyDevApiKeysFromText } from './lib/api-key-extract'
+import { ADMIN_USER_CONSOLE_HREF } from './lib/adminUserConsoleEntry'
 import {
   fetchApiKeys,
   fetchApiKeySecret,
@@ -443,6 +445,7 @@ function AdminDashboard(): JSX.Element {
   const translations = useTranslate()
   const adminStrings = translations.admin
   const headerStrings = adminStrings.header
+  const userConsoleHref = ADMIN_USER_CONSOLE_HREF
   const tokenStrings = adminStrings.tokens
   const tokenLeaderboardStrings = adminStrings.tokenLeaderboard
   const quotaLabels = tokenStrings.quotaStates ?? {
@@ -2399,13 +2402,20 @@ function AdminDashboard(): JSX.Element {
                 {usersStrings.detail.subtitle.replace('{id}', route.id)}
               </p>
             </div>
-            <button
-              type="button"
-              className="btn btn-outline"
-              onClick={() => navigateModule('users')}
-            >
-              {usersStrings.detail.back}
-            </button>
+            <div className="admin-inline-actions">
+              <AdminReturnToConsoleLink
+                label={headerStrings.returnToConsole}
+                href={userConsoleHref}
+                className="admin-return-link--detail"
+              />
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => navigateModule('users')}
+              >
+                {usersStrings.detail.back}
+              </button>
+            </div>
           </div>
         </section>
 
@@ -2729,6 +2739,8 @@ function AdminDashboard(): JSX.Element {
           backLabel={tokenLeaderboardStrings.back}
           refreshLabel={headerStrings.refreshNow}
           refreshingLabel={headerStrings.refreshing}
+          userConsoleLabel={headerStrings.returnToConsole}
+          userConsoleHref={userConsoleHref}
           isRefreshing={tokenLeaderboardLoading}
           period={tokenLeaderboardPeriod}
           focus={tokenLeaderboardFocus}
@@ -3045,6 +3057,8 @@ function AdminDashboard(): JSX.Element {
         isRefreshing={loading}
         refreshLabel={headerStrings.refreshNow}
         refreshingLabel={headerStrings.refreshing}
+        userConsoleLabel={headerStrings.returnToConsole}
+        userConsoleHref={userConsoleHref}
         onRefresh={handleManualRefresh}
       />
 
@@ -4965,6 +4979,11 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
         </div>
         <div className="controls">
           <ThemeToggle />
+          <AdminReturnToConsoleLink
+            label={adminStrings.header.returnToConsole}
+            href={ADMIN_USER_CONSOLE_HREF}
+            className="admin-return-link--detail"
+          />
           <button
             type="button"
             className={`btn${syncState === 'success' ? ' btn-success' : ''}`}

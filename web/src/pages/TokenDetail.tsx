@@ -3,9 +3,11 @@ import { Icon } from '@iconify/react'
 import { Chart as ChartJS, BarElement, CategoryScale, Legend, LinearScale, Tooltip, type ChartOptions } from 'chart.js'
 import { Bar } from 'react-chartjs-2'
 import { fetchTokenUsageSeries, rotateTokenSecret, type TokenOwnerSummary, type TokenUsageBucket } from '../api'
+import AdminReturnToConsoleLink from '../components/AdminReturnToConsoleLink'
 import ThemeToggle from '../components/ThemeToggle'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
 import { useTranslate } from '../i18n'
+import { ADMIN_USER_CONSOLE_HREF } from '../lib/adminUserConsoleEntry'
 import { useResponsiveModes } from '../lib/responsive'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
@@ -686,8 +688,13 @@ export default function TokenDetail({
           <h1>Access Token Detail</h1>
           <div className="subtitle">Token <code>{id}</code></div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="controls token-detail-controls">
           <ThemeToggle />
+          <AdminReturnToConsoleLink
+            label={translations.admin.header.returnToConsole}
+            href={ADMIN_USER_CONSOLE_HREF}
+            className="admin-return-link--detail"
+          />
           <span className={`sse-chip ${sseConnected ? 'sse-chip-ok' : 'sse-chip-warn'}`} title="Live updates via SSE">
             <span className="sse-dot" aria-hidden="true" /> {sseConnected ? 'Live' : 'Offline'}
           </span>

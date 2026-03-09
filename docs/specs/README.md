@@ -9,6 +9,7 @@
 
 |    ID | Title                                                  | Status           | Spec                                                       | Last       | Notes                                                                                                       |
 | ----: | ------------------------------------------------------ | ---------------- | ---------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| mx657 | 管理员控制台返回用户控制台入口                         | 部分完成（4/5）  | `mx657-admin-return-user-console-entry/SPEC.md`            | 2026-03-09 | local validation: `/admin*` headers + `/console` jump verified                                              |
 | 2uv3g | 用户控制台管理员入口                                   | 已完成           | `2uv3g-user-console-admin-entry/SPEC.md`                   | 2026-03-08 | local branch: `/console` admin CTA + Storybook admin control + unit test                                    |
 | bcpru | Web 响应式双设备与 Storybook 断点验收收敛              | 已完成（6/6）    | `bcpru-web-responsive-breakpoint-convergence/SPEC.md`      | 2026-03-04 | fast-track: responsive convergence, Storybook coverage, and boundary validation completed                   |
 | vr67d | LinuxDo 登录复用既有 Token + 强制重登录 + 历史误建自愈 | 已完成（快车道） | `vr67d-linuxdo-token-rebind-relogin/SPEC.md`               | 2026-03-05 | hotfix: `/auth/linuxdo` use 303 to avoid POST body leak + fix upstream 405                                  |
