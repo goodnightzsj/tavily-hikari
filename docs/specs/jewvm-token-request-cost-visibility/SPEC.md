@@ -130,6 +130,14 @@
 - 假设：`auth_token_logs.business_credits` 在当前仓库 schema 中已存在；旧数据为空值时只需要前后端按 `Option` 兼容。
 - 假设：`Charged Credits` 文案表示“系统内部实际记账额度”，不是货币金额，也不是上游账单展示名。
 
+## Visual Evidence (PR)
+
+Storybook `Admin/Pages/TokenDetail / Default`: verifies the admin token detail page shows the `Charged Credits` column together with the renamed `Tavily Status` label in the request records table.
+
+![Token detail request records desktop](./assets/token-detail-story-default-full.png)
+
+![Token detail request records mobile](./assets/token-detail-story-mobile-full.png)
+
 ## 变更记录（Change log）
 
 - 2026-03-10: 初始化快车道 spec，冻结 token detail 费用列、`Tavily Status` 文案正名，以及 `business_credits` 仅透传不改计费逻辑的边界。
