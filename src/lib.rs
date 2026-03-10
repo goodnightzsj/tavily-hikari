@@ -113,6 +113,8 @@ const TOKEN_AFFINITY_MAX_ENTRIES: usize = 10_000;
 // Cache token -> user binding to avoid repeated DB lookups on hot request paths.
 const TOKEN_BINDING_CACHE_TTL_SECS: u64 = 30;
 const TOKEN_BINDING_CACHE_MAX_ENTRIES: usize = 10_000;
+const ACCOUNT_QUOTA_RESOLUTION_CACHE_TTL_SECS: u64 = 5;
+const ACCOUNT_QUOTA_RESOLUTION_CACHE_MAX_ENTRIES: usize = 10_000;
 // Keep the lease TTL below the acquisition wait so a crashed holder can be recovered
 // by the next in-flight request instead of blocking the subject for minutes.
 const QUOTA_SUBJECT_LOCK_TTL_SECS: u64 = 20;
@@ -664,20 +666,22 @@ fn build_account_quota_resolution(
         effective.clamped_non_negative()
     };
 
-    if block_all {
-        breakdown.push(AccountQuotaBreakdownRecord {
-            kind: "effective".to_string(),
-            label: "effective".to_string(),
-            tag_id: None,
-            tag_name: None,
-            source: None,
-            effect_kind: USER_TAG_EFFECT_BLOCK_ALL.to_string(),
-            hourly_any_delta: 0,
-            hourly_delta: 0,
-            daily_delta: 0,
-            monthly_delta: 0,
-        });
-    }
+    breakdown.push(AccountQuotaBreakdownRecord {
+        kind: "effective".to_string(),
+        label: "effective".to_string(),
+        tag_id: None,
+        tag_name: None,
+        source: None,
+        effect_kind: if block_all {
+            USER_TAG_EFFECT_BLOCK_ALL.to_string()
+        } else {
+            "effective".to_string()
+        },
+        hourly_any_delta: effective.hourly_any_limit,
+        hourly_delta: effective.hourly_limit,
+        daily_delta: effective.daily_limit,
+        monthly_delta: effective.monthly_limit,
+    });
 
     AccountQuotaResolution {
         base,
@@ -730,6 +734,12 @@ impl QuotaSubject {
 #[derive(Debug, Clone)]
 struct TokenBindingCacheEntry {
     user_id: Option<String>,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct AccountQuotaResolutionCacheEntry {
+    resolution: AccountQuotaResolution,
     expires_at: Instant,
 }
 
@@ -3684,6 +3694,7 @@ fn is_transient_sqlite_write_error(err: &ProxyError) -> bool {
 struct KeyStore {
     pool: SqlitePool,
     token_binding_cache: RwLock<HashMap<String, TokenBindingCacheEntry>>,
+    account_quota_resolution_cache: RwLock<HashMap<String, AccountQuotaResolutionCacheEntry>>,
     #[cfg(test)]
     forced_pending_claim_miss_log_ids: Mutex<HashSet<i64>>,
     // Lightweight failpoint registry used by integration tests to simulate a lost quota
@@ -3708,6 +3719,7 @@ impl KeyStore {
         let store = Self {
             pool,
             token_binding_cache: RwLock::new(HashMap::new()),
+            account_quota_resolution_cache: RwLock::new(HashMap::new()),
             #[cfg(test)]
             forced_pending_claim_miss_log_ids: Mutex::new(HashSet::new()),
             forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
@@ -6959,6 +6971,83 @@ impl KeyStore {
         }
     }
 
+    async fn cached_account_quota_resolution(
+        &self,
+        user_id: &str,
+    ) -> Option<AccountQuotaResolution> {
+        let now = Instant::now();
+        if let Some(cached) = {
+            let cache = self.account_quota_resolution_cache.read().await;
+            cache.get(user_id).cloned()
+        } && cached.expires_at > now
+        {
+            return Some(cached.resolution);
+        }
+        None
+    }
+
+    async fn cache_account_quota_resolution(
+        &self,
+        user_id: &str,
+        resolution: &AccountQuotaResolution,
+    ) {
+        let mut cache = self.account_quota_resolution_cache.write().await;
+        cache.insert(
+            user_id.to_string(),
+            AccountQuotaResolutionCacheEntry {
+                resolution: resolution.clone(),
+                expires_at: Instant::now()
+                    + Duration::from_secs(ACCOUNT_QUOTA_RESOLUTION_CACHE_TTL_SECS),
+            },
+        );
+
+        if cache.len() <= ACCOUNT_QUOTA_RESOLUTION_CACHE_MAX_ENTRIES {
+            return;
+        }
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires_at > now);
+        if cache.len() <= ACCOUNT_QUOTA_RESOLUTION_CACHE_MAX_ENTRIES {
+            return;
+        }
+        let overflow = cache.len() - ACCOUNT_QUOTA_RESOLUTION_CACHE_MAX_ENTRIES;
+        let keys: Vec<String> = cache.keys().take(overflow).cloned().collect();
+        for key in keys {
+            cache.remove(&key);
+        }
+    }
+
+    async fn invalidate_account_quota_resolution(&self, user_id: &str) {
+        self.account_quota_resolution_cache
+            .write()
+            .await
+            .remove(user_id);
+    }
+
+    async fn invalidate_account_quota_resolutions<I, S>(&self, user_ids: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut cache = self.account_quota_resolution_cache.write().await;
+        for user_id in user_ids {
+            cache.remove(user_id.as_ref());
+        }
+    }
+
+    async fn invalidate_all_account_quota_resolutions(&self) {
+        self.account_quota_resolution_cache.write().await.clear();
+    }
+
+    async fn list_user_ids_for_tag(&self, tag_id: &str) -> Result<Vec<String>, ProxyError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT user_id FROM user_tag_bindings WHERE tag_id = ?",
+        )
+        .bind(tag_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ProxyError::Database)
+    }
+
     async fn list_admin_users_paged(
         &self,
         page: i64,
@@ -7264,6 +7353,7 @@ impl KeyStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        self.invalidate_account_quota_resolution(user_id).await;
         Ok(true)
     }
 
@@ -7312,6 +7402,7 @@ impl KeyStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        self.invalidate_all_account_quota_resolutions().await;
         Ok(())
     }
 
@@ -7531,6 +7622,7 @@ impl KeyStore {
         .bind(USER_TAG_EFFECT_QUOTA_DELTA)
         .execute(&self.pool)
         .await?;
+        self.invalidate_all_account_quota_resolutions().await;
         Ok(())
     }
 
@@ -7583,6 +7675,7 @@ impl KeyStore {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        self.invalidate_account_quota_resolution(user_id).await;
         Ok(())
     }
 
@@ -7824,6 +7917,7 @@ impl KeyStore {
         let Some(existing) = self.fetch_user_tag_by_id(tag_id).await? else {
             return Ok(None);
         };
+        let affected_user_ids = self.list_user_ids_for_tag(tag_id).await?;
         let now = Utc::now().timestamp();
         if existing.is_system() {
             if existing.name != name
@@ -7889,6 +7983,8 @@ impl KeyStore {
                 Err(err) => return Err(ProxyError::Database(err)),
             }
         }
+        self.invalidate_account_quota_resolutions(&affected_user_ids)
+            .await;
         self.fetch_user_tag_by_id(tag_id).await
     }
 
@@ -7901,6 +7997,7 @@ impl KeyStore {
                 "system user tags cannot be deleted".to_string(),
             ));
         }
+        let affected_user_ids = self.list_user_ids_for_tag(tag_id).await?;
         let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM user_tag_bindings WHERE tag_id = ?")
             .bind(tag_id)
@@ -7911,6 +8008,8 @@ impl KeyStore {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        self.invalidate_account_quota_resolutions(&affected_user_ids)
+            .await;
         Ok(true)
     }
 
@@ -7945,6 +8044,7 @@ impl KeyStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        self.invalidate_account_quota_resolution(user_id).await;
         Ok(true)
     }
 
@@ -7977,6 +8077,7 @@ impl KeyStore {
             .bind(tag_id)
             .execute(&self.pool)
             .await?;
+        self.invalidate_account_quota_resolution(user_id).await;
         Ok(true)
     }
 
@@ -8109,9 +8210,16 @@ impl KeyStore {
         &self,
         user_id: &str,
     ) -> Result<AccountQuotaResolution, ProxyError> {
+        if let Some(cached) = self.cached_account_quota_resolution(user_id).await {
+            return Ok(cached);
+        }
+
         let base = self.ensure_account_quota_limits(user_id).await?;
         let tags = self.list_user_tag_bindings_for_user(user_id).await?;
-        Ok(build_account_quota_resolution(base, tags))
+        let resolution = build_account_quota_resolution(base, tags);
+        self.cache_account_quota_resolution(user_id, &resolution)
+            .await;
+        Ok(resolution)
     }
 
     async fn fetch_user_success_failure(
@@ -15940,7 +16048,138 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         assert_eq!(resolution.effective.hourly_limit, 0);
         assert_eq!(resolution.effective.daily_limit, 0);
         assert_eq!(resolution.effective.monthly_limit, 0);
-        assert_eq!(resolution.breakdown.len(), 2);
+        assert_eq!(resolution.breakdown.len(), 3);
+        let effective_row = resolution
+            .breakdown
+            .iter()
+            .find(|entry| entry.kind == "effective")
+            .expect("effective row present");
+        assert_eq!(effective_row.effect_kind, "effective");
+        assert_eq!(effective_row.hourly_any_delta, 0);
+        assert_eq!(effective_row.hourly_delta, 0);
+        assert_eq!(effective_row.daily_delta, 0);
+        assert_eq!(effective_row.monthly_delta, 0);
+    }
+
+    #[tokio::test]
+    async fn account_quota_resolution_cache_invalidates_on_binding_and_tag_updates() {
+        let db_path = temp_db_path("account-quota-resolution-cache");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "github".to_string(),
+                provider_user_id: "quota-cache-user".to_string(),
+                username: Some("quota_cache_user".to_string()),
+                name: Some("Quota Cache User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: None,
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let defaults = AccountQuotaLimits::defaults();
+
+        let initial = proxy
+            .key_store
+            .resolve_account_quota_resolution(&user.user_id)
+            .await
+            .expect("initial resolution");
+        assert_eq!(
+            initial.effective.hourly_any_limit,
+            defaults.hourly_any_limit
+        );
+        assert_eq!(initial.effective.hourly_limit, defaults.hourly_limit);
+
+        let tag = proxy
+            .create_user_tag(
+                "quota_cache_boost",
+                "Quota Cache Boost",
+                Some("sparkles"),
+                USER_TAG_EFFECT_QUOTA_DELTA,
+                7,
+                8,
+                9,
+                10,
+            )
+            .await
+            .expect("create custom tag");
+        proxy
+            .bind_user_tag_to_user(&user.user_id, &tag.id)
+            .await
+            .expect("bind user tag");
+
+        let after_bind = proxy
+            .key_store
+            .resolve_account_quota_resolution(&user.user_id)
+            .await
+            .expect("resolution after bind");
+        assert_eq!(
+            after_bind.effective.hourly_any_limit,
+            defaults.hourly_any_limit + 7
+        );
+        assert_eq!(after_bind.effective.hourly_limit, defaults.hourly_limit + 8);
+
+        proxy
+            .update_user_tag(
+                &tag.id,
+                "quota_cache_boost",
+                "Quota Cache Boost",
+                Some("sparkles"),
+                USER_TAG_EFFECT_QUOTA_DELTA,
+                11,
+                12,
+                13,
+                14,
+            )
+            .await
+            .expect("update user tag")
+            .expect("updated user tag");
+
+        let after_update = proxy
+            .key_store
+            .resolve_account_quota_resolution(&user.user_id)
+            .await
+            .expect("resolution after update");
+        assert_eq!(
+            after_update.effective.hourly_any_limit,
+            defaults.hourly_any_limit + 11
+        );
+        assert_eq!(
+            after_update.effective.hourly_limit,
+            defaults.hourly_limit + 12
+        );
+        assert_eq!(
+            after_update.effective.daily_limit,
+            defaults.daily_limit + 13
+        );
+        assert_eq!(
+            after_update.effective.monthly_limit,
+            defaults.monthly_limit + 14
+        );
+
+        proxy
+            .unbind_user_tag_from_user(&user.user_id, &tag.id)
+            .await
+            .expect("unbind user tag");
+        let after_unbind = proxy
+            .key_store
+            .resolve_account_quota_resolution(&user.user_id)
+            .await
+            .expect("resolution after unbind");
+        assert_eq!(
+            after_unbind.effective.hourly_any_limit,
+            defaults.hourly_any_limit
+        );
+        assert_eq!(after_unbind.effective.hourly_limit, defaults.hourly_limit);
+        assert_eq!(after_unbind.effective.daily_limit, defaults.daily_limit);
+        assert_eq!(after_unbind.effective.monthly_limit, defaults.monthly_limit);
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]

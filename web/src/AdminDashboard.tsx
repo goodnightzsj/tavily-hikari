@@ -3581,7 +3581,9 @@ function AdminDashboard(): JSX.Element {
                                 ? usersStrings.catalog.effectKinds.blockAll
                                 : entry.effectKind === 'base'
                                   ? usersStrings.effectiveQuota.baseLabel
-                                  : usersStrings.catalog.effectKinds.quotaDelta}
+                                  : entry.kind === 'effective' || entry.effectKind === 'effective'
+                                    ? usersStrings.effectiveQuota.effectiveLabel
+                                    : usersStrings.catalog.effectKinds.quotaDelta}
                             </StatusBadge>
                           </td>
                           <td>{formatBreakdownValue(entry.hourlyAnyDelta)}</td>

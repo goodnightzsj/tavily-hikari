@@ -65,6 +65,7 @@
   - `quotaBreakdown: AdminUserQuotaBreakdownView[]`
 - Notes
   - 自动同步的 LinuxDo 系统标签会像其他 tag 一样出现在 `tags` 与 `quotaBreakdown` 中，并把默认 delta 叠加到 `effectiveQuota`。
+  - `quotaBreakdown` 始终包含一条最终 `effective` 行，反映经过 `max(0, value)` 钳制后的最终有效额度。
 
 ## PATCH `/api/users/:id/quota`
 

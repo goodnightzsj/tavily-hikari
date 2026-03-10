@@ -689,6 +689,18 @@ const MOCK_USER_DETAIL: AdminUserDetail = {
       dailyDelta: -1_000,
       monthlyDelta: -700_000,
     },
+    {
+      kind: 'effective',
+      label: 'effective',
+      tagId: null,
+      tagName: null,
+      source: null,
+      effectKind: 'effective',
+      hourlyAnyDelta: 1_770,
+      hourlyDelta: 1_200,
+      dailyDelta: 25_500,
+      monthlyDelta: 5_000,
+    },
   ],
 }
 
@@ -2137,7 +2149,9 @@ function UserDetailPageCanvas(): JSX.Element {
                           ? users.catalog.effectKinds.blockAll
                           : entry.effectKind === 'base'
                             ? users.effectiveQuota.baseLabel
-                            : users.catalog.effectKinds.quotaDelta}
+                            : entry.kind === 'effective' || entry.effectKind === 'effective'
+                              ? users.effectiveQuota.effectiveLabel
+                              : users.catalog.effectKinds.quotaDelta}
                       </StatusBadge>
                     </td>
                     <td>{formatBreakdownValue(entry.hourlyAnyDelta)}</td>

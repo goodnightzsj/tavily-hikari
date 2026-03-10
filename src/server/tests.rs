@@ -4856,14 +4856,18 @@ mod tests {
                 .and_then(|value| value.as_i64()),
             Some(0)
         );
-        assert!(
-            detail_body
-                .get("quotaBreakdown")
-                .and_then(|value| value.as_array())
-                .is_some_and(|entries| entries.iter().any(|entry| {
-                    entry.get("effectKind").and_then(|value| value.as_str()) == Some("block_all")
-                }))
-        );
+        let breakdown_entries = detail_body
+            .get("quotaBreakdown")
+            .and_then(|value| value.as_array())
+            .expect("quotaBreakdown array");
+        assert!(breakdown_entries.iter().any(|entry| {
+            entry.get("effectKind").and_then(|value| value.as_str()) == Some("block_all")
+        }));
+        assert!(breakdown_entries.iter().any(|entry| {
+            entry.get("kind").and_then(|value| value.as_str()) == Some("effective")
+                && entry.get("hourlyAnyDelta").and_then(|value| value.as_i64()) == Some(0)
+                && entry.get("monthlyDelta").and_then(|value| value.as_i64()) == Some(0)
+        }));
 
         let unbind_system_resp = client
             .delete(format!("http://{}/api/users/{}/tags/{}", addr, user.user_id, system_tag_id))
