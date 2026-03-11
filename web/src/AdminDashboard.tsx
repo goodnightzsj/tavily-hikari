@@ -685,6 +685,7 @@ function AdminDashboard(): JSX.Element {
   const [userQuotaSavedAt, setUserQuotaSavedAt] = useState<number | null>(null)
   const [tagCatalog, setTagCatalog] = useState<AdminUserTag[]>([])
   const [tagCatalogLoading, setTagCatalogLoading] = useState(false)
+  const [tagCatalogLoadedOnce, setTagCatalogLoadedOnce] = useState(false)
   const [tagCatalogError, setTagCatalogError] = useState<string | null>(null)
   const [activeUserTagEditorId, setActiveUserTagEditorId] = useState<string | null>(null)
   const [userTagCatalogDraft, setUserTagCatalogDraft] = useState<UserTagFormState>({ ...EMPTY_USER_TAG_FORM })
@@ -1323,6 +1324,7 @@ function AdminDashboard(): JSX.Element {
       .finally(() => {
         if (!controller.signal.aborted) {
           setTagCatalogLoading(false)
+          setTagCatalogLoadedOnce(true)
         }
       })
 
@@ -1355,11 +1357,11 @@ function AdminDashboard(): JSX.Element {
       setActiveUserTagEditorId(editingTag.id)
       setUserTagCatalogDraft(createUserTagFormState(editingTag))
       setTagCatalogError(null)
-    } else if (!tagCatalogLoading) {
+    } else if (tagCatalogLoadedOnce && !tagCatalogLoading) {
       setActiveUserTagEditorId(null)
       setTagCatalogError(adminStrings.users.catalog.tagNotFound)
     }
-  }, [route, tagCatalog, tagCatalogLoading, adminStrings.users.catalog.tagNotFound])
+  }, [route, tagCatalog, tagCatalogLoadedOnce, tagCatalogLoading, adminStrings.users.catalog.tagNotFound])
 
   useEffect(() => {
     if (route.name !== 'user') return
@@ -2325,11 +2327,11 @@ function AdminDashboard(): JSX.Element {
   }
 
   const goPrevUsersPage = () => {
-    setUsersPage((p) => Math.max(1, p - 1))
+    navigateUsersSearch(usersQuery, { tagId: usersTagFilterId, page: usersPage - 1 })
   }
 
   const goNextUsersPage = () => {
-    setUsersPage((p) => Math.min(usersTotalPages, p + 1))
+    navigateUsersSearch(usersQuery, { tagId: usersTagFilterId, page: usersPage + 1 })
   }
 
   const applyUserSearch = () => {

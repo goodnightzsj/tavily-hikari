@@ -7854,27 +7854,10 @@ impl KeyStore {
     }
 
     async fn backfill_linuxdo_system_tag_default_deltas_v1(&self) -> Result<(), ProxyError> {
-        let zeroed_count: i64 = sqlx::query_scalar(
-            r#"SELECT COUNT(*)
-               FROM user_tags
-               WHERE system_key LIKE 'linuxdo_l%'
-                 AND effect_kind = ?
-                 AND hourly_any_delta = 0
-                 AND hourly_delta = 0
-                 AND daily_delta = 0
-                 AND monthly_delta = 0"#,
-        )
-        .bind(USER_TAG_EFFECT_QUOTA_DELTA)
-        .fetch_one(&self.pool)
-        .await?;
-        if zeroed_count != 5 {
-            return Ok(());
-        }
-
         let now = Utc::now().timestamp();
         let (hourly_any_delta, hourly_delta, daily_delta, monthly_delta) =
             linuxdo_system_tag_default_deltas();
-        sqlx::query(
+        let updated = sqlx::query(
             r#"UPDATE user_tags
                SET hourly_any_delta = ?,
                    hourly_delta = ?,
@@ -7896,7 +7879,9 @@ impl KeyStore {
         .bind(USER_TAG_EFFECT_QUOTA_DELTA)
         .execute(&self.pool)
         .await?;
-        self.invalidate_all_account_quota_resolutions().await;
+        if updated.rows_affected() > 0 {
+            self.invalidate_all_account_quota_resolutions().await;
+        }
         Ok(())
     }
 
@@ -16552,6 +16537,62 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             seeded_rows
                 .iter()
                 .all(|row| *row == (defaults.0, defaults.1, defaults.2, defaults.3))
+        );
+    }
+
+    #[tokio::test]
+    async fn linuxdo_system_tag_defaults_backfill_repairs_partial_legacy_zero_seed() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("linuxdo-system-tag-defaults-partial");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        sqlx::query(
+            r#"UPDATE user_tags
+               SET hourly_any_delta = 0,
+                   hourly_delta = 0,
+                   daily_delta = 0,
+                   monthly_delta = 0
+               WHERE system_key IN ('linuxdo_l1', 'linuxdo_l3')"#,
+        )
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("zero partial system tag deltas");
+        sqlx::query("DELETE FROM meta WHERE key = ?")
+            .bind(META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("clear linuxdo defaults migration marker");
+        sqlx::query("DELETE FROM meta WHERE key = ?")
+            .bind(META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_TUPLE_V1)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("clear linuxdo defaults tuple marker");
+        drop(proxy);
+
+        let repaired = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy recreated");
+        let defaults = linuxdo_system_tag_default_deltas();
+        let seeded_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            r#"SELECT system_key, hourly_any_delta, hourly_delta, daily_delta, monthly_delta
+               FROM user_tags
+               WHERE system_key LIKE 'linuxdo_l%'
+               ORDER BY system_key"#,
+        )
+        .fetch_all(&repaired.key_store.pool)
+        .await
+        .expect("read repaired seeded tag rows");
+        assert_eq!(seeded_rows.len(), 5);
+        assert!(
+            seeded_rows
+                .iter()
+                .all(|(_, hourly_any, hourly, daily, monthly)| {
+                    (*hourly_any, *hourly, *daily, *monthly)
+                        == (defaults.0, defaults.1, defaults.2, defaults.3)
+                })
         );
     }
 
