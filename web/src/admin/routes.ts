@@ -13,6 +13,9 @@ export type AdminPathRoute =
   | { name: 'token'; id: string }
   | { name: 'token-usage' }
   | { name: 'user'; id: string }
+  | { name: 'user-tags' }
+  | { name: 'user-tag-editor'; mode: 'create' }
+  | { name: 'user-tag-editor'; mode: 'edit'; id: string }
   | { name: 'key'; id: string }
 
 const ADMIN_BASE = '/admin'
@@ -66,6 +69,17 @@ export function parseAdminPath(pathname: string): AdminPathRoute {
   if (path === `${ADMIN_BASE}/users`) {
     return { name: 'module', module: 'users' }
   }
+  if (path === `${ADMIN_BASE}/users/tags`) {
+    return { name: 'user-tags' }
+  }
+  if (path === `${ADMIN_BASE}/users/tags/new`) {
+    return { name: 'user-tag-editor', mode: 'create' }
+  }
+  if (path.startsWith(`${ADMIN_BASE}/users/tags/`)) {
+    const id = decodeSegment(path.slice(`${ADMIN_BASE}/users/tags/`.length))
+    if (id) return { name: 'user-tag-editor', mode: 'edit', id }
+    return { name: 'user-tags' }
+  }
   if (path.startsWith(`${ADMIN_BASE}/users/`)) {
     const id = decodeSegment(path.slice(`${ADMIN_BASE}/users/`.length))
     if (id) return { name: 'user', id }
@@ -92,6 +106,14 @@ export function isSameAdminRoute(left: AdminPathRoute, right: AdminPathRoute): b
   if (left.name === 'user' && right.name === 'user') {
     return left.id === right.id
   }
+  if (left.name === 'user-tags' && right.name === 'user-tags') {
+    return true
+  }
+  if (left.name === 'user-tag-editor' && right.name === 'user-tag-editor') {
+    if (left.mode === 'create' && right.mode === 'create') return true
+    if (left.mode === 'edit' && right.mode === 'edit') return left.id === right.id
+    return false
+  }
   if (left.name === 'key' && right.name === 'key') {
     return left.id === right.id
   }
@@ -111,8 +133,36 @@ export function tokenLeaderboardPath(): string {
   return `${ADMIN_BASE}/tokens/leaderboard`
 }
 
-export function userDetailPath(id: string): string {
-  return `${ADMIN_BASE}/users/${encodeURIComponent(id)}`
+function appendUsersContext(path: string, query?: string, tagId?: string | null, page?: number | null): string {
+  const params = new URLSearchParams()
+  const normalizedQuery = query?.trim()
+  const normalizedTagId = tagId?.trim()
+  const normalizedPage = Number.isFinite(page) ? Math.max(1, Math.trunc(page as number)) : 1
+  if (normalizedQuery) params.set('q', normalizedQuery)
+  if (normalizedTagId) params.set('tagId', normalizedTagId)
+  if (normalizedPage > 1) params.set('page', String(normalizedPage))
+  const search = params.toString()
+  return search ? `${path}?${search}` : path
+}
+
+export function buildAdminUsersPath(query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users`, query, tagId, page)
+}
+
+export function userDetailPath(id: string, query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/${encodeURIComponent(id)}`, query, tagId, page)
+}
+
+export function userTagsPath(query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/tags`, query, tagId, page)
+}
+
+export function userTagCreatePath(query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/tags/new`, query, tagId, page)
+}
+
+export function userTagEditPath(id: string, query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/tags/${encodeURIComponent(id)}`, query, tagId, page)
 }
 
 export function keyDetailPath(id: string): string {

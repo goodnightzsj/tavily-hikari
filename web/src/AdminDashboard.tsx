@@ -21,6 +21,8 @@ import {
 import { Input } from './components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select'
 import SegmentedTabs from './components/ui/SegmentedTabs'
+import { Card } from './components/ui/card'
+import { Badge } from './components/ui/badge'
 import { Table } from './components/ui/table'
 import { Textarea } from './components/ui/textarea'
 import TokenUsageHeader from './components/TokenUsageHeader'
@@ -47,9 +49,13 @@ import {
   keyDetailPath,
   modulePath,
   parseAdminPath,
+  buildAdminUsersPath,
   tokenDetailPath,
   tokenLeaderboardPath,
   userDetailPath,
+  userTagCreatePath,
+  userTagEditPath,
+  userTagsPath,
 } from './admin/routes'
 import { useTranslate, type AdminTranslations } from './i18n'
 import { extractTvlyDevApiKeysFromText } from './lib/api-key-extract'
@@ -96,8 +102,16 @@ import {
   fetchAdminUsers,
   fetchAdminUserDetail,
   updateAdminUserQuota,
+  fetchAdminUserTags,
+  createAdminUserTag,
+  updateAdminUserTag,
+  deleteAdminUserTag,
+  bindAdminUserTag,
+  unbindAdminUserTag,
   type AdminUserSummary,
   type AdminUserDetail,
+  type AdminUserTag,
+  type AdminUserTagBinding,
 } from './api'
 
 const REFRESH_INTERVAL_MS = 30_000
@@ -115,16 +129,164 @@ const KEYS_BATCH_AUTO_COLLAPSE_DELAY_MS = Math.max(0, KEYS_BATCH_AUTO_COLLAPSE_T
 const API_KEYS_IMPORT_CHUNK_SIZE = 1000
 const DASHBOARD_TOKENS_PAGE_SIZE = 100
 const DASHBOARD_TOKENS_MAX_PAGES = 10
+const USER_TAG_DISPLAY_LIMIT = 3
+const NEW_USER_TAG_CARD_ID = '__new__'
 
 type UserQuotaSnapshot = Record<QuotaSliderField, QuotaSliderSeed>
 
+type UserTagFormState = {
+  tagId: string | null
+  name: string
+  displayName: string
+  icon: string
+  effectKind: string
+  hourlyAnyDelta: string
+  hourlyDelta: string
+  dailyDelta: string
+  monthlyDelta: string
+}
+
+type UserTagLike = Pick<AdminUserTagBinding, 'displayName' | 'icon' | 'systemKey' | 'effectKind'> & {
+  source?: string | null
+}
+
+const EMPTY_USER_TAG_FORM: UserTagFormState = {
+  tagId: null,
+  name: '',
+  displayName: '',
+  icon: '',
+  effectKind: 'quota_delta',
+  hourlyAnyDelta: '0',
+  hourlyDelta: '0',
+  dailyDelta: '0',
+  monthlyDelta: '0',
+}
+
 function buildUserQuotaSnapshot(detail: AdminUserDetail): UserQuotaSnapshot {
   return {
-    hourlyAnyLimit: createQuotaSliderSeed('hourlyAnyLimit', detail.hourlyAnyUsed, detail.hourlyAnyLimit),
-    hourlyLimit: createQuotaSliderSeed('hourlyLimit', detail.quotaHourlyUsed, detail.quotaHourlyLimit),
-    dailyLimit: createQuotaSliderSeed('dailyLimit', detail.quotaDailyUsed, detail.quotaDailyLimit),
-    monthlyLimit: createQuotaSliderSeed('monthlyLimit', detail.quotaMonthlyUsed, detail.quotaMonthlyLimit),
+    hourlyAnyLimit: createQuotaSliderSeed('hourlyAnyLimit', detail.hourlyAnyUsed, detail.quotaBase.hourlyAnyLimit),
+    hourlyLimit: createQuotaSliderSeed('hourlyLimit', detail.quotaHourlyUsed, detail.quotaBase.hourlyLimit),
+    dailyLimit: createQuotaSliderSeed('dailyLimit', detail.quotaDailyUsed, detail.quotaBase.dailyLimit),
+    monthlyLimit: createQuotaSliderSeed('monthlyLimit', detail.quotaMonthlyUsed, detail.quotaBase.monthlyLimit),
   }
+}
+
+function clampDisplayedQuota(value: number): number {
+  return Math.max(0, value)
+}
+
+function formatQuotaLimitValue(value: number): string {
+  return formatNumber(clampDisplayedQuota(value))
+}
+
+function formatQuotaUsagePair(used: number, limit: number): string {
+  return `${formatNumber(Math.max(0, used))} / ${formatQuotaLimitValue(limit)}`
+}
+
+function formatSignedQuotaDelta(value: number): string {
+  if (value > 0) {
+    return `+${formatNumber(value)}`
+  }
+  return formatNumber(value)
+}
+
+function getAdminUsersQueryFromLocation(): string {
+  return new URLSearchParams(window.location.search).get('q')?.trim() ?? ''
+}
+
+function getAdminUsersTagFilterFromLocation(): string | null {
+  const tagId = new URLSearchParams(window.location.search).get('tagId')?.trim() ?? ''
+  return tagId.length > 0 ? tagId : null
+}
+
+function getAdminUsersPageFromLocation(): number {
+  const rawPage = new URLSearchParams(window.location.search).get('page')?.trim() ?? ''
+  const parsedPage = Number.parseInt(rawPage, 10)
+  return Number.isFinite(parsedPage) && parsedPage > 1 ? parsedPage : 1
+}
+
+function getUserTagIconSrc(icon: string | null | undefined): string | null {
+  if (icon === 'linuxdo') {
+    return '/linuxdo-logo.svg'
+  }
+  return null
+}
+
+function isSystemUserTag(tag: { systemKey?: string | null; source?: string | null }): boolean {
+  return Boolean(tag.systemKey) || tag.source === 'system_linuxdo'
+}
+
+function createUserTagFormState(tag?: AdminUserTag | null): UserTagFormState {
+  if (!tag) {
+    return { ...EMPTY_USER_TAG_FORM }
+  }
+  return {
+    tagId: tag.id,
+    name: tag.name,
+    displayName: tag.displayName,
+    icon: tag.icon ?? '',
+    effectKind: tag.effectKind,
+    hourlyAnyDelta: String(tag.hourlyAnyDelta),
+    hourlyDelta: String(tag.hourlyDelta),
+    dailyDelta: String(tag.dailyDelta),
+    monthlyDelta: String(tag.monthlyDelta),
+  }
+}
+
+function UserTagBadge({
+  tag,
+  usersStrings,
+}: {
+  tag: UserTagLike
+  usersStrings: AdminTranslations['users']
+}): JSX.Element {
+  const iconSrc = getUserTagIconSrc(tag.icon)
+  const isSystem = isSystemUserTag(tag)
+  const isBlockAll = tag.effectKind === 'block_all'
+  const classes = [
+    'user-tag-pill',
+    isSystem ? 'user-tag-pill-system' : '',
+    isBlockAll ? 'user-tag-pill-block' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return (
+    <Badge variant="outline" className={classes} title={tag.displayName}>
+      {iconSrc && <img src={iconSrc} alt="" className="user-tag-pill-icon" aria-hidden="true" />}
+      <span>{tag.displayName}</span>
+      {isSystem && <span className="user-tag-pill-meta">{usersStrings.catalog.scopeSystemShort}</span>}
+      {isBlockAll && <span className="user-tag-pill-meta">{usersStrings.catalog.blockShort}</span>}
+    </Badge>
+  )
+}
+
+function UserTagBadgeList({
+  tags,
+  usersStrings,
+  emptyLabel,
+  limit = USER_TAG_DISPLAY_LIMIT,
+}: {
+  tags: AdminUserTagBinding[]
+  usersStrings: AdminTranslations['users']
+  emptyLabel: string
+  limit?: number
+}): JSX.Element {
+  if (tags.length === 0) {
+    return <span className="panel-description">{emptyLabel}</span>
+  }
+
+  const visibleTags = tags.slice(0, limit)
+  const overflow = Math.max(0, tags.length - visibleTags.length)
+
+  return (
+    <div className="user-tag-pill-list">
+      {visibleTags.map((tag) => (
+        <UserTagBadge key={`${tag.tagId}:${tag.source}`} tag={tag} usersStrings={usersStrings} />
+      ))}
+      {overflow > 0 && <Badge variant="outline" className="user-tag-pill-overflow">+{overflow}</Badge>}
+    </div>
+  )
 }
 
 function leaderboardPrimaryValue(
@@ -512,6 +674,7 @@ function AdminDashboard(): JSX.Element {
   const [usersPage, setUsersPage] = useState(1)
   const [usersQueryInput, setUsersQueryInput] = useState('')
   const [usersQuery, setUsersQuery] = useState('')
+  const [usersTagFilterId, setUsersTagFilterId] = useState<string | null>(null)
   const [usersLoading, setUsersLoading] = useState(false)
   const [selectedUserDetail, setSelectedUserDetail] = useState<AdminUserDetail | null>(null)
   const [userDetailLoading, setUserDetailLoading] = useState(false)
@@ -520,6 +683,18 @@ function AdminDashboard(): JSX.Element {
   const [savingUserQuota, setSavingUserQuota] = useState(false)
   const [userQuotaError, setUserQuotaError] = useState<string | null>(null)
   const [userQuotaSavedAt, setUserQuotaSavedAt] = useState<number | null>(null)
+  const [tagCatalog, setTagCatalog] = useState<AdminUserTag[]>([])
+  const [tagCatalogLoading, setTagCatalogLoading] = useState(false)
+  const [tagCatalogLoadedOnce, setTagCatalogLoadedOnce] = useState(false)
+  const [tagCatalogError, setTagCatalogError] = useState<string | null>(null)
+  const [activeUserTagEditorId, setActiveUserTagEditorId] = useState<string | null>(null)
+  const [userTagCatalogDraft, setUserTagCatalogDraft] = useState<UserTagFormState>({ ...EMPTY_USER_TAG_FORM })
+  const [savingUserTagCatalog, setSavingUserTagCatalog] = useState(false)
+  const [deletingUserTagId, setDeletingUserTagId] = useState<string | null>(null)
+  const [pendingUserTagDelete, setPendingUserTagDelete] = useState<AdminUserTag | null>(null)
+  const [selectedBindableTagId, setSelectedBindableTagId] = useState('')
+  const [savingUserTagBinding, setSavingUserTagBinding] = useState(false)
+  const [userTagError, setUserTagError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const pollingTimerRef = useRef<number | null>(null)
@@ -1103,7 +1278,7 @@ function AdminDashboard(): JSX.Element {
 
     const controller = new AbortController()
     setUsersLoading(true)
-    fetchAdminUsers(usersPage, USERS_PER_PAGE, usersQuery, controller.signal)
+    fetchAdminUsers(usersPage, USERS_PER_PAGE, usersQuery, usersTagFilterId, controller.signal)
       .then((result) => {
         if (controller.signal.aborted) return
         setUsers(result.items)
@@ -1122,7 +1297,71 @@ function AdminDashboard(): JSX.Element {
       })
 
     return () => controller.abort()
-  }, [route, usersPage, usersQuery])
+  }, [route, usersPage, usersQuery, usersTagFilterId])
+
+  useEffect(() => {
+    const userTagRouteActive =
+      (route.name === 'module' && route.module === 'users')
+      || route.name === 'user'
+      || route.name === 'user-tags'
+      || route.name === 'user-tag-editor'
+    if (!userTagRouteActive) return
+
+    const controller = new AbortController()
+    setTagCatalogLoading(true)
+    setTagCatalogError(null)
+    fetchAdminUserTags(controller.signal)
+      .then((tags) => {
+        if (controller.signal.aborted) return
+        setTagCatalog(tags)
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return
+        console.error(err)
+        setTagCatalog([])
+        setTagCatalogError(err instanceof Error ? err.message : adminStrings.users.catalog.loadFailed)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setTagCatalogLoading(false)
+          setTagCatalogLoadedOnce(true)
+        }
+      })
+
+    return () => controller.abort()
+  }, [route, adminStrings.users.catalog.loadFailed])
+
+  useEffect(() => {
+    if (!(route.name === 'module' && route.module === 'users')) return
+    const locationQuery = getAdminUsersQueryFromLocation()
+    const locationTagFilterId = getAdminUsersTagFilterFromLocation()
+    const locationPage = getAdminUsersPageFromLocation()
+    setUsersPage((previous) => (previous === locationPage ? previous : locationPage))
+    setUsersQueryInput((previous) => (previous === locationQuery ? previous : locationQuery))
+    setUsersQuery((previous) => (previous === locationQuery ? previous : locationQuery))
+    setUsersTagFilterId((previous) => (previous === locationTagFilterId ? previous : locationTagFilterId))
+  }, [route])
+
+  useEffect(() => {
+    if (route.name !== 'user-tag-editor') return
+
+    if (route.mode === 'create') {
+      setActiveUserTagEditorId(NEW_USER_TAG_CARD_ID)
+      setUserTagCatalogDraft({ ...EMPTY_USER_TAG_FORM })
+      setTagCatalogError(null)
+      return
+    }
+
+    const editingTag = tagCatalog.find((tag) => tag.id === route.id)
+    if (editingTag) {
+      setActiveUserTagEditorId(editingTag.id)
+      setUserTagCatalogDraft(createUserTagFormState(editingTag))
+      setTagCatalogError(null)
+    } else if (tagCatalogLoadedOnce && !tagCatalogLoading) {
+      setActiveUserTagEditorId(null)
+      setTagCatalogError(adminStrings.users.catalog.tagNotFound)
+    }
+  }, [route, tagCatalog, tagCatalogLoadedOnce, tagCatalogLoading, adminStrings.users.catalog.tagNotFound])
 
   useEffect(() => {
     if (route.name !== 'user') return
@@ -1135,11 +1374,13 @@ function AdminDashboard(): JSX.Element {
         setSelectedUserDetail(detail)
         setUserQuotaSnapshot(buildUserQuotaSnapshot(detail))
         setUserQuotaDraft({
-          hourlyAnyLimit: String(detail.hourlyAnyLimit),
-          hourlyLimit: String(detail.quotaHourlyLimit),
-          dailyLimit: String(detail.quotaDailyLimit),
-          monthlyLimit: String(detail.quotaMonthlyLimit),
+          hourlyAnyLimit: String(detail.quotaBase.hourlyAnyLimit),
+          hourlyLimit: String(detail.quotaBase.hourlyLimit),
+          dailyLimit: String(detail.quotaBase.dailyLimit),
+          monthlyLimit: String(detail.quotaBase.monthlyLimit),
         })
+        setSelectedBindableTagId('')
+        setUserTagError(null)
       })
       .catch((err) => {
         if (controller.signal.aborted) return
@@ -1273,9 +1514,12 @@ function AdminDashboard(): JSX.Element {
   }, [])
 
   const navigateToPath = useCallback((path: string) => {
-    const nextRoute = parseAdminPath(path)
-    if (window.location.pathname !== path) {
-      window.history.pushState(null, '', path)
+    const nextUrl = new URL(path, window.location.origin)
+    const nextRoute = parseAdminPath(nextUrl.pathname)
+    const nextLocation = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`
+    const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    if (currentLocation !== nextLocation) {
+      window.history.pushState(null, '', nextLocation)
     }
     setRoute((previous) => (isSameAdminRoute(previous, nextRoute) ? previous : nextRoute))
   }, [])
@@ -1302,10 +1546,70 @@ function AdminDashboard(): JSX.Element {
   )
 
   const navigateUser = useCallback(
-    (id: string) => {
+    (id: string, options?: { preserveUsersContext?: boolean }) => {
+      if (options?.preserveUsersContext) {
+        navigateToPath(userDetailPath(id, usersQuery, usersTagFilterId, usersPage))
+        return
+      }
       navigateToPath(userDetailPath(id))
     },
+    [navigateToPath, usersPage, usersQuery, usersTagFilterId],
+  )
+
+  const navigateUsersSearch = useCallback(
+    (query: string, options?: { tagId?: string | null; page?: number | null }) => {
+      const normalized = query.trim()
+      const normalizedTagId = options?.tagId?.trim() ?? null
+      const normalizedPage = options?.page != null ? Math.max(1, options.page) : 1
+      setUsersPage(normalizedPage)
+      setUsersQueryInput(normalized)
+      setUsersQuery(normalized)
+      setUsersTagFilterId(normalizedTagId)
+      navigateToPath(buildAdminUsersPath(normalized, normalizedTagId, normalizedPage))
+    },
     [navigateToPath],
+  )
+
+  const navigateUserTags = useCallback(() => {
+    const query = route.name === 'module' && route.module === 'users' ? usersQuery : getAdminUsersQueryFromLocation()
+    const tagId = route.name === 'module' && route.module === 'users'
+      ? usersTagFilterId
+      : getAdminUsersTagFilterFromLocation()
+    const page = route.name === 'module' && route.module === 'users' ? usersPage : getAdminUsersPageFromLocation()
+    navigateToPath(userTagsPath(query, tagId, page))
+  }, [navigateToPath, route, usersPage, usersQuery, usersTagFilterId])
+
+  const navigateUserTagCreate = useCallback(() => {
+    setActiveUserTagEditorId(NEW_USER_TAG_CARD_ID)
+    setUserTagCatalogDraft({ ...EMPTY_USER_TAG_FORM })
+    setTagCatalogError(null)
+    navigateToPath(
+      userTagCreatePath(
+        getAdminUsersQueryFromLocation(),
+        getAdminUsersTagFilterFromLocation(),
+        getAdminUsersPageFromLocation(),
+      ),
+    )
+  }, [navigateToPath])
+
+  const navigateUserTagEdit = useCallback(
+    (id: string) => {
+      const editingTag = tagCatalog.find((tag) => tag.id === id)
+      if (editingTag) {
+        setActiveUserTagEditorId(editingTag.id)
+        setUserTagCatalogDraft(createUserTagFormState(editingTag))
+        setTagCatalogError(null)
+      }
+      navigateToPath(
+        userTagEditPath(
+          id,
+          getAdminUsersQueryFromLocation(),
+          getAdminUsersTagFilterFromLocation(),
+          getAdminUsersPageFromLocation(),
+        ),
+      )
+    },
+    [navigateToPath, tagCatalog],
   )
 
   const navigateTokenLeaderboard = useCallback(() => {
@@ -1417,6 +1721,20 @@ function AdminDashboard(): JSX.Element {
   const ungroupedKeyGroup = keyGroupList.find((group) => group.name.trim().length === 0)
   const namedKeyGroups = keyGroupList.filter((group) => group.name.trim().length > 0)
   const hasKeyGroups = keyGroupList.length > 0
+
+  const ungroupedTokenGroup = tokenGroups.find((group) => group.name.trim().length === 0)
+  const namedTokenGroups = tokenGroups.filter((group) => group.name.trim().length > 0)
+  const hasTokenGroups = tokenGroups.length > 0
+
+  const tokenList = useMemo(() => {
+    if (selectedTokenUngrouped) {
+      return tokens.filter((item) => (item.group ?? '').trim().length === 0)
+    }
+    if (selectedTokenGroupName != null) {
+      return tokens.filter((item) => (item.group ?? '').trim() === selectedTokenGroupName)
+    }
+    return tokens
+  }, [selectedTokenGroupName, selectedTokenUngrouped, tokens])
 
   const visibleKeys = useMemo(() => {
     if (selectedKeyUngrouped) {
@@ -2009,23 +2327,46 @@ function AdminDashboard(): JSX.Element {
   }
 
   const goPrevUsersPage = () => {
-    setUsersPage((p) => Math.max(1, p - 1))
+    navigateUsersSearch(usersQuery, { tagId: usersTagFilterId, page: usersPage - 1 })
   }
 
   const goNextUsersPage = () => {
-    setUsersPage((p) => Math.min(usersTotalPages, p + 1))
+    navigateUsersSearch(usersQuery, { tagId: usersTagFilterId, page: usersPage + 1 })
   }
 
   const applyUserSearch = () => {
-    const normalized = usersQueryInput.trim()
-    setUsersPage(1)
-    setUsersQuery(normalized)
+    navigateUsersSearch(usersQueryInput, { tagId: usersTagFilterId, page: 1 })
   }
 
   const resetUserSearch = () => {
-    setUsersQueryInput('')
-    setUsersPage(1)
-    setUsersQuery('')
+    navigateUsersSearch('', { tagId: null, page: 1 })
+  }
+
+  const refreshUsersList = async () => {
+    const pagedUsers = await fetchAdminUsers(usersPage, USERS_PER_PAGE, usersQuery, usersTagFilterId)
+    setUsers(pagedUsers.items)
+    setUsersTotal(pagedUsers.total)
+    return pagedUsers
+  }
+
+  const refreshUserDetail = async (userId: string) => {
+    const detail = await fetchAdminUserDetail(userId)
+    setSelectedUserDetail(detail)
+    setUserQuotaSnapshot(buildUserQuotaSnapshot(detail))
+    setUserQuotaDraft({
+      hourlyAnyLimit: String(detail.quotaBase.hourlyAnyLimit),
+      hourlyLimit: String(detail.quotaBase.hourlyLimit),
+      dailyLimit: String(detail.quotaBase.dailyLimit),
+      monthlyLimit: String(detail.quotaBase.monthlyLimit),
+    })
+    setSelectedBindableTagId('')
+    return detail
+  }
+
+  const refreshTagCatalog = async () => {
+    const tags = await fetchAdminUserTags()
+    setTagCatalog(tags)
+    return tags
   }
 
   const updateQuotaDraftField = (field: QuotaSliderField, value: string) => {
@@ -2039,6 +2380,28 @@ function AdminDashboard(): JSX.Element {
     setUserQuotaError(null)
   }
 
+  const updateUserTagCatalogField = (field: keyof UserTagFormState, value: string) => {
+    setUserTagCatalogDraft((previous) => ({ ...previous, [field]: value }))
+    setTagCatalogError(null)
+  }
+
+  const cancelUserTagCatalogEdit = () => {
+    setActiveUserTagEditorId(null)
+    setUserTagCatalogDraft({ ...EMPTY_USER_TAG_FORM })
+    setTagCatalogError(null)
+    if (route.name === 'user-tag-editor') {
+      navigateUserTags()
+    }
+  }
+
+  const beginCreateUserTag = () => {
+    navigateUserTagCreate()
+  }
+
+  const beginEditUserTag = (tag: AdminUserTag) => {
+    navigateUserTagEdit(tag.id)
+  }
+
   const saveUserQuota = async () => {
     if (route.name !== 'user' || !userQuotaDraft) return
     const payload = {
@@ -2048,10 +2411,10 @@ function AdminDashboard(): JSX.Element {
       monthlyLimit: Number.parseInt(userQuotaDraft.monthlyLimit, 10),
     }
     if (
-      !Number.isFinite(payload.hourlyAnyLimit) || payload.hourlyAnyLimit <= 0
-      || !Number.isFinite(payload.hourlyLimit) || payload.hourlyLimit <= 0
-      || !Number.isFinite(payload.dailyLimit) || payload.dailyLimit <= 0
-      || !Number.isFinite(payload.monthlyLimit) || payload.monthlyLimit <= 0
+      !Number.isFinite(payload.hourlyAnyLimit) || payload.hourlyAnyLimit < 0
+      || !Number.isFinite(payload.hourlyLimit) || payload.hourlyLimit < 0
+      || !Number.isFinite(payload.dailyLimit) || payload.dailyLimit < 0
+      || !Number.isFinite(payload.monthlyLimit) || payload.monthlyLimit < 0
     ) {
       setUserQuotaError(adminStrings.users.quota.invalid)
       return
@@ -2060,26 +2423,139 @@ function AdminDashboard(): JSX.Element {
     setUserQuotaError(null)
     try {
       await updateAdminUserQuota(route.id, payload)
-      const [detail, pagedUsers] = await Promise.all([
-        fetchAdminUserDetail(route.id),
-        fetchAdminUsers(usersPage, USERS_PER_PAGE, usersQuery),
+      await Promise.all([
+        refreshUserDetail(route.id),
+        refreshUsersList(),
       ])
-      setSelectedUserDetail(detail)
-      setUserQuotaSnapshot(buildUserQuotaSnapshot(detail))
-      setUserQuotaDraft({
-        hourlyAnyLimit: String(detail.hourlyAnyLimit),
-        hourlyLimit: String(detail.quotaHourlyLimit),
-        dailyLimit: String(detail.quotaDailyLimit),
-        monthlyLimit: String(detail.quotaMonthlyLimit),
-      })
-      setUsers(pagedUsers.items)
-      setUsersTotal(pagedUsers.total)
       setUserQuotaSavedAt(Date.now())
     } catch (err) {
       console.error(err)
       setUserQuotaError(err instanceof Error ? err.message : adminStrings.users.quota.saveFailed)
     } finally {
       setSavingUserQuota(false)
+    }
+  }
+
+  const saveUserTagCatalog = async () => {
+    const editingTag = userTagCatalogDraft.tagId
+      ? tagCatalog.find((tag) => tag.id === userTagCatalogDraft.tagId) ?? null
+      : null
+    const isSystemEditing = editingTag?.systemKey != null
+    const parsedDeltas = {
+      hourlyAnyDelta: Number.parseInt(userTagCatalogDraft.hourlyAnyDelta, 10),
+      hourlyDelta: Number.parseInt(userTagCatalogDraft.hourlyDelta, 10),
+      dailyDelta: Number.parseInt(userTagCatalogDraft.dailyDelta, 10),
+      monthlyDelta: Number.parseInt(userTagCatalogDraft.monthlyDelta, 10),
+    }
+    const effectKind = userTagCatalogDraft.effectKind === 'block_all' ? 'block_all' : 'quota_delta'
+    const deltasAreValid = Object.values(parsedDeltas).every((value) => Number.isFinite(value))
+    if (!isSystemEditing && (userTagCatalogDraft.name.trim().length === 0 || userTagCatalogDraft.displayName.trim().length === 0)) {
+      setTagCatalogError(adminStrings.users.catalog.invalid)
+      return
+    }
+    if (!deltasAreValid) {
+      setTagCatalogError(adminStrings.users.catalog.invalid)
+      return
+    }
+
+    const payload = {
+      name: isSystemEditing ? editingTag?.name ?? userTagCatalogDraft.name.trim() : userTagCatalogDraft.name.trim(),
+      displayName: isSystemEditing
+        ? editingTag?.displayName ?? userTagCatalogDraft.displayName.trim()
+        : userTagCatalogDraft.displayName.trim(),
+      icon: isSystemEditing ? editingTag?.icon ?? null : (userTagCatalogDraft.icon.trim() || null),
+      effectKind,
+      hourlyAnyDelta: effectKind === 'block_all' ? 0 : parsedDeltas.hourlyAnyDelta,
+      hourlyDelta: effectKind === 'block_all' ? 0 : parsedDeltas.hourlyDelta,
+      dailyDelta: effectKind === 'block_all' ? 0 : parsedDeltas.dailyDelta,
+      monthlyDelta: effectKind === 'block_all' ? 0 : parsedDeltas.monthlyDelta,
+    }
+
+    setSavingUserTagCatalog(true)
+    setTagCatalogError(null)
+    try {
+      if (editingTag) {
+        await updateAdminUserTag(editingTag.id, payload)
+      } else {
+        await createAdminUserTag(payload)
+      }
+      await Promise.all([
+        refreshTagCatalog(),
+        refreshUsersList(),
+        route.name === 'user' ? refreshUserDetail(route.id) : Promise.resolve(null),
+      ])
+      cancelUserTagCatalogEdit()
+    } catch (err) {
+      console.error(err)
+      setTagCatalogError(err instanceof Error ? err.message : adminStrings.users.catalog.saveFailed)
+    } finally {
+      setSavingUserTagCatalog(false)
+    }
+  }
+
+  const requestUserTagCatalogDelete = (tag: AdminUserTag) => {
+    if (tag.systemKey) return
+    setTagCatalogError(null)
+    setPendingUserTagDelete(tag)
+  }
+
+  const closeUserTagDeleteDialog = () => {
+    if (deletingUserTagId) return
+    setPendingUserTagDelete(null)
+  }
+
+  const confirmUserTagCatalogDelete = async () => {
+    const tag = pendingUserTagDelete
+    if (!tag || tag.systemKey) return
+    setDeletingUserTagId(tag.id)
+    setTagCatalogError(null)
+    try {
+      await deleteAdminUserTag(tag.id)
+      await Promise.all([
+        refreshTagCatalog(),
+        refreshUsersList(),
+        route.name === 'user' ? refreshUserDetail(route.id) : Promise.resolve(null),
+      ])
+      if (userTagCatalogDraft.tagId === tag.id) {
+        cancelUserTagCatalogEdit()
+      }
+      setPendingUserTagDelete((current) => (current?.id === tag.id ? null : current))
+    } catch (err) {
+      console.error(err)
+      setTagCatalogError(err instanceof Error ? err.message : adminStrings.users.catalog.deleteFailed)
+    } finally {
+      setDeletingUserTagId(null)
+    }
+  }
+
+  const bindSelectedUserTag = async () => {
+    if (route.name !== 'user' || !selectedBindableTagId) return
+    setSavingUserTagBinding(true)
+    setUserTagError(null)
+    try {
+      await bindAdminUserTag(route.id, selectedBindableTagId)
+      await Promise.all([refreshUserDetail(route.id), refreshUsersList(), refreshTagCatalog()])
+      setSelectedBindableTagId('')
+    } catch (err) {
+      console.error(err)
+      setUserTagError(err instanceof Error ? err.message : adminStrings.users.userTags.bindFailed)
+    } finally {
+      setSavingUserTagBinding(false)
+    }
+  }
+
+  const unbindSelectedUserTag = async (tag: AdminUserTagBinding) => {
+    if (route.name !== 'user' || isSystemUserTag(tag) || tag.source !== 'manual') return
+    setSavingUserTagBinding(true)
+    setUserTagError(null)
+    try {
+      await unbindAdminUserTag(route.id, tag.tagId)
+      await Promise.all([refreshUserDetail(route.id), refreshUsersList(), refreshTagCatalog()])
+    } catch (err) {
+      console.error(err)
+      setUserTagError(err instanceof Error ? err.message : adminStrings.users.userTags.unbindFailed)
+    } finally {
+      setSavingUserTagBinding(false)
     }
   }
 
@@ -2342,9 +2818,411 @@ function AdminDashboard(): JSX.Element {
       ? route.module
       : route.name === 'key'
         ? 'keys'
-        : route.name === 'user'
+        : route.name === 'user' || route.name === 'user-tags' || route.name === 'user-tag-editor'
           ? 'users'
           : 'tokens'
+  const usersStrings = adminStrings.users
+  const sortedTagCatalog = useMemo(
+    () => [...tagCatalog].sort((left, right) => right.userCount - left.userCount || left.displayName.localeCompare(right.displayName)),
+    [tagCatalog],
+  )
+  const editingCatalogTag = activeUserTagEditorId && activeUserTagEditorId !== NEW_USER_TAG_CARD_ID
+    ? tagCatalog.find((tag) => tag.id === activeUserTagEditorId) ?? null
+    : null
+  const editingSystemTag = editingCatalogTag?.systemKey != null
+  const tagCatalogEffectIsBlockAll = userTagCatalogDraft.effectKind === 'block_all'
+  const bindableCustomTags = route.name === 'user' && selectedUserDetail
+    ? tagCatalog.filter((tag) => !tag.systemKey && !selectedUserDetail.tags.some((boundTag) => boundTag.tagId === tag.id))
+    : []
+  const visibleTagCards: Array<AdminUserTag | null> = activeUserTagEditorId === NEW_USER_TAG_CARD_ID
+    ? [null, ...sortedTagCatalog]
+    : sortedTagCatalog
+
+  const renderUserTagSummaryPanel = (): JSX.Element => (
+    <section className="surface panel">
+      <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <h2>{usersStrings.catalog.summaryTitle}</h2>
+          <p className="panel-description">{usersStrings.catalog.summaryDescription}</p>
+        </div>
+        <button type="button" className="btn btn-outline" onClick={navigateUserTags}>
+          {usersStrings.userTags.manageCatalog}
+        </button>
+      </div>
+
+      {tagCatalogError && (
+        <div className="alert alert-error" role="alert" style={{ marginBottom: 12 }}>
+          {tagCatalogError}
+        </div>
+      )}
+
+      {tagCatalogLoading ? (
+        <div className="empty-state alert">{usersStrings.catalog.loading}</div>
+      ) : sortedTagCatalog.length === 0 ? (
+        <div className="empty-state alert">{usersStrings.catalog.summaryEmpty}</div>
+      ) : (
+        <div className="user-tag-summary-grid">
+          {sortedTagCatalog.map((tag) => {
+            const isSystem = tag.systemKey != null
+            const isBlockAll = tag.effectKind === 'block_all'
+            const cardClasses = ['user-tag-summary-card', isBlockAll ? 'user-tag-summary-card-block' : '']
+              .filter(Boolean)
+              .join(' ')
+
+            return (
+              <article className={cardClasses} key={tag.id}>
+                <div className="user-tag-summary-card-head">
+                  <UserTagBadge
+                    tag={{
+                      displayName: tag.displayName,
+                      icon: tag.icon,
+                      systemKey: tag.systemKey,
+                      effectKind: tag.effectKind,
+                    }}
+                    usersStrings={usersStrings}
+                  />
+                  <StatusBadge tone={isSystem ? 'info' : isBlockAll ? 'error' : 'neutral'}>
+                    {isSystem ? usersStrings.catalog.scopeSystem : usersStrings.catalog.scopeCustom}
+                  </StatusBadge>
+                </div>
+                <div className="user-tag-summary-count">
+                  <strong>{formatNumber(tag.userCount)}</strong>
+                  <span className="panel-description">{usersStrings.catalog.summaryAccounts}</span>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      )}
+    </section>
+  )
+
+  const renderUserTagEffectToggle = (): JSX.Element => (
+    <div className="user-tag-effect-toggle" role="group" aria-label={usersStrings.catalog.fields.effect}>
+      {([
+        ['quota_delta', usersStrings.catalog.effectKinds.quotaDelta],
+        ['block_all', usersStrings.catalog.effectKinds.blockAll],
+      ] as const).map(([effectKind, label]) => {
+        const isActive = userTagCatalogDraft.effectKind === effectKind
+        return (
+          <Button
+            key={effectKind}
+            type="button"
+            variant={isActive ? 'secondary' : 'outline'}
+            size="xs"
+            className={`user-tag-effect-chip${isActive ? ' is-active' : ''}`}
+            onClick={() => updateUserTagCatalogField('effectKind', effectKind)}
+            disabled={savingUserTagCatalog}
+          >
+            {label}
+          </Button>
+        )
+      })}
+    </div>
+  )
+
+  const renderUserTagCatalogCard = (tag: AdminUserTag | null): JSX.Element => {
+    const isNewCard = tag == null
+    const isEditing = isNewCard
+      ? activeUserTagEditorId === NEW_USER_TAG_CARD_ID
+      : activeUserTagEditorId === tag.id
+    const isSystem = tag?.systemKey != null
+    const viewTag = isEditing
+      ? {
+          displayName: userTagCatalogDraft.displayName || userTagCatalogDraft.name || usersStrings.catalog.formCreateTitle,
+          icon: userTagCatalogDraft.icon,
+          systemKey: tag?.systemKey ?? null,
+          effectKind: userTagCatalogDraft.effectKind,
+        }
+      : {
+          displayName: tag?.displayName ?? usersStrings.catalog.formCreateTitle,
+          icon: tag?.icon ?? null,
+          systemKey: tag?.systemKey ?? null,
+          effectKind: tag?.effectKind ?? 'quota_delta',
+        }
+    const isBlockAll = viewTag.effectKind === 'block_all'
+    const iconSrc = getUserTagIconSrc(viewTag.icon)
+    const cardClasses = [
+      'user-tag-catalog-card',
+      isEditing ? 'user-tag-catalog-card-active' : '',
+      isNewCard ? 'user-tag-catalog-card-draft' : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+
+    return (
+      <Card className={cardClasses} key={tag?.id ?? NEW_USER_TAG_CARD_ID}>
+        <div className="user-tag-catalog-card-head">
+          <div className="user-tag-catalog-name">
+            {isEditing ? (
+              <div className="user-tag-inline-fields">
+                <Input
+                  type="text"
+                  className="user-tag-inline-input user-tag-inline-input-display"
+                  value={userTagCatalogDraft.displayName}
+                  onChange={(event) => updateUserTagCatalogField('displayName', event.target.value)}
+                  disabled={editingSystemTag || savingUserTagCatalog}
+                  placeholder={usersStrings.catalog.fields.displayName}
+                />
+                <div className="user-tag-inline-fields-row">
+                  <Input
+                    type="text"
+                    className="user-tag-inline-input"
+                    value={userTagCatalogDraft.name}
+                    onChange={(event) => updateUserTagCatalogField('name', event.target.value)}
+                    disabled={editingSystemTag || savingUserTagCatalog}
+                    placeholder={usersStrings.catalog.fields.name}
+                  />
+                  <Input
+                    type="text"
+                    className="user-tag-inline-input"
+                    value={userTagCatalogDraft.icon}
+                    onChange={(event) => updateUserTagCatalogField('icon', event.target.value)}
+                    disabled={editingSystemTag || savingUserTagCatalog}
+                    placeholder={usersStrings.catalog.iconPlaceholder}
+                  />
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="user-tag-pill-list">
+                  <UserTagBadge tag={viewTag} usersStrings={usersStrings} />
+                </div>
+                <div className="panel-description user-tag-catalog-subtitle">
+                  <code>{tag?.name}</code>
+                  {iconSrc ? ` · ${viewTag.icon}` : ''}
+                </div>
+              </>
+            )}
+          </div>
+          <div className="user-tag-catalog-actions">
+            {isEditing ? (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="user-tag-catalog-icon-button"
+                  title={usersStrings.catalog.actions.save}
+                  aria-label={usersStrings.catalog.actions.save}
+                  onClick={() => void saveUserTagCatalog()}
+                  disabled={savingUserTagCatalog}
+                >
+                  <Icon icon="mdi:check" width={16} height={16} />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="user-tag-catalog-icon-button"
+                  title={usersStrings.catalog.actions.cancelEdit}
+                  aria-label={usersStrings.catalog.actions.cancelEdit}
+                  onClick={cancelUserTagCatalogEdit}
+                  disabled={savingUserTagCatalog}
+                >
+                  <Icon icon="mdi:close" width={16} height={16} />
+                </Button>
+                {!isNewCard && !isSystem && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="user-tag-catalog-icon-button"
+                    title={usersStrings.catalog.actions.delete}
+                    aria-label={usersStrings.catalog.actions.delete}
+                    onClick={() => requestUserTagCatalogDelete(tag)}
+                    disabled={savingUserTagCatalog || deletingUserTagId === tag.id}
+                  >
+                    <Icon icon="mdi:trash-can-outline" width={16} height={16} />
+                  </Button>
+                )}
+              </>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="user-tag-catalog-icon-button"
+                  title={usersStrings.catalog.actions.edit}
+                  aria-label={usersStrings.catalog.actions.edit}
+                  onClick={() => tag && beginEditUserTag(tag)}
+                >
+                  <Icon icon="mdi:pencil-outline" width={16} height={16} />
+                </Button>
+                {!isSystem && tag && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="user-tag-catalog-icon-button"
+                    title={usersStrings.catalog.actions.delete}
+                    aria-label={usersStrings.catalog.actions.delete}
+                    onClick={() => requestUserTagCatalogDelete(tag)}
+                    disabled={deletingUserTagId === tag.id}
+                  >
+                    <Icon icon="mdi:trash-can-outline" width={16} height={16} />
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="user-tag-catalog-card-meta">
+          <Badge variant={isSystem ? 'info' : 'neutral'} className="user-tag-meta-badge">
+            {isSystem ? usersStrings.catalog.scopeSystem : usersStrings.catalog.scopeCustom}
+          </Badge>
+          {isEditing ? (
+            renderUserTagEffectToggle()
+          ) : (
+            <Badge variant={isBlockAll ? 'destructive' : 'success'} className="user-tag-meta-badge">
+              {isBlockAll
+                ? usersStrings.catalog.effectKinds.blockAll
+                : usersStrings.catalog.effectKinds.quotaDelta}
+            </Badge>
+          )}
+          <Button
+            type="button"
+            variant="secondary"
+            size="xs"
+            className="user-tag-catalog-users user-tag-catalog-users-button"
+            onClick={() => tag && navigateUsersSearch(tag.displayName, { tagId: tag.id })}
+            disabled={isNewCard}
+          >
+            <span className="user-tag-catalog-users-label">{usersStrings.catalog.columns.users}</span>
+            <strong>{formatNumber(tag?.userCount ?? 0)}</strong>
+          </Button>
+        </div>
+
+        <div className="user-tag-catalog-body">
+          {isBlockAll ? (
+            <div className="alert alert-warning user-tag-catalog-block-note" role="note">
+              {usersStrings.catalog.blockDescription}
+            </div>
+          ) : (
+            <dl className="user-tag-catalog-delta-grid">
+              {([
+                ['hourlyAnyDelta', tag?.hourlyAnyDelta ?? 0, usersStrings.quota.hourlyAny],
+                ['hourlyDelta', tag?.hourlyDelta ?? 0, usersStrings.quota.hourly],
+                ['dailyDelta', tag?.dailyDelta ?? 0, usersStrings.quota.daily],
+                ['monthlyDelta', tag?.monthlyDelta ?? 0, usersStrings.quota.monthly],
+              ] as const).map(([field, value, label]) => (
+                <div className="user-tag-catalog-delta-item" key={field}>
+                  <dt>{label}</dt>
+                  <dd>
+                    {isEditing ? (
+                      <Input
+                        type="number"
+                        className="user-tag-delta-input"
+                        value={userTagCatalogDraft[field]}
+                        onChange={(event) => updateUserTagCatalogField(field, event.target.value)}
+                        disabled={savingUserTagCatalog || tagCatalogEffectIsBlockAll}
+                      />
+                    ) : (
+                      formatSignedQuotaDelta(value)
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </div>
+      </Card>
+    )
+  }
+
+  const renderUserTagCatalogIndexPage = (): JSX.Element => (
+    <AdminShell
+      activeModule={activeModule}
+      navItems={navItems}
+      skipToContentLabel={adminStrings.accessibility.skipToContent}
+      onSelectModule={navigateModule}
+    >
+      <section className="surface panel">
+        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <h2>{usersStrings.catalog.title}</h2>
+            <p className="panel-description">{usersStrings.catalog.description}</p>
+          </div>
+          <div className="user-tag-page-actions">
+            <button
+              type="button"
+              className="btn btn-outline"
+              onClick={() =>
+                navigateToPath(
+                  buildAdminUsersPath(
+                    getAdminUsersQueryFromLocation(),
+                    getAdminUsersTagFilterFromLocation(),
+                    getAdminUsersPageFromLocation(),
+                  ),
+                )
+              }
+            >
+              {usersStrings.catalog.backToUsers}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={beginCreateUserTag}
+              disabled={activeUserTagEditorId === NEW_USER_TAG_CARD_ID}
+            >
+              {usersStrings.catalog.actions.create}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {tagCatalogError && (
+        <div className="surface error-banner" role="alert">
+          {tagCatalogError}
+        </div>
+      )}
+
+      <section className="surface panel">
+        {tagCatalogLoading ? (
+          <div className="empty-state alert">{usersStrings.catalog.loading}</div>
+        ) : visibleTagCards.length === 0 ? (
+          <div className="empty-state alert">{usersStrings.catalog.empty}</div>
+        ) : (
+          <div className="user-tag-catalog-grid">
+            {visibleTagCards.map((tag) => renderUserTagCatalogCard(tag))}
+          </div>
+        )}
+      </section>
+
+      <Dialog open={pendingUserTagDelete != null} onOpenChange={(open) => { if (!open) closeUserTagDeleteDialog() }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{usersStrings.catalog.deleteDialogTitle}</DialogTitle>
+            <DialogDescription>
+              {pendingUserTagDelete
+                ? usersStrings.catalog.deleteConfirm.replace('{name}', pendingUserTagDelete.displayName)
+                : usersStrings.catalog.deleteConfirm.replace('{name}', '')}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={closeUserTagDeleteDialog}
+              disabled={deletingUserTagId != null}
+            >
+              {usersStrings.catalog.deleteDialogCancel}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void confirmUserTagCatalogDelete()}
+              disabled={deletingUserTagId != null}
+            >
+              {usersStrings.catalog.deleteDialogConfirm}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </AdminShell>
+  )
 
   if (route.name === 'key') {
     return (
@@ -2370,10 +3248,14 @@ function AdminDashboard(): JSX.Element {
       </AdminShell>
     )
   }
+  if (route.name === 'user-tags' || route.name === 'user-tag-editor') {
+    return renderUserTagCatalogIndexPage()
+  }
   if (route.name === 'user') {
-    const usersStrings = adminStrings.users
     const detail = selectedUserDetail
     const tokenItems = detail?.tokens ?? []
+    const boundTags = detail?.tags ?? []
+    const hasBlockAllTag = boundTags.some((tag) => tag.effectKind === 'block_all')
 
     return (
       <AdminShell
@@ -2396,12 +3278,30 @@ function AdminDashboard(): JSX.Element {
                 href={userConsoleHref}
                 className="admin-return-link--detail"
               />
-              <Button type="button" variant="outline" onClick={() => navigateModule('users')}>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  navigateToPath(
+                    buildAdminUsersPath(
+                      getAdminUsersQueryFromLocation(),
+                      getAdminUsersTagFilterFromLocation(),
+                      getAdminUsersPageFromLocation(),
+                    ),
+                  )
+                }
+              >
                 {usersStrings.detail.back}
               </Button>
             </div>
           </div>
         </section>
+
+        {userTagError && (
+          <div className="surface error-banner" role="alert">
+            {userTagError}
+          </div>
+        )}
 
         {userQuotaError && (
           <div className="surface error-banner" role="alert">
@@ -2420,6 +3320,12 @@ function AdminDashboard(): JSX.Element {
         ) : (
           <>
             <section className="surface panel">
+              <div className="panel-header">
+                <div>
+                  <h2>{usersStrings.detail.identityTitle}</h2>
+                  <p className="panel-description">{usersStrings.detail.identityDescription}</p>
+                </div>
+              </div>
               <div className="token-info-grid">
                 <div className="token-info-card">
                   <span className="token-info-label">{usersStrings.detail.userId}</span>
@@ -2455,11 +3361,116 @@ function AdminDashboard(): JSX.Element {
             </section>
 
             <section className="surface panel">
-              <div className="panel-header">
+              <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <div>
+                  <h2>{usersStrings.userTags.title}</h2>
+                  <p className="panel-description">{usersStrings.userTags.description}</p>
+                </div>
+                <button type="button" className="btn btn-outline" onClick={navigateUserTags}>
+                  {usersStrings.userTags.manageCatalog}
+                </button>
+              </div>
+              <div className="user-tag-binding-toolbar">
+                <UserTagBadgeList
+                  tags={boundTags}
+                  usersStrings={usersStrings}
+                  emptyLabel={usersStrings.userTags.empty}
+                  limit={Math.max(USER_TAG_DISPLAY_LIMIT, boundTags.length)}
+                />
+                <div className="user-tag-bind-controls">
+                  <select
+                    className="select select-bordered"
+                    value={selectedBindableTagId}
+                    onChange={(event) => setSelectedBindableTagId(event.target.value)}
+                    disabled={savingUserTagBinding || bindableCustomTags.length === 0}
+                  >
+                    <option value="">{usersStrings.userTags.bindPlaceholder}</option>
+                    {bindableCustomTags.map((tag) => (
+                      <option key={tag.id} value={tag.id}>
+                        {tag.displayName}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => void bindSelectedUserTag()}
+                    disabled={savingUserTagBinding || !selectedBindableTagId}
+                  >
+                    {savingUserTagBinding ? usersStrings.userTags.binding : usersStrings.userTags.bindAction}
+                  </button>
+                </div>
+              </div>
+
+              {boundTags.length === 0 ? (
+                <div className="empty-state alert" style={{ marginTop: 12 }}>{usersStrings.userTags.empty}</div>
+              ) : (
+                <div className="user-tag-binding-list">
+                  {boundTags.map((tag) => {
+                    const isSystem = isSystemUserTag(tag)
+                    return (
+                      <article className="user-tag-binding-card" key={`${tag.tagId}:${tag.source}`}>
+                        <div className="user-tag-binding-card-head">
+                          <div className="user-tag-pill-list">
+                            <UserTagBadge tag={tag} usersStrings={usersStrings} />
+                            <StatusBadge tone={isSystem ? 'info' : 'neutral'}>
+                              {tag.source === 'system_linuxdo'
+                                ? usersStrings.userTags.sourceSystem
+                                : usersStrings.userTags.sourceManual}
+                            </StatusBadge>
+                            <StatusBadge tone={tag.effectKind === 'block_all' ? 'error' : 'success'}>
+                              {tag.effectKind === 'block_all'
+                                ? usersStrings.catalog.effectKinds.blockAll
+                                : usersStrings.catalog.effectKinds.quotaDelta}
+                            </StatusBadge>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => void unbindSelectedUserTag(tag)}
+                            disabled={savingUserTagBinding || isSystem || tag.source !== 'manual'}
+                          >
+                            {isSystem || tag.source !== 'manual'
+                              ? usersStrings.userTags.readOnly
+                              : usersStrings.userTags.unbindAction}
+                          </button>
+                        </div>
+                        <div className="token-compact-pair">
+                          <div className="token-compact-field">
+                            <span className="token-compact-label">{usersStrings.quota.hourlyAny}</span>
+                            <span className="token-compact-value">{formatSignedQuotaDelta(tag.hourlyAnyDelta)}</span>
+                          </div>
+                          <div className="token-compact-field">
+                            <span className="token-compact-label">{usersStrings.quota.hourly}</span>
+                            <span className="token-compact-value">{formatSignedQuotaDelta(tag.hourlyDelta)}</span>
+                          </div>
+                          <div className="token-compact-field">
+                            <span className="token-compact-label">{usersStrings.quota.daily}</span>
+                            <span className="token-compact-value">{formatSignedQuotaDelta(tag.dailyDelta)}</span>
+                          </div>
+                          <div className="token-compact-field">
+                            <span className="token-compact-label">{usersStrings.quota.monthly}</span>
+                            <span className="token-compact-value">{formatSignedQuotaDelta(tag.monthlyDelta)}</span>
+                          </div>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              )}
+            </section>
+
+            <section className="surface panel">
+              <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
                 <div>
                   <h2>{usersStrings.quota.title}</h2>
                   <p className="panel-description">{usersStrings.quota.description}</p>
                 </div>
+                <StatusBadge tone={detail.quotaBase.inheritsDefaults ? 'info' : 'neutral'}>
+                  {detail.quotaBase.inheritsDefaults
+                    ? usersStrings.quota.inheritsDefaults
+                    : usersStrings.quota.customized}
+                </StatusBadge>
               </div>
               <div className="quota-grid">
                 {([
@@ -2467,25 +3478,25 @@ function AdminDashboard(): JSX.Element {
                     field: 'hourlyAnyLimit',
                     label: usersStrings.quota.hourlyAny,
                     used: detail.hourlyAnyUsed,
-                    currentLimit: detail.hourlyAnyLimit,
+                    currentLimit: detail.quotaBase.hourlyAnyLimit,
                   },
                   {
                     field: 'hourlyLimit',
                     label: usersStrings.quota.hourly,
                     used: detail.quotaHourlyUsed,
-                    currentLimit: detail.quotaHourlyLimit,
+                    currentLimit: detail.quotaBase.hourlyLimit,
                   },
                   {
                     field: 'dailyLimit',
                     label: usersStrings.quota.daily,
                     used: detail.quotaDailyUsed,
-                    currentLimit: detail.quotaDailyLimit,
+                    currentLimit: detail.quotaBase.dailyLimit,
                   },
                   {
                     field: 'monthlyLimit',
                     label: usersStrings.quota.monthly,
                     used: detail.quotaMonthlyUsed,
-                    currentLimit: detail.quotaMonthlyLimit,
+                    currentLimit: detail.quotaBase.monthlyLimit,
                   },
                 ] as const).map((item) => {
                   const sliderSeed = userQuotaSnapshot?.[item.field] ?? createQuotaSliderSeed(item.field, item.used, item.currentLimit)
@@ -2546,6 +3557,94 @@ function AdminDashboard(): JSX.Element {
             <section className="surface panel">
               <div className="panel-header">
                 <div>
+                  <h2>{usersStrings.effectiveQuota.title}</h2>
+                  <p className="panel-description">{usersStrings.effectiveQuota.description}</p>
+                </div>
+              </div>
+              {hasBlockAllTag && (
+                <div className="alert alert-warning" role="status" style={{ marginBottom: 12 }}>
+                  {usersStrings.effectiveQuota.blockAllNotice}
+                </div>
+              )}
+              <div className="token-info-grid">
+                {([
+                  ['hourlyAny', usersStrings.quota.hourlyAny, detail.effectiveQuota.hourlyAnyLimit],
+                  ['hourly', usersStrings.quota.hourly, detail.effectiveQuota.hourlyLimit],
+                  ['daily', usersStrings.quota.daily, detail.effectiveQuota.dailyLimit],
+                  ['monthly', usersStrings.quota.monthly, detail.effectiveQuota.monthlyLimit],
+                ] as const).map(([key, label, value]) => (
+                  <div className="token-info-card" key={key}>
+                    <span className="token-info-label">{label}</span>
+                    <span className="token-info-value">{formatQuotaLimitValue(value)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="table-wrapper jobs-table-wrapper" style={{ marginTop: 12 }}>
+                <table className="jobs-table admin-users-table user-tag-breakdown-table">
+                  <thead>
+                    <tr>
+                      <th>{usersStrings.effectiveQuota.columns.item}</th>
+                      <th>{usersStrings.effectiveQuota.columns.source}</th>
+                      <th>{usersStrings.effectiveQuota.columns.effect}</th>
+                      <th>{usersStrings.quota.hourlyAny}</th>
+                      <th>{usersStrings.quota.hourly}</th>
+                      <th>{usersStrings.quota.daily}</th>
+                      <th>{usersStrings.quota.monthly}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.quotaBreakdown.map((entry, index) => {
+                      const isAbsoluteRow = entry.kind === 'base' || entry.kind === 'effective'
+                      const breakdownLabel =
+                        entry.kind === 'base'
+                          ? usersStrings.effectiveQuota.baseLabel
+                          : entry.kind === 'effective'
+                            ? usersStrings.effectiveQuota.effectiveLabel
+                            : entry.label
+                      const formatBreakdownValue = (value: number) => (
+                        isAbsoluteRow ? formatQuotaLimitValue(value) : formatSignedQuotaDelta(value)
+                      )
+                      return (
+                        <tr key={`${entry.kind}:${entry.tagId ?? 'row'}:${index}`}>
+                          <td>
+                            <div className="token-compact-pair">
+                              <div className="token-compact-field">
+                                <span className="token-compact-value">{breakdownLabel}</span>
+                              </div>
+                              {entry.tagName && (
+                                <div className="token-compact-field">
+                                  <code className="token-compact-value">{entry.tagName}</code>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          <td>{entry.source ? (entry.source === 'system_linuxdo' ? usersStrings.userTags.sourceSystem : usersStrings.userTags.sourceManual) : '—'}</td>
+                          <td>
+                            <StatusBadge tone={entry.effectKind === 'block_all' ? 'error' : 'neutral'}>
+                              {entry.effectKind === 'block_all'
+                                ? usersStrings.catalog.effectKinds.blockAll
+                                : entry.effectKind === 'base'
+                                  ? usersStrings.effectiveQuota.baseLabel
+                                  : entry.kind === 'effective' || entry.effectKind === 'effective'
+                                    ? usersStrings.effectiveQuota.effectiveLabel
+                                    : usersStrings.catalog.effectKinds.quotaDelta}
+                            </StatusBadge>
+                          </td>
+                          <td>{formatBreakdownValue(entry.hourlyAnyDelta)}</td>
+                          <td>{formatBreakdownValue(entry.hourlyDelta)}</td>
+                          <td>{formatBreakdownValue(entry.dailyDelta)}</td>
+                          <td>{formatBreakdownValue(entry.monthlyDelta)}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="surface panel">
+              <div className="panel-header">
+                <div>
                   <h2>{usersStrings.detail.tokensTitle}</h2>
                   <p className="panel-description">{usersStrings.detail.tokensDescription}</p>
                 </div>
@@ -2567,10 +3666,10 @@ function AdminDashboard(): JSX.Element {
                     </thead>
                     <tbody>
                       {tokenItems.map((token) => {
-                        const hourlyAnyText = `${formatNumber(token.hourlyAnyUsed)} / ${formatNumber(token.hourlyAnyLimit)}`
-                        const hourlyText = `${formatNumber(token.quotaHourlyUsed)} / ${formatNumber(token.quotaHourlyLimit)}`
-                        const dailyText = `${formatNumber(token.quotaDailyUsed)} / ${formatNumber(token.quotaDailyLimit)}`
-                        const monthlyText = `${formatNumber(token.quotaMonthlyUsed)} / ${formatNumber(token.quotaMonthlyLimit)}`
+                        const hourlyAnyText = formatQuotaUsagePair(token.hourlyAnyUsed, token.hourlyAnyLimit)
+                        const hourlyText = formatQuotaUsagePair(token.quotaHourlyUsed, token.quotaHourlyLimit)
+                        const dailyText = formatQuotaUsagePair(token.quotaDailyUsed, token.quotaDailyLimit)
+                        const monthlyText = formatQuotaUsagePair(token.quotaMonthlyUsed, token.quotaMonthlyLimit)
                         const successDailyText = `${formatNumber(token.dailySuccess)} / ${formatNumber(token.dailyFailure)}`
                         const successMonthlyText = formatNumber(token.monthlySuccess)
                         return (
@@ -2863,12 +3962,6 @@ function AdminDashboard(): JSX.Element {
       </AdminShell>
     )
   }
-
-  const tokenList = Array.isArray(tokens) ? tokens : []
-  const tokenGroupList = Array.isArray(tokenGroups) ? tokenGroups : []
-  const ungroupedGroup = tokenGroupList.find((group) => !group.name || group.name.trim().length === 0)
-  const namedTokenGroups = tokenGroupList.filter((group) => group.name && group.name.trim().length > 0)
-  const hasTokenGroups = tokenGroupList.length > 0
   const showDashboard = activeModule === 'dashboard'
   const showTokens = activeModule === 'tokens'
   const showKeys = activeModule === 'keys'
@@ -3125,7 +4218,7 @@ function AdminDashboard(): JSX.Element {
                 >
                   <span className="token-group-name">{tokenStrings.groups.all}</span>
                 </button>
-                {ungroupedGroup && (
+                {ungroupedTokenGroup && (
                   <button
                     type="button"
                     className={`token-group-chip${selectedTokenUngrouped ? ' token-group-chip-active' : ''}`}
@@ -3134,7 +4227,7 @@ function AdminDashboard(): JSX.Element {
                     <span className="token-group-name">{tokenStrings.groups.ungrouped}</span>
                     {tokenGroupsExpanded && (
                       <span className="token-group-count">
-                        {ungroupedGroup.tokenCount}
+                        {ungroupedTokenGroup.tokenCount}
                       </span>
                     )}
                   </button>
@@ -4203,134 +5296,146 @@ function AdminDashboard(): JSX.Element {
       )}
 
       {showUsers && (
-        <section className="surface panel">
-          <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
-            <div>
-              <h2>{adminStrings.users.title}</h2>
-              <p className="panel-description">{adminStrings.users.description}</p>
-            </div>
-            <div className="users-search-controls">
-<Input
-  type="text"
-  name="users-search"
-  className="users-search-input"
-  placeholder={adminStrings.users.searchPlaceholder}
-  value={usersQueryInput}
-  onChange={(event) => setUsersQueryInput(event.target.value)}
-  onKeyDown={(event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      applyUserSearch()
-    }
-  }}
-/>
-<Button type="button" variant="outline" onClick={applyUserSearch}>
-  {adminStrings.users.search}
-</Button>
-{(usersQueryInput.length > 0 || usersQuery.length > 0) && (
-  <Button type="button" variant="ghost" onClick={resetUserSearch}>
-    {adminStrings.users.clear}
-  </Button>
-)}
-            </div>
-          </div>
+        <>
+          {renderUserTagSummaryPanel()}
 
-          <div className="table-wrapper jobs-table-wrapper">
-            {users.length === 0 ? (
-              <div className="empty-state alert">
-                {usersLoading ? adminStrings.users.empty.loading : adminStrings.users.empty.none}
+          <section className="surface panel">
+            <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+              <div>
+                <h2>{usersStrings.title}</h2>
+                <p className="panel-description">{usersStrings.description}</p>
               </div>
-            ) : (
-              <Table className="jobs-table admin-users-table admin-users-list-table">
-                <thead>
-                  <tr>
-                    <th>{adminStrings.users.table.user}</th>
-                    <th>{adminStrings.users.table.status}</th>
-                    <th>{adminStrings.users.table.tokenCount}</th>
-                    <th>{adminStrings.users.table.hourlyAny}</th>
-                    <th>{adminStrings.users.table.hourly}</th>
-                    <th>{adminStrings.users.table.daily}</th>
-                    <th>{adminStrings.users.table.monthly}</th>
-                    <th>{adminStrings.users.table.successDaily}</th>
-                    <th>{adminStrings.users.table.successMonthly}</th>
-                    <th>{adminStrings.users.table.lastActivity}</th>
-                    <th>{adminStrings.users.table.lastLogin}</th>
-                    <th>{adminStrings.users.table.actions}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((item) => (
-                    <tr key={item.userId}>
-                      <td>
-                        <button
-                          type="button"
-                          className="link-button"
-                          onClick={() => navigateUser(item.userId)}
-                        >
-                          <strong>{item.displayName || item.username || item.userId}</strong>
-                        </button>
-                        <div className="panel-description" style={{ marginTop: 4 }}>
-                          <code>{item.userId}</code>
-                          {item.username ? ` · @${item.username}` : ''}
-                        </div>
-                      </td>
-                      <td>
-                        <StatusBadge tone={item.active ? 'success' : 'neutral'}>
-                          {item.active ? adminStrings.users.status.active : adminStrings.users.status.inactive}
-                        </StatusBadge>
-                      </td>
-                      <td>{formatNumber(item.tokenCount)}</td>
-                      <td>{formatNumber(item.hourlyAnyUsed)} / {formatNumber(item.hourlyAnyLimit)}</td>
-                      <td>{formatNumber(item.quotaHourlyUsed)} / {formatNumber(item.quotaHourlyLimit)}</td>
-                      <td>{formatNumber(item.quotaDailyUsed)} / {formatNumber(item.quotaDailyLimit)}</td>
-                      <td>{formatNumber(item.quotaMonthlyUsed)} / {formatNumber(item.quotaMonthlyLimit)}</td>
-                      <td>{formatNumber(item.dailySuccess)} / {formatNumber(item.dailyFailure)}</td>
-                      <td>{formatNumber(item.monthlySuccess)}</td>
-                      <td>{formatTimestamp(item.lastActivity)}</td>
-                      <td>{formatTimestamp(item.lastLoginAt)}</td>
-                      <td>
-<Button
-  type="button"
-  variant="ghost"
-  size="icon"
-  className="h-8 w-8 rounded-full p-0 shadow-none"
-  title={adminStrings.users.actions.view}
-  aria-label={adminStrings.users.actions.view}
-  onClick={() => navigateUser(item.userId)}
->
-  <Icon icon="mdi:eye-outline" width={16} height={16} />
-</Button>
-                      </td>
+              <div className="users-search-controls">
+                <Input
+                  type="text"
+                  name="users-search"
+                  className="users-search-input"
+                  placeholder={usersStrings.searchPlaceholder}
+                  value={usersQueryInput}
+                  onChange={(event) => setUsersQueryInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      applyUserSearch()
+                    }
+                  }}
+                />
+                <Button type="button" variant="outline" onClick={applyUserSearch}>
+                  {usersStrings.search}
+                </Button>
+                {(usersQueryInput.length > 0 || usersQuery.length > 0 || usersTagFilterId != null) && (
+                  <Button type="button" variant="ghost" onClick={resetUserSearch}>
+                    {usersStrings.clear}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <div className="table-wrapper jobs-table-wrapper">
+              {users.length === 0 ? (
+                <div className="empty-state alert">
+                  {usersLoading ? usersStrings.empty.loading : usersStrings.empty.none}
+                </div>
+              ) : (
+                <Table className="jobs-table admin-users-table admin-users-list-table">
+                  <thead>
+                    <tr>
+                      <th>{usersStrings.table.user}</th>
+                      <th>{usersStrings.table.status}</th>
+                      <th>{usersStrings.table.tokenCount}</th>
+                      <th>{usersStrings.table.tags}</th>
+                      <th>{usersStrings.table.hourlyAny}</th>
+                      <th>{usersStrings.table.hourly}</th>
+                      <th>{usersStrings.table.daily}</th>
+                      <th>{usersStrings.table.monthly}</th>
+                      <th>{usersStrings.table.successDaily}</th>
+                      <th>{usersStrings.table.successMonthly}</th>
+                      <th>{usersStrings.table.lastActivity}</th>
+                      <th>{usersStrings.table.lastLogin}</th>
+                      <th>{usersStrings.table.actions}</th>
                     </tr>
-                  ))}
-                </tbody>
-              </Table>
+                  </thead>
+                  <tbody>
+                    {users.map((item) => (
+                      <tr key={item.userId}>
+                        <td>
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => navigateUser(item.userId, { preserveUsersContext: true })}
+                          >
+                            <strong>{item.displayName || item.username || item.userId}</strong>
+                          </button>
+                          <div className="panel-description" style={{ marginTop: 4 }}>
+                            <code>{item.userId}</code>
+                            {item.username ? ` · @${item.username}` : ''}
+                          </div>
+                        </td>
+                        <td>
+                          <StatusBadge tone={item.active ? 'success' : 'neutral'}>
+                            {item.active ? usersStrings.status.active : usersStrings.status.inactive}
+                          </StatusBadge>
+                        </td>
+                        <td>{formatNumber(item.tokenCount)}</td>
+                        <td>
+                          <UserTagBadgeList
+                            tags={item.tags}
+                            usersStrings={usersStrings}
+                            emptyLabel={usersStrings.userTags.empty}
+                          />
+                        </td>
+                        <td>{formatQuotaUsagePair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</td>
+                        <td>{formatQuotaUsagePair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</td>
+                        <td>{formatQuotaUsagePair(item.quotaDailyUsed, item.quotaDailyLimit)}</td>
+                        <td>{formatQuotaUsagePair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</td>
+                        <td>{formatNumber(item.dailySuccess)} / {formatNumber(item.dailyFailure)}</td>
+                        <td>{formatNumber(item.monthlySuccess)}</td>
+                        <td>{formatTimestamp(item.lastActivity)}</td>
+                        <td>{formatTimestamp(item.lastLoginAt)}</td>
+                        <td>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 rounded-full p-0 shadow-none"
+                            title={usersStrings.actions.view}
+                            aria-label={usersStrings.actions.view}
+                            onClick={() => navigateUser(item.userId, { preserveUsersContext: true })}
+                          >
+                            <Icon icon="mdi:eye-outline" width={16} height={16} />
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              )}
+            </div>
+
+            {usersTotal > USERS_PER_PAGE && (
+              <AdminTablePagination
+                page={usersPage}
+                totalPages={usersTotalPages}
+                pageSummary={
+                  <span className="panel-description">
+                    {usersStrings.pagination
+                      .replace('{page}', String(usersPage))
+                      .replace('{total}', String(usersTotalPages))}
+                  </span>
+                }
+                previousLabel={tokenStrings.pagination.prev}
+                nextLabel={tokenStrings.pagination.next}
+                previousDisabled={usersPage <= 1}
+                nextDisabled={usersPage >= usersTotalPages}
+                onPrevious={goPrevUsersPage}
+                onNext={goNextUsersPage}
+              />
             )}
-          </div>
-
-          {usersTotal > USERS_PER_PAGE && (
-            <AdminTablePagination
-              page={usersPage}
-              totalPages={usersTotalPages}
-              pageSummary={
-                <span className="panel-description">
-                  {adminStrings.users.pagination
-                    .replace('{page}', String(usersPage))
-                    .replace('{total}', String(usersTotalPages))}
-                </span>
-              }
-              previousLabel={tokenStrings.pagination.prev}
-              nextLabel={tokenStrings.pagination.next}
-              previousDisabled={usersPage <= 1}
-              nextDisabled={usersPage >= usersTotalPages}
-              onPrevious={goPrevUsersPage}
-              onNext={goNextUsersPage}
-            />
-          )}
-        </section>
+          </section>
+        </>
       )}
-
       {showAlerts && (
+
         <ModulePlaceholder
           title={adminStrings.modules.alerts.title}
           description={adminStrings.modules.alerts.description}

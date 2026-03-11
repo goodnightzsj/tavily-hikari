@@ -7,4 +7,3 @@ describe('ADMIN_USER_CONSOLE_HREF', () => {
     expect(ADMIN_USER_CONSOLE_HREF).toBe('/console')
   })
 })
-
