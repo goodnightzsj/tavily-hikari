@@ -31,6 +31,17 @@ interface PublicTranslations {
     button: string
     logoAlt: string
   }
+  registrationPaused: {
+    badge: string
+    title: string
+    description: string
+    returnHome: string
+    continueHint: string
+  }
+  registrationPausedNotice: {
+    title: string
+    description: string
+  }
   adminLogin: {
     title: string
     description: string
@@ -244,6 +255,15 @@ interface AdminTranslationsShape {
   users: {
     title: string
     description: string
+    registration: {
+      title: string
+      description: string
+      enabled: string
+      disabled: string
+      saving: string
+      loadFailed: string
+      saveFailed: string
+    }
     searchPlaceholder: string
     search: string
     clear: string
@@ -901,6 +921,18 @@ export const translations: Record<Language, TranslationShape> = {
         button: 'Sign in with Linux DO',
         logoAlt: 'Linux DO logo',
       },
+      registrationPaused: {
+        badge: 'Registration paused',
+        title: 'New registrations are temporarily paused',
+        description:
+          'This service is currently accepting sign-ins from already registered users only. New Linux DO accounts cannot be created right now.',
+        returnHome: 'Return to home',
+        continueHint: 'If you already have an account, go back to the home page and continue signing in there.',
+      },
+      registrationPausedNotice: {
+        title: 'New registration is paused',
+        description: 'Existing users can still sign in with Linux DO. New accounts are temporarily blocked.',
+      },
       adminLogin: {
         title: 'Admin Login',
         description: 'Sign in to manage Tavily keys and access tokens.',
@@ -1122,6 +1154,15 @@ export const translations: Record<Language, TranslationShape> = {
       users: {
         title: 'User Management',
         description: 'Account-level metrics, tag overlays, and shared quota controls.',
+        registration: {
+          title: 'Allow registration',
+          description: 'Controls whether first-time Linux DO users may create a local account.',
+          enabled: 'New Linux DO users may register now.',
+          disabled: 'New Linux DO users are paused. Existing bound users can still sign in.',
+          saving: 'Saving registration policy…',
+          loadFailed: 'Failed to load registration policy.',
+          saveFailed: 'Failed to save registration policy.',
+        },
         searchPlaceholder: 'Search by user ID, display name, username, or tag',
         search: 'Search',
         clear: 'Clear',
@@ -1768,6 +1809,17 @@ export const translations: Record<Language, TranslationShape> = {
         button: '使用 Linux DO 登录',
         logoAlt: 'Linux DO 标志',
       },
+      registrationPaused: {
+        badge: '暂停注册',
+        title: '新用户注册暂时关闭',
+        description: '当前服务仅允许已注册用户继续登录，暂不接受新的 Linux DO 账户创建本地身份。',
+        returnHome: '返回首页',
+        continueHint: '如果你已经有账号，请返回首页继续登录。',
+      },
+      registrationPausedNotice: {
+        title: '新注册已暂停',
+        description: '已注册用户仍可继续使用 Linux DO 登录；新的账户暂时无法创建。',
+      },
       adminLogin: {
         title: '管理员登录',
         description: '登录后可管理 Tavily key 与访问令牌。',
@@ -1989,6 +2041,15 @@ export const translations: Record<Language, TranslationShape> = {
       users: {
         title: '用户管理',
         description: '查看账户层统计、用户标签叠加与共享额度设置。',
+        registration: {
+          title: '允许注册',
+          description: '控制首次使用 Linux DO 登录的用户是否可以创建本地账户。',
+          enabled: '当前允许新的 Linux DO 用户注册。',
+          disabled: '新的 Linux DO 用户注册已暂停；已绑定用户仍可继续登录。',
+          saving: '正在保存注册策略…',
+          loadFailed: '加载注册策略失败。',
+          saveFailed: '保存注册策略失败。',
+        },
         searchPlaceholder: '按用户 ID、显示名、用户名或标签搜索',
         search: '搜索',
         clear: '清空',

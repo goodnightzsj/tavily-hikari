@@ -45,6 +45,7 @@ function PublicHomeTokenModalStory(args: PublicHomeStoryArgs): JSX.Element {
         totalKeys={12}
         error={null}
         showLinuxDoLogin
+        showRegistrationPausedNotice
         showTokenAccessButton
         showAdminAction={args.showAdminAction}
         adminActionLabel={strings.adminLoginButton}
