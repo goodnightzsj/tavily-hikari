@@ -537,7 +537,7 @@ export default function UserConsole(): JSX.Element {
     const requestRunId = tokenSecretRunIdRef.current
     const request = fetchUserTokenSecret(tokenId, requestController.signal)
       .then(({ token }) => {
-        if (requestRunId === tokenSecretRunIdRef.current) {
+        if (!requestController.signal.aborted && requestRunId === tokenSecretRunIdRef.current) {
           cacheTokenSecret(tokenId, token)
         }
         return token

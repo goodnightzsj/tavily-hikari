@@ -1093,7 +1093,9 @@ function AdminDashboard(): JSX.Element {
 
     const request = fetchApiKeySecret(id, signal)
       .then((result) => {
-        secretCacheRef.current.set(id, result.api_key)
+        if (!signal?.aborted) {
+          secretCacheRef.current.set(id, result.api_key)
+        }
         return result.api_key
       })
       .finally(() => {
@@ -1119,7 +1121,7 @@ function AdminDashboard(): JSX.Element {
     let request: Promise<string>
     request = fetchTokenSecret(id, signal)
       .then((result) => {
-        if ((tokenSecretVersionRef.current.get(id) ?? 0) === requestVersion) {
+        if (!signal?.aborted && (tokenSecretVersionRef.current.get(id) ?? 0) === requestVersion) {
           tokenSecretCacheRef.current.set(id, result.token)
         }
         return result.token
