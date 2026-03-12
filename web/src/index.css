@@ -7358,64 +7358,58 @@ tbody .log-details-row:hover {
   color: hsl(var(--muted-foreground));
 }
 
-.forward-proxy-node-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 1rem;
-}
-
-.forward-proxy-node-card {
-  overflow: hidden;
-}
-
-.forward-proxy-node-card-header {
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
-  padding-bottom: 0.85rem;
-}
-
-.forward-proxy-node-card-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.forward-proxy-node-card-title-row {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  flex-wrap: wrap;
-}
-
-.forward-proxy-node-card-content {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.forward-proxy-node-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.85rem;
-}
-
-.forward-proxy-node-metric-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.38rem;
-  min-width: 0;
-  padding: 0.95rem;
-  border: 1px solid hsl(var(--border) / 0.7);
-  border-radius: 1rem;
-  background: linear-gradient(180deg, hsl(var(--card) / 0.98), hsl(var(--muted) / 0.2));
-}
-
 .forward-proxy-node-metric-label {
   font-size: 0.76rem;
   font-weight: 700;
   letter-spacing: 0.01em;
   color: hsl(var(--muted-foreground));
+}
+
+.forward-proxy-node-list-mobile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.forward-proxy-node-mobile-card {
+  overflow: hidden;
+}
+
+.forward-proxy-node-mobile-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding-bottom: 0.85rem;
+}
+
+.forward-proxy-node-mobile-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.forward-proxy-node-mobile-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.forward-proxy-node-mobile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.forward-proxy-node-mobile-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid hsl(var(--border) / 0.72);
+  border-radius: 0.95rem;
+  background: linear-gradient(180deg, hsl(var(--card) / 0.98), hsl(var(--muted) / 0.2));
 }
 
 .forward-proxy-endpoint {
@@ -7425,20 +7419,63 @@ tbody .log-details-row:hover {
   overflow-wrap: anywhere;
 }
 
-.forward-proxy-node-window-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.7rem;
+.forward-proxy-table-wrapper {
+  display: none;
+  overflow: hidden;
 }
 
-.forward-proxy-window-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 0.55rem;
+.forward-proxy-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.forward-proxy-table th,
+.forward-proxy-table td {
+  vertical-align: top;
+}
+
+.forward-proxy-table-row {
+  transition: background-color 0.16s ease;
+}
+
+.forward-proxy-table-row:hover {
+  background: hsl(var(--primary) / 0.05);
+}
+
+.forward-proxy-node-cell {
+  min-width: 0;
+}
+
+.forward-proxy-node-cell-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.34rem;
+  min-width: 0;
+}
+
+.forward-proxy-node-cell-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.forward-proxy-node-cell-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+  color: hsl(var(--muted-foreground));
 }
 
 .forward-proxy-window-card {
   font-size: 0.78rem;
+}
+
+.forward-proxy-window-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
 }
 
 .forward-proxy-window-card-content {
@@ -7459,27 +7496,28 @@ tbody .log-details-row:hover {
   color: hsl(var(--muted-foreground));
 }
 
-@media (max-width: 1200px) {
-  .forward-proxy-node-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+@media (min-width: 960px) {
+  .forward-proxy-node-list-mobile {
+    display: none;
   }
 
-  .forward-proxy-window-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .forward-proxy-table-wrapper {
+    display: block;
   }
 }
 
 @media (max-width: 960px) {
   .forward-proxy-config-grid,
   .forward-proxy-form-footer,
-  .forward-proxy-node-metrics,
+  .forward-proxy-node-mobile-grid,
   .forward-proxy-window-grid {
     grid-template-columns: 1fr;
   }
 
   .forward-proxy-panel-header,
   .forward-proxy-editor-head,
-  .forward-proxy-node-card-title-row {
+  .forward-proxy-node-mobile-title-row,
+  .forward-proxy-node-cell-title-row {
     flex-direction: column;
     align-items: flex-start;
   }
