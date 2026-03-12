@@ -234,6 +234,7 @@ export default function UserConsole(): JSX.Element {
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<Record<string, TokenSecretCopyState>>({})
+  const [tokenSecretTokenId, setTokenSecretTokenId] = useState<string | null>(null)
   const [tokenSecretVisible, setTokenSecretVisible] = useState(false)
   const [tokenSecretValue, setTokenSecretValue] = useState<string | null>(null)
   const [tokenSecretLoading, setTokenSecretLoading] = useState(false)
@@ -363,6 +364,7 @@ export default function UserConsole(): JSX.Element {
 
   useEffect(() => {
     tokenSecretRunIdRef.current += 1
+    setTokenSecretTokenId(null)
     setTokenSecretVisible(false)
     setTokenSecretValue(null)
     setTokenSecretLoading(false)
@@ -402,8 +404,12 @@ export default function UserConsole(): JSX.Element {
 
   const copyToken = useCallback(async (tokenId: string) => {
     try {
-      let token = tokenSecretValue
-      if (!(route.name === 'token' && route.id === tokenId && token)) {
+      const cachedToken =
+        route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId
+          ? tokenSecretValue
+          : null
+      let token = cachedToken
+      if (!token) {
         const secret = await fetchUserTokenSecret(tokenId)
         token = secret.token
       }
@@ -415,12 +421,13 @@ export default function UserConsole(): JSX.Element {
     window.setTimeout(() => {
       setCopyState((prev) => ({ ...prev, [tokenId]: 'idle' }))
     }, 1800)
-  }, [route, tokenSecretValue])
+  }, [route, tokenSecretTokenId, tokenSecretValue])
 
   const toggleTokenSecretVisibility = useCallback(async () => {
     if (route.name !== 'token') return
     if (tokenSecretVisible) {
       tokenSecretRunIdRef.current += 1
+      setTokenSecretTokenId(null)
       setTokenSecretVisible(false)
       setTokenSecretValue(null)
       setTokenSecretLoading(false)
@@ -431,16 +438,21 @@ export default function UserConsole(): JSX.Element {
 
     const runId = tokenSecretRunIdRef.current + 1
     tokenSecretRunIdRef.current = runId
+    setTokenSecretTokenId(route.id)
+    setTokenSecretVisible(false)
+    setTokenSecretValue(null)
     setTokenSecretLoading(true)
     setTokenSecretError(null)
 
     try {
       const secret = await fetchUserTokenSecret(route.id)
       if (tokenSecretRunIdRef.current !== runId) return
+      setTokenSecretTokenId(route.id)
       setTokenSecretValue(secret.token)
       setTokenSecretVisible(true)
     } catch (err) {
       if (tokenSecretRunIdRef.current !== runId) return
+      setTokenSecretTokenId(route.id)
       setTokenSecretVisible(false)
       setTokenSecretValue(null)
       setTokenSecretError(formatTemplate(text.detail.tokenSecret.revealFailed, {
@@ -469,8 +481,11 @@ export default function UserConsole(): JSX.Element {
   }, [route])
 
   const detailTokenCopyState = route.name === 'token' ? copyState[route.id] ?? 'idle' : 'idle'
-  const detailTokenVisible = tokenSecretVisible && tokenSecretValue != null
-  const detailTokenValue = tokenSecretValue ?? ''
+  const detailTokenMatchesRoute = route.name === 'token' && tokenSecretTokenId === route.id
+  const detailTokenVisible = detailTokenMatchesRoute && tokenSecretVisible && tokenSecretValue != null
+  const detailTokenValue = detailTokenVisible ? tokenSecretValue ?? '' : ''
+  const detailTokenLoading = detailTokenMatchesRoute && tokenSecretLoading
+  const detailTokenError = detailTokenMatchesRoute ? tokenSecretError : null
 
   const guideDescription = useMemo<GuideContent>(() => {
     const baseUrl = window.location.origin
@@ -1360,7 +1375,7 @@ export default function UserConsole(): JSX.Element {
               value={detailTokenValue}
               visible={detailTokenVisible}
               hiddenDisplayValue={tokenLabel(route.id)}
-              visibilityBusy={tokenSecretLoading}
+              visibilityBusy={detailTokenLoading}
               copyState={detailTokenCopyState}
               onValueChange={() => undefined}
               onToggleVisibility={() => void toggleTokenSecretVisibility()}
@@ -1376,13 +1391,13 @@ export default function UserConsole(): JSX.Element {
               wrapperClassName="access-token-box user-console-token-box"
               readOnly
             />
-            {tokenSecretLoading ? (
+            {detailTokenLoading ? (
               <p className="sr-only" role="status" aria-live="polite">
                 {text.detail.tokenSecret.loading}
               </p>
             ) : null}
-            {tokenSecretError ? (
-              <p className="user-console-token-error" role="status" aria-live="polite">{tokenSecretError}</p>
+            {detailTokenError ? (
+              <p className="user-console-token-error" role="status" aria-live="polite">{detailTokenError}</p>
             ) : null}
 
             <div className="user-console-probe-box">
