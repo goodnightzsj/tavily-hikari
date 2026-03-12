@@ -57,6 +57,7 @@
 
 - 所有生产复制入口统一走共享 helper。
 - `Clipboard API` 失败后自动尝试 `document.execCommand('copy')` fallback。
+- 对“按钮独占原文”的入口，若页面已提前 cache 到 secret，则应优先在同步点击栈里执行 legacy fallback，避免在异步请求后丢失 user activation。
 - 当两条路径都失败且原文本来不可见时，必须弹出 anchored bubble，展示原文与只读编辑框。
 - bubble 中的编辑框必须默认全选，且在点击/聚焦时再次全选；字段样式要允许 `user-select: all`。
 - 可能只展示一次 secret 的流程（例如 create token / regenerate token）在复制失败后不得丢失原文。
@@ -175,8 +176,8 @@
 ## Visual Evidence (PR)
 
 - 2026-03-12: Chrome DevTools 手工冒烟
-  - `http://127.0.0.1:55174/#th-public-copy-demo`：可见原文入口在双路径复制失败后只进入错误态，不重复弹 bubble。
-  - `http://127.0.0.1:55174/console#/tokens`：列表复制失败后弹出手动复制气泡，输入框默认聚焦且全选，`Escape` 可关闭。
+  - `http://127.0.0.1:55174/#a1b2`：可见原文入口在双路径复制失败后不重复弹 bubble，但会自动 reveal 并选中当前 token，便于立即手动复制。
+  - `http://127.0.0.1:55174/console#/tokens`：列表复制失败后弹出手动复制气泡，输入框默认聚焦且全选；同一按钮下次复制成功后旧气泡会自动关闭。
   - `http://127.0.0.1:55174/console#/tokens/a1b2`：窄屏下 detail 复制失败后 bubble 仍保持在视口内，点击/聚焦会再次全选。
   - `http://127.0.0.1:58089/admin/tokens`：新建 token、复制完整 token、复制分享链接在失败时均弹出手动复制气泡。
   - `http://127.0.0.1:58089/admin/tokens/m87I`：rotate secret 失败时复用现有对话框，展示只读 textarea 并自动全选，不额外弹 bubble。
@@ -197,6 +198,7 @@
 - 把复制兼容性下沉到共享 helper，避免每个页面各自判断浏览器能力。
 - 把“最终失败后的手动复制恢复”下沉到共享气泡组件，统一定位、关闭行为和只读编辑框交互。
 - 页面层只负责声明：当前入口是否已有可见原文，以及失败时应该展示的原文内容与锚点。
+- 对隐藏 secret 的按钮独占入口，页面层可以通过 secret cache 预热把 legacy fallback 尽量保留在同步点击栈里；若仍需异步取 secret，则最终以手动复制恢复 UI 兜底。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
@@ -210,6 +212,7 @@
 - 2026-03-12: 落地 `copyText()` / `selectAllReadonlyText()` / `ManualCopyBubble`，统一接入 PublicHome、UserConsole、AdminDashboard、TokenDetail，并补齐 Bun 测试、build 与浏览器冒烟。
 - 2026-03-12: 修复 `ManualCopyBubble` 首次打开时因定位前短路渲染而不显示的问题，改为先挂载再定位，未完成定位前仅隐藏且禁用指针事件。
 - 2026-03-12: 为 `execCommand` fallback 补充 iOS / iPadOS 选区兼容分支，并在 PublicHome 复制失败时自动 reveal 当前 token，确保“原文可见入口”仍可手动复制。
+- 2026-03-12: 补齐复制 review 收口：同步优先的 legacy fallback 选项、UserConsole/Admin secret cache 预热、复制成功时自动关闭旧气泡，以及 PublicHome / rotated token 失败后的自动重新选中。
 
 ## 参考（References）
 

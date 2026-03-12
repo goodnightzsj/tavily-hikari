@@ -799,7 +799,7 @@ export default function TokenDetail({
       setRotating(true)
       const res = await rotateTokenSecret(id)
       setRotatedToken(res.token)
-      const copyResult = await copyText(res.token)
+      const copyResult = await copyText(res.token, { allowExecCommand: false })
       setRotatedCopyState(copyResult.ok ? 'copied' : 'error')
       setIsRotateDialogOpen(false)
       setIsRotatedDialogOpen(true)
@@ -813,8 +813,13 @@ export default function TokenDetail({
 
   const handleCopyRotatedToken = useCallback(async () => {
     if (!rotatedToken) return
-    const copyResult = await copyText(rotatedToken)
+    const copyResult = await copyText(rotatedToken, { preferExecCommand: true })
     setRotatedCopyState(copyResult.ok ? 'copied' : 'error')
+    if (!copyResult.ok) {
+      window.requestAnimationFrame(() => {
+        selectAllReadonlyText(rotatedTokenFieldRef.current)
+      })
+    }
   }, [rotatedToken])
 
   return (

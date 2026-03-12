@@ -421,7 +421,6 @@ export default function UserConsole(): JSX.Element {
     if (revealedToken) {
       return revealedToken
     }
-
     const cached = tokenSecretCacheRef.current.get(tokenId)
     if (cached) {
       return cached
@@ -443,6 +442,7 @@ export default function UserConsole(): JSX.Element {
 
     tokenSecretRequestRef.current.set(tokenId, request)
     return await request
+  }, [route, tokenSecretTokenId, tokenSecretValue])
   }, [route, tokenSecretTokenId, tokenSecretValue])
 
   useEffect(() => {
@@ -490,6 +490,7 @@ export default function UserConsole(): JSX.Element {
     window.setTimeout(() => {
       setCopyState((prev) => ({ ...prev, [tokenId]: 'idle' }))
     }, 1800)
+  }, [resolveTokenSecret, route, tokenSecretTokenId, tokenSecretValue])
   }, [resolveTokenSecret, route, tokenSecretTokenId, tokenSecretValue])
 
   const toggleTokenSecretVisibility = useCallback(async () => {

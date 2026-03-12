@@ -1,5 +1,5 @@
 import { Icon } from '@iconify/react'
-import type { InputHTMLAttributes } from 'react'
+import type { InputHTMLAttributes, Ref } from 'react'
 
 import { cn } from '../lib/utils'
 import { Button } from './ui/button'
@@ -17,7 +17,7 @@ interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElemen
   copyState: TokenSecretCopyState
   onValueChange: (value: string) => void
   onToggleVisibility: () => void
-  onCopy: () => void | Promise<void>
+  onCopy: (anchorEl: HTMLButtonElement) => void | Promise<void>
   visibilityShowLabel: string
   visibilityHideLabel: string
   visibilityIconAlt: string
@@ -31,6 +31,7 @@ interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElemen
   inputClassName?: string
   copyButtonClassName?: string
   copyDisabled?: boolean
+  inputRef?: Ref<HTMLInputElement>
 }
 
 export default function TokenSecretField({
@@ -57,6 +58,7 @@ export default function TokenSecretField({
   inputClassName,
   copyButtonClassName,
   copyDisabled = false,
+  inputRef,
   className,
   onBlur,
   ...inputProps
@@ -88,6 +90,7 @@ export default function TokenSecretField({
           <Input
             {...inputProps}
             id={inputId}
+            ref={inputRef}
             className={cn('token-input', shouldMaskValue && 'masked', inputClassName, className)}
             type="text"
             value={displayValue}
@@ -120,7 +123,7 @@ export default function TokenSecretField({
           type="button"
           variant={copyVariant}
           className={cn('token-copy-button', copyStateClassName, copyButtonClassName)}
-          onClick={() => void onCopy()}
+          onClick={(event) => void onCopy(event.currentTarget)}
           aria-label={copyAriaLabel}
           disabled={copyDisabled}
         >

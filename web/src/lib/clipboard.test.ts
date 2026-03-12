@@ -75,6 +75,41 @@ describe('clipboard helpers', () => {
     expect(body.removeChild).toHaveBeenCalledTimes(1)
   })
 
+  it('can prefer execCommand before awaiting the Clipboard API', async () => {
+    const writeText = mock(async () => {
+      throw new Error('clipboard should not be called first')
+    })
+    const { doc, textarea } = createDocumentMock(true)
+
+    const result = await copyText('th-a1b2-secret', {
+      nav: { clipboard: { writeText } } as unknown as Navigator,
+      doc,
+      preferExecCommand: true,
+    })
+
+    expect(result).toEqual({ ok: true, method: 'execCommand' })
+    expect(writeText).toHaveBeenCalledTimes(0)
+    expect(textarea.select).toHaveBeenCalledTimes(1)
+  })
+
+  it('can skip execCommand when the user gesture has already been consumed', async () => {
+    const writeText = mock(async () => {
+      throw new Error('Blocked')
+    })
+    const { doc } = createDocumentMock(true)
+
+    const result = await copyText('th-a1b2-secret', {
+      nav: { clipboard: { writeText } } as unknown as Navigator,
+      doc,
+      allowExecCommand: false,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.method).toBeNull()
+    expect(result.errors?.clipboard).toBeInstanceOf(Error)
+    expect(result.errors?.execCommand).toBeUndefined()
+  })
+
   it('reports failure when both Clipboard API and execCommand fail', async () => {
     const writeText = mock(async () => {
       throw new Error('Blocked')

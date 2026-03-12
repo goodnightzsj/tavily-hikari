@@ -16,14 +16,36 @@ export interface SelectAllTextTarget {
   setSelectionRange?: (start: number, end: number) => void
 }
 
-interface CopyTextOptions {
+export interface CopyTextOptions {
   doc?: Document
   nav?: Navigator
+  allowExecCommand?: boolean
+  preferExecCommand?: boolean
 }
 
 export async function copyText(value: string, options: CopyTextOptions = {}): Promise<CopyTextResult> {
   const nav = options.nav ?? (typeof navigator !== 'undefined' ? navigator : undefined)
   const doc = options.doc ?? (typeof document !== 'undefined' ? document : undefined)
+  const allowExecCommand = options.allowExecCommand ?? true
+  const preferExecCommand = options.preferExecCommand ?? false
+
+  let execCommandError: unknown
+  const tryExecCommand = (): boolean => {
+    if (!allowExecCommand) {
+      return false
+    }
+
+    try {
+      return copyTextWithExecCommand(value, doc, nav)
+    } catch (error) {
+      execCommandError = error
+      return false
+    }
+  }
+
+  if (preferExecCommand && tryExecCommand()) {
+    return { ok: true, method: 'execCommand' }
+  }
 
   let clipboardError: unknown
   if (nav?.clipboard?.writeText) {
@@ -35,17 +57,12 @@ export async function copyText(value: string, options: CopyTextOptions = {}): Pr
     }
   }
 
-  let execCommandError: unknown
-  try {
-    if (copyTextWithExecCommand(value, doc, nav)) {
-      return {
-        ok: true,
-        method: 'execCommand',
-        errors: clipboardError ? { clipboard: clipboardError } : undefined,
-      }
+  if (!preferExecCommand && tryExecCommand()) {
+    return {
+      ok: true,
+      method: 'execCommand',
+      errors: clipboardError ? { clipboard: clipboardError } : undefined,
     }
-  } catch (error) {
-    execCommandError = error
   }
 
   return {

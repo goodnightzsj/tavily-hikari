@@ -69,7 +69,7 @@ import {
 import { useLanguage, useTranslate, type AdminTranslations } from './i18n'
 import { extractTvlyDevApiKeysFromText } from './lib/api-key-extract'
 import { ADMIN_USER_CONSOLE_HREF } from './lib/adminUserConsoleEntry'
-import { copyText, selectAllReadonlyText } from './lib/clipboard'
+import { copyText, selectAllReadonlyText, type CopyTextOptions } from './lib/clipboard'
 import {
   fetchApiKeys,
   fetchApiKeySecret,
@@ -139,6 +139,7 @@ const KEYS_BATCH_AUTO_COLLAPSE_DELAY_MS = Math.max(0, KEYS_BATCH_AUTO_COLLAPSE_T
 const API_KEYS_IMPORT_CHUNK_SIZE = 1000
 const DASHBOARD_TOKENS_PAGE_SIZE = 100
 const DASHBOARD_TOKENS_MAX_PAGES = 10
+const SECRET_COPY_PREFETCH_LIMIT = 12
 const USER_TAG_DISPLAY_LIMIT = 3
 const NEW_USER_TAG_CARD_ID = '__new__'
 
@@ -744,7 +745,9 @@ function AdminDashboard(): JSX.Element {
   const [version, setVersion] = useState<{ backend: string; frontend: string } | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
   const secretCacheRef = useRef<Map<string, string>>(new Map())
+  const secretRequestCacheRef = useRef<Map<string, Promise<string>>>(new Map())
   const tokenSecretCacheRef = useRef<Map<string, string>>(new Map())
+  const tokenSecretRequestCacheRef = useRef<Map<string, Promise<string>>>(new Map())
   const tokenGroupsListRef = useRef<HTMLDivElement | null>(null)
   const keyGroupsListRef = useRef<HTMLDivElement | null>(null)
   const [copyState, setCopyState] = useState<Map<string, 'loading' | 'copied'>>(() => new Map())
@@ -1037,22 +1040,60 @@ function AdminDashboard(): JSX.Element {
     })
   }, [])
 
-  const copyToClipboard = useCallback(async (value: string) => {
-    return await copyText(value)
+  const copyToClipboard = useCallback(async (value: string, options?: CopyTextOptions) => {
+    return await copyText(value, options)
   }, [])
 
   const openManualCopyBubble = useCallback((state: ManualCopyBubbleState) => {
     setManualCopyBubble(state)
   }, [])
 
-  const resolveTokenSecret = useCallback(async (id: string) => {
-    let secret = tokenSecretCacheRef.current.get(id)
-    if (!secret) {
-      const result = await fetchTokenSecret(id)
-      secret = result.token
-      tokenSecretCacheRef.current.set(id, secret)
+  const resolveApiKeySecret = useCallback(async (id: string, signal?: AbortSignal) => {
+    const cached = secretCacheRef.current.get(id)
+    if (cached) {
+      return cached
     }
-    return secret
+
+    const pending = secretRequestCacheRef.current.get(id)
+    if (pending) {
+      return await pending
+    }
+
+    const request = fetchApiKeySecret(id, signal)
+      .then((result) => {
+        secretCacheRef.current.set(id, result.api_key)
+        return result.api_key
+      })
+      .finally(() => {
+        secretRequestCacheRef.current.delete(id)
+      })
+
+    secretRequestCacheRef.current.set(id, request)
+    return await request
+  }, [])
+
+  const resolveTokenSecret = useCallback(async (id: string, signal?: AbortSignal) => {
+    const cached = tokenSecretCacheRef.current.get(id)
+    if (cached) {
+      return cached
+    }
+
+    const pending = tokenSecretRequestCacheRef.current.get(id)
+    if (pending) {
+      return await pending
+    }
+
+    const request = fetchTokenSecret(id, signal)
+      .then((result) => {
+        tokenSecretCacheRef.current.set(id, result.token)
+        return result.token
+      })
+      .finally(() => {
+        tokenSecretRequestCacheRef.current.delete(id)
+      })
+
+    tokenSecretRequestCacheRef.current.set(id, request)
+    return await request
   }, [])
 
   const beginManagedRequest = useCallback(
@@ -1108,16 +1149,15 @@ function AdminDashboard(): JSX.Element {
 
   const handleCopySecret = useCallback(
     async (id: string, stateKey: string, anchorEl?: HTMLElement | null) => {
+      setManualCopyBubble(null)
       updateCopyState(stateKey, 'loading')
       try {
-        let secret = secretCacheRef.current.get(id)
-        if (!secret) {
-          const result = await fetchApiKeySecret(id)
-          secret = result.api_key
-          secretCacheRef.current.set(id, secret)
-        }
-
-        const copyResult = await copyToClipboard(secret)
+        const hasCachedSecret = secretCacheRef.current.has(id)
+        const secret = await resolveApiKeySecret(id)
+        const copyResult = await copyToClipboard(
+          secret,
+          hasCachedSecret ? { preferExecCommand: true } : { allowExecCommand: false },
+        )
         if (!copyResult.ok) {
           updateCopyState(stateKey, null)
           if (anchorEl) {
@@ -1131,6 +1171,7 @@ function AdminDashboard(): JSX.Element {
           }
           return
         }
+        setManualCopyBubble(null)
         updateCopyState(stateKey, 'copied')
         window.setTimeout(() => updateCopyState(stateKey, null), 2000)
       } catch (err) {
@@ -1139,7 +1180,15 @@ function AdminDashboard(): JSX.Element {
         updateCopyState(stateKey, null)
       }
     },
-    [copyToClipboard, errorStrings.copyKey, manualCopyText, openManualCopyBubble, setError, updateCopyState],
+    [
+      copyToClipboard,
+      errorStrings.copyKey,
+      manualCopyText,
+      openManualCopyBubble,
+      resolveApiKeySecret,
+      setError,
+      updateCopyState,
+    ],
   )
 
   const loadData = useCallback(
@@ -1997,6 +2046,34 @@ function AdminDashboard(): JSX.Element {
     return sortedKeys
   }, [selectedKeyGroupName, selectedKeyUngrouped, sortedKeys])
 
+  useEffect(() => {
+    if (!isAdmin) return
+
+    const controller = new AbortController()
+    for (const item of tokens) {
+      if (tokenSecretCacheRef.current.has(item.id) || tokenSecretRequestCacheRef.current.has(item.id)) {
+        continue
+      }
+      void resolveTokenSecret(item.id, controller.signal).catch(() => undefined)
+    }
+
+    return () => controller.abort()
+  }, [isAdmin, resolveTokenSecret, tokens])
+
+  useEffect(() => {
+    if (!isAdmin) return
+
+    const controller = new AbortController()
+    for (const item of visibleKeys.slice(0, SECRET_COPY_PREFETCH_LIMIT)) {
+      if (secretCacheRef.current.has(item.id) || secretRequestCacheRef.current.has(item.id)) {
+        continue
+      }
+      void resolveApiKeySecret(item.id, controller.signal).catch(() => undefined)
+    }
+
+    return () => controller.abort()
+  }, [isAdmin, resolveApiKeySecret, visibleKeys])
+
   // Detect whether the collapsed key groups row overflows horizontally.
   // If everything fits in a single line, we hide the "more" toggle button.
   useEffect(() => {
@@ -2556,11 +2633,12 @@ function AdminDashboard(): JSX.Element {
 
   const handleAddToken = async (anchorEl?: HTMLElement | null) => {
     const note = newTokenNote.trim()
+    setManualCopyBubble(null)
     setSubmitting(true)
     try {
       const { token } = await createToken(note || undefined)
       setNewTokenNote('')
-      const copyResult = await copyToClipboard(token)
+      const copyResult = await copyToClipboard(token, { allowExecCommand: false })
       if (!copyResult.ok && anchorEl) {
         openManualCopyBubble({
           anchorEl,
@@ -2912,10 +2990,15 @@ function AdminDashboard(): JSX.Element {
   }
 
   const handleCopyToken = async (id: string, stateKey: string, anchorEl?: HTMLElement | null) => {
+    setManualCopyBubble(null)
     updateCopyState(stateKey, 'loading')
     try {
+      const hasCachedToken = tokenSecretCacheRef.current.has(id)
       const token = await resolveTokenSecret(id)
-      const copyResult = await copyToClipboard(token)
+      const copyResult = await copyToClipboard(
+        token,
+        hasCachedToken ? { preferExecCommand: true } : { allowExecCommand: false },
+      )
       if (!copyResult.ok) {
         updateCopyState(stateKey, null)
         if (anchorEl) {
@@ -2929,6 +3012,7 @@ function AdminDashboard(): JSX.Element {
         }
         return
       }
+      setManualCopyBubble(null)
       updateCopyState(stateKey, 'copied')
       window.setTimeout(() => updateCopyState(stateKey, null), 2000)
     } catch (err) {
@@ -2939,11 +3023,16 @@ function AdminDashboard(): JSX.Element {
   }
 
   const handleShareToken = async (id: string, stateKey: string, anchorEl?: HTMLElement | null) => {
+    setManualCopyBubble(null)
     updateCopyState(stateKey, 'loading')
     try {
+      const hasCachedToken = tokenSecretCacheRef.current.has(id)
       const token = await resolveTokenSecret(id)
       const shareUrl = `${window.location.origin}/#${encodeURIComponent(token)}`
-      const copyResult = await copyToClipboard(shareUrl)
+      const copyResult = await copyToClipboard(
+        shareUrl,
+        hasCachedToken ? { preferExecCommand: true } : { allowExecCommand: false },
+      )
       if (!copyResult.ok) {
         updateCopyState(stateKey, null)
         if (anchorEl) {
@@ -2957,6 +3046,7 @@ function AdminDashboard(): JSX.Element {
         }
         return
       }
+      setManualCopyBubble(null)
       updateCopyState(stateKey, 'copied')
       window.setTimeout(() => updateCopyState(stateKey, null), 2000)
     } catch (err) {
@@ -4671,6 +4761,8 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.copy}
   aria-label={tokenStrings.actions.copy}
+  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -4683,6 +4775,8 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.share}
   aria-label={tokenStrings.actions.share}
+  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
@@ -4801,6 +4895,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
+  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -4810,6 +4906,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={shareState === 'copied' ? 'success' : 'outline'}
   size="sm"
+  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
@@ -5056,6 +5154,8 @@ function AdminDashboard(): JSX.Element {
   className="h-8 w-8 rounded-full p-0 shadow-none"
   title={keyStrings.actions.copy}
   aria-label={keyStrings.actions.copy}
+  onPointerEnter={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
+  onFocus={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -5205,6 +5305,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
+  onPointerEnter={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
+  onFocus={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -6034,7 +6136,7 @@ function AdminDashboard(): JSX.Element {
                 variant="outline"
                 onClick={async () => {
                   if (!batchShareText) return
-                  const copyResult = await copyToClipboard(batchShareText)
+                  const copyResult = await copyToClipboard(batchShareText, { preferExecCommand: true })
                   if (!copyResult.ok) {
                     setError(errorStrings.copyToken)
                   }
