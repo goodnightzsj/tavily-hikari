@@ -1194,7 +1194,7 @@ function AdminDashboard(): JSX.Element {
         const secret = await resolveApiKeySecret(id)
         const copyResult = await copyToClipboard(
           secret,
-          hasCachedSecret ? { preferExecCommand: true } : { allowExecCommand: false },
+          hasCachedSecret ? { preferExecCommand: true } : undefined,
         )
         if (!copyResult.ok) {
           updateCopyState(stateKey, null)
@@ -2648,7 +2648,7 @@ function AdminDashboard(): JSX.Element {
     try {
       const { token } = await createToken(note || undefined)
       setNewTokenNote('')
-      const copyResult = await copyToClipboard(token, { allowExecCommand: false })
+      const copyResult = await copyToClipboard(token)
       if (!copyResult.ok && anchorEl) {
         openManualCopyBubble({
           anchorEl,
@@ -3007,7 +3007,7 @@ function AdminDashboard(): JSX.Element {
       const token = await resolveTokenSecret(id)
       const copyResult = await copyToClipboard(
         token,
-        hasCachedToken ? { preferExecCommand: true } : { allowExecCommand: false },
+        hasCachedToken ? { preferExecCommand: true } : undefined,
       )
       if (!copyResult.ok) {
         updateCopyState(stateKey, null)
@@ -3041,7 +3041,7 @@ function AdminDashboard(): JSX.Element {
       const shareUrl = `${window.location.origin}/#${encodeURIComponent(token)}`
       const copyResult = await copyToClipboard(
         shareUrl,
-        hasCachedToken ? { preferExecCommand: true } : { allowExecCommand: false },
+        hasCachedToken ? { preferExecCommand: true } : undefined,
       )
       if (!copyResult.ok) {
         updateCopyState(stateKey, null)

@@ -976,7 +976,7 @@ export default function TokenDetail({
       const res = await rotateTokenSecret(id)
       setRotatedToken(res.token)
       onSecretRotated?.(id, res.token)
-      const copyResult = await copyText(res.token, { allowExecCommand: false })
+      const copyResult = await copyText(res.token)
       setRotatedCopyState(copyResult.ok ? 'copied' : 'error')
       setIsRotateDialogOpen(false)
       setIsRotatedDialogOpen(true)

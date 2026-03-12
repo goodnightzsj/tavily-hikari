@@ -31,6 +31,7 @@ import ThemeToggle from './components/ThemeToggle'
 import { Button } from './components/ui/button'
 import { useLanguage, useTranslate, type Language } from './i18n'
 import { copyText, isCopyIntentKey, selectAllReadonlyText, shouldPrewarmSecretCopy } from './lib/clipboard'
+import { createExpiringValueCache } from './lib/expiringValueCache'
 import {
   type McpProbeStepState,
   type ProbeQuotaWindow,
@@ -58,6 +59,7 @@ const VSCODE_DOC_URL = 'https://code.visualstudio.com/docs/copilot/customization
 const NOCODB_DOC_URL = 'https://nocodb.com/docs/product-docs/mcp'
 const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
 const ICONIFY_ENDPOINT = 'https://api.iconify.design'
+const USER_CONSOLE_SECRET_CACHE_TTL_MS = 15_000
 
 type GuideLanguage = 'toml' | 'json' | 'bash'
 type GuideKey = 'codex' | 'claude' | 'vscode' | 'claudeDesktop' | 'cursor' | 'windsurf' | 'cherryStudio' | 'other'
@@ -254,7 +256,7 @@ export default function UserConsole(): JSX.Element {
   const [probeBubbleShift, setProbeBubbleShift] = useState(0)
   const probeBubbleRef = useRef<HTMLDivElement | null>(null)
   const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
-  const tokenSecretCacheRef = useRef<Map<string, string>>(new Map())
+  const tokenSecretCacheRef = useRef(createExpiringValueCache<string>(USER_CONSOLE_SECRET_CACHE_TTL_MS))
   const tokenSecretRequestRef = useRef<Map<string, Promise<string>>>(new Map())
   const probeRunIdRef = useRef(0)
   const tokenSecretRunIdRef = useRef(0)
@@ -478,11 +480,13 @@ export default function UserConsole(): JSX.Element {
   const copyToken = useCallback(async (tokenId: string, anchorEl?: HTMLElement | null) => {
     setManualCopyBubble(null)
     try {
-      const hasCachedToken =
-        (route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId && tokenSecretValue != null)
-        || tokenSecretCacheRef.current.has(tokenId)
-      const token = await resolveTokenSecret(tokenId)
-      const result = await copyText(token, hasCachedToken ? { preferExecCommand: true } : { allowExecCommand: false })
+      const inlineToken =
+        route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId && tokenSecretValue != null
+          ? tokenSecretValue
+          : null
+      const cachedToken = inlineToken ?? tokenSecretCacheRef.current.get(tokenId)
+      const token = cachedToken ?? await resolveTokenSecret(tokenId)
+      const result = await copyText(token, cachedToken ? { preferExecCommand: true } : undefined)
       if (!result.ok) {
         if (!revealDetailTokenForManualCopy(tokenId, token) && anchorEl) {
           setManualCopyBubble({ anchorEl, value: token })
