@@ -2,11 +2,9 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 
 import ForwardProxySettingsModule from './ForwardProxySettingsModule'
 import {
-  forwardProxyStoryDraft,
   forwardProxyStorySavedAt,
   forwardProxyStorySettings,
   forwardProxyStoryStats,
-  forwardProxyStoryValidationEntries,
 } from './forwardProxyStoryData'
 import { LanguageProvider, useTranslate } from '../i18n'
 
@@ -29,26 +27,17 @@ function StoryCanvas(): JSX.Element {
     >
       <ForwardProxySettingsModule
         strings={strings}
-        draft={forwardProxyStoryDraft}
         settingsLoadState="ready"
         statsLoadState="ready"
         settingsError={null}
         statsError={null}
         saveError={null}
-        validationError={null}
         saving={false}
-        validatingKind={null}
         savedAt={forwardProxyStorySavedAt}
-        validationEntries={forwardProxyStoryValidationEntries}
         settings={forwardProxyStorySettings}
         stats={forwardProxyStoryStats}
-        onProxyUrlsTextChange={() => {}}
-        onSubscriptionUrlsTextChange={() => {}}
-        onIntervalChange={() => {}}
-        onInsertDirectChange={() => {}}
-        onSave={() => {}}
-        onValidateSubscriptions={() => {}}
-        onValidateManual={() => {}}
+        onPersistDraft={async () => {}}
+        onValidateCandidates={async () => []}
         onRefresh={() => {}}
       />
     </div>

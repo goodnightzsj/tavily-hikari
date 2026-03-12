@@ -273,17 +273,42 @@ interface AdminTranslationsShape {
       title: string
       description: string
       loading: string
+      addSubscription: string
+      addManual: string
+      subscriptionCount: string
+      manualCount: string
       subscriptionsTitle: string
       subscriptionsDescription: string
       subscriptionsPlaceholder: string
+      subscriptionListEmpty: string
+      subscriptionItemFallback: string
       manualTitle: string
       manualDescription: string
       manualPlaceholder: string
+      manualListEmpty: string
+      manualItemFallback: string
       subscriptionIntervalLabel: string
       subscriptionIntervalHint: string
       invalidInterval: string
       insertDirectLabel: string
       insertDirectHint: string
+      subscriptionDialogTitle: string
+      subscriptionDialogDescription: string
+      subscriptionDialogInputLabel: string
+      manualDialogTitle: string
+      manualDialogDescription: string
+      manualDialogInputLabel: string
+      validate: string
+      validating: string
+      add: string
+      addedToList: string
+      importAvailable: string
+      cancel: string
+      remove: string
+      resultNode: string
+      resultStatus: string
+      resultLatency: string
+      resultAction: string
       saveFailed: string
     }
     validation: {
@@ -1228,19 +1253,44 @@ export const translations: Record<Language, TranslationShape> = {
         },
         config: {
           title: 'Configuration',
-          description: 'Subscriptions are the primary input. Manual proxies stay available for overrides, recovery, or staging.',
+          description: 'Manage saved subscriptions and manual nodes here. New entries live in dialogs so the page stays easy to scan.',
           loading: 'Loading proxy settings…',
+          addSubscription: 'Add subscription',
+          addManual: 'Add proxy nodes',
+          subscriptionCount: '{count} subscription(s)',
+          manualCount: '{count} manual node(s)',
           subscriptionsTitle: 'Subscription URLs',
-          subscriptionsDescription: 'One URL per line. Each subscription is refreshed and normalized by the backend.',
+          subscriptionsDescription: 'Persisted subscription sources. Add new feeds from the dialog or remove stale ones here.',
           subscriptionsPlaceholder: 'https://example.com/subscription.base64',
+          subscriptionListEmpty: 'No subscription URLs yet.',
+          subscriptionItemFallback: 'Subscription {index}',
           manualTitle: 'Manual proxy URLs',
-          manualDescription: 'Optional newline-separated http / https / socks5 / share-link candidates.',
+          manualDescription: 'Pinned manual nodes kept outside subscriptions for recovery, overrides, or staging.',
           manualPlaceholder: 'http://127.0.0.1:8080\nsocks5h://127.0.0.1:1080\nvmess://…',
+          manualListEmpty: 'No manual proxy URLs yet.',
+          manualItemFallback: 'Manual node {index}',
           subscriptionIntervalLabel: 'Subscription refresh interval (seconds)',
           subscriptionIntervalHint: 'Used by the backend refresh scheduler. Keep it high enough to avoid noisy churn.',
           invalidInterval: 'Subscription refresh interval must be a positive integer.',
           insertDirectLabel: 'Insert Direct fallback',
           insertDirectHint: 'Keep Direct as a secondary or last-resort route when proxy nodes become unavailable.',
+          subscriptionDialogTitle: 'Add subscription URL',
+          subscriptionDialogDescription: 'Paste one subscription URL, validate it first, then add it to the saved list.',
+          subscriptionDialogInputLabel: 'Subscription URL',
+          manualDialogTitle: 'Import proxy nodes',
+          manualDialogDescription: 'Paste one or more manual nodes, validate them, then import only the usable ones.',
+          manualDialogInputLabel: 'Proxy node lines',
+          validate: 'Validate',
+          validating: 'Validating candidates…',
+          add: 'Add',
+          addedToList: 'Added to the list.',
+          importAvailable: 'Import {count} node(s)',
+          cancel: 'Cancel',
+          remove: 'Remove',
+          resultNode: 'Node',
+          resultStatus: 'Status',
+          resultLatency: 'Latency',
+          resultAction: 'Action',
           saveFailed: 'Failed to save forward proxy settings.',
         },
         validation: {
@@ -2173,19 +2223,44 @@ export const translations: Record<Language, TranslationShape> = {
         },
         config: {
           title: '配置',
-          description: '优先填写订阅；手工节点适合作为兜底、灰度或临时补位使用。',
+          description: '这里用于管理已保存的订阅和手工节点；新增动作放进弹窗里，避免把设置页本身挤成大表单。',
           loading: '正在加载代理设置…',
+          addSubscription: '添加订阅',
+          addManual: '添加节点',
+          subscriptionCount: '{count} 个订阅',
+          manualCount: '{count} 个手工节点',
           subscriptionsTitle: '订阅 URL',
-          subscriptionsDescription: '每行一个 URL。后端会负责刷新、解析与归一化。',
+          subscriptionsDescription: '当前已保存的订阅源。新增走弹窗，旧链接也可以在这里直接删除。',
           subscriptionsPlaceholder: 'https://example.com/subscription.base64',
+          subscriptionListEmpty: '还没有订阅链接。',
+          subscriptionItemFallback: '订阅 {index}',
           manualTitle: '手工代理 URL',
-          manualDescription: '可选，支持换行输入 http / https / socks5 / share-link 候选。',
+          manualDescription: '保存在订阅之外的固定节点，适合作为兜底、灰度或临时补位。',
           manualPlaceholder: 'http://127.0.0.1:8080\nsocks5h://127.0.0.1:1080\nvmess://…',
+          manualListEmpty: '还没有手工节点。',
+          manualItemFallback: '手工节点 {index}',
           subscriptionIntervalLabel: '订阅刷新周期（秒）',
           subscriptionIntervalHint: '由后端定时任务使用。周期过短会让节点列表更容易抖动。',
           invalidInterval: '订阅刷新周期必须是大于 0 的整数。',
           insertDirectLabel: '插入 Direct 兜底节点',
           insertDirectHint: '当代理节点全部不可用时，保留 Direct 作为备用或最终回退路径。',
+          subscriptionDialogTitle: '添加订阅链接',
+          subscriptionDialogDescription: '先粘贴一个订阅 URL，验证通过后再加入已保存列表。',
+          subscriptionDialogInputLabel: '订阅 URL',
+          manualDialogTitle: '批量导入节点',
+          manualDialogDescription: '粘贴一个或多个手工节点，先验证可用性，再导入可用项。',
+          manualDialogInputLabel: '节点信息（每行一个）',
+          validate: '验证可用性',
+          validating: '正在验证候选项…',
+          add: '添加',
+          addedToList: '已加入列表。',
+          importAvailable: '导入 {count} 个节点',
+          cancel: '取消',
+          remove: '删除',
+          resultNode: '节点',
+          resultStatus: '结果',
+          resultLatency: '延迟',
+          resultAction: '操作',
           saveFailed: '保存正向代理设置失败。',
         },
         validation: {

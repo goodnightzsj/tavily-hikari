@@ -5,8 +5,6 @@ import type {
   ForwardProxyWeightBucket,
 } from '../api'
 
-import type { ForwardProxyDraft, ForwardProxyValidationEntry } from './ForwardProxySettingsModule'
-
 const STORY_TIME_MS = Date.parse('2026-03-13T02:55:00Z')
 const STORY_RANGE_START = '2026-03-12T00:00:00Z'
 const STORY_RANGE_END = '2026-03-13T00:00:00Z'
@@ -141,52 +139,6 @@ const DIRECT_ACTIVITY = buildActivityBuckets([
 ])
 
 const DIRECT_WEIGHTS = buildWeightBuckets(Array.from({ length: STORY_BUCKET_COUNT }, () => 1))
-
-export const forwardProxyStoryDraft: ForwardProxyDraft = {
-  proxyUrlsText: 'http://127.0.0.1:8080\nsocks5h://127.0.0.1:1080\nss://demo-node',
-  subscriptionUrlsText: 'https://example.com/subscription.base64\nhttps://mirror.example.com/proxy-feed.txt',
-  subscriptionUpdateIntervalSecs: '3600',
-  insertDirect: true,
-}
-
-export const forwardProxyStoryValidationEntries: ForwardProxyValidationEntry[] = [
-  {
-    id: 'subscription-1',
-    kind: 'subscriptionUrl',
-    value: 'https://example.com/subscription.base64',
-    result: {
-      ok: true,
-      message: 'subscription validation succeeded',
-      normalizedValue: 'https://example.com/subscription.base64',
-      discoveredNodes: 3,
-      latencyMs: 182.5,
-    },
-  },
-  {
-    id: 'subscription-2',
-    kind: 'subscriptionUrl',
-    value: 'https://mirror.example.com/proxy-feed.txt',
-    result: {
-      ok: true,
-      message: 'subscription mirror reachable',
-      normalizedValue: 'https://mirror.example.com/proxy-feed.txt',
-      discoveredNodes: 2,
-      latencyMs: 96.2,
-    },
-  },
-  {
-    id: 'proxy-1',
-    kind: 'proxyUrl',
-    value: 'vmess://demo',
-    result: {
-      ok: false,
-      message: 'xray binary is missing',
-      normalizedValue: 'vmess://demo',
-      discoveredNodes: 0,
-      latencyMs: null,
-    },
-  },
-]
 
 export const forwardProxyStorySettings: ForwardProxySettings = {
   proxyUrls: ['http://127.0.0.1:8080', 'socks5h://127.0.0.1:1080', 'ss://demo-node'],

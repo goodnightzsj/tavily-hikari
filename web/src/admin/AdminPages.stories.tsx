@@ -30,11 +30,9 @@ import DashboardOverview, { type DashboardMetricCard } from './DashboardOverview
 import ForwardProxySettingsModule from './ForwardProxySettingsModule'
 import ModulePlaceholder from './ModulePlaceholder'
 import {
-  forwardProxyStoryDraft,
   forwardProxyStorySavedAt,
   forwardProxyStorySettings,
   forwardProxyStoryStats,
-  forwardProxyStoryValidationEntries,
 } from './forwardProxyStoryData'
 import {
   buildQuotaSliderTrack,
@@ -2288,7 +2286,6 @@ function ProxySettingsPageCanvas(): JSX.Element {
     <AdminPageFrame activeModule="proxy-settings">
       <ForwardProxySettingsModule
         strings={admin.proxySettings}
-        draft={forwardProxyStoryDraft}
         settings={forwardProxyStorySettings}
         stats={forwardProxyStoryStats}
         settingsLoadState="ready"
@@ -2296,18 +2293,10 @@ function ProxySettingsPageCanvas(): JSX.Element {
         settingsError={null}
         statsError={null}
         saveError={null}
-        validationError={null}
         saving={false}
-        validatingKind={null}
         savedAt={forwardProxyStorySavedAt}
-        validationEntries={forwardProxyStoryValidationEntries}
-        onProxyUrlsTextChange={() => {}}
-        onSubscriptionUrlsTextChange={() => {}}
-        onIntervalChange={() => {}}
-        onInsertDirectChange={() => {}}
-        onSave={() => {}}
-        onValidateSubscriptions={() => {}}
-        onValidateManual={() => {}}
+        onPersistDraft={async () => {}}
+        onValidateCandidates={async () => []}
         onRefresh={() => {}}
       />
     </AdminPageFrame>

@@ -193,15 +193,6 @@ function splitMultilineEntries(value: string): string[] {
   return entries
 }
 
-function createForwardProxyDraft(settings?: ForwardProxySettings | null): ForwardProxyDraft {
-  return {
-    proxyUrlsText: settings?.proxyUrls.join('\n') ?? '',
-    subscriptionUrlsText: settings?.subscriptionUrls.join('\n') ?? '',
-    subscriptionUpdateIntervalSecs: String(settings?.subscriptionUpdateIntervalSecs ?? 3600),
-    insertDirect: settings?.insertDirect ?? true,
-  }
-}
-
 function buildUserQuotaSnapshot(detail: AdminUserDetail): UserQuotaSnapshot {
   return {
     hourlyAnyLimit: createQuotaSliderSeed('hourlyAnyLimit', detail.hourlyAnyUsed, detail.quotaBase.hourlyAnyLimit),
@@ -744,7 +735,6 @@ function AdminDashboard(): JSX.Element {
   const [savingUserTagBinding, setSavingUserTagBinding] = useState(false)
   const [userTagError, setUserTagError] = useState<string | null>(null)
   const [forwardProxySettings, setForwardProxySettings] = useState<ForwardProxySettings | null>(null)
-  const [forwardProxyDraft, setForwardProxyDraft] = useState<ForwardProxyDraft>(() => createForwardProxyDraft())
   const [forwardProxySettingsLoadState, setForwardProxySettingsLoadState] =
     useState<QueryLoadState>('initial_loading')
   const [forwardProxySettingsError, setForwardProxySettingsError] = useState<string | null>(null)
@@ -755,11 +745,6 @@ function AdminDashboard(): JSX.Element {
   const [forwardProxySaving, setForwardProxySaving] = useState(false)
   const [forwardProxySaveError, setForwardProxySaveError] = useState<string | null>(null)
   const [forwardProxySavedAt, setForwardProxySavedAt] = useState<number | null>(null)
-  const [forwardProxyValidatingKind, setForwardProxyValidatingKind] =
-    useState<ForwardProxyValidationKind | null>(null)
-  const [forwardProxyValidationEntries, setForwardProxyValidationEntries] =
-    useState<ForwardProxyValidationEntry[]>([])
-  const [forwardProxyValidationError, setForwardProxyValidationError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const pollingTimerRef = useRef<number | null>(null)
@@ -1341,7 +1326,6 @@ function AdminDashboard(): JSX.Element {
         const nextSettings = await fetchForwardProxySettings(request.signal)
         if (request.signal.aborted) return
         setForwardProxySettings(nextSettings)
-        setForwardProxyDraft(createForwardProxyDraft(nextSettings))
         setForwardProxySettingsLoadState('ready')
         setLastUpdated(new Date())
         forwardProxySettingsLoadedRef.current = true
@@ -1392,73 +1376,47 @@ function AdminDashboard(): JSX.Element {
     [beginManagedRequest, loadingStateStrings.error],
   )
 
-  const runForwardProxyValidation = useCallback(
-    async (kind: ForwardProxyValidationKind) => {
-      const rawValues =
-        kind === 'subscriptionUrl'
-          ? splitMultilineEntries(forwardProxyDraft.subscriptionUrlsText)
-          : splitMultilineEntries(forwardProxyDraft.proxyUrlsText)
-
-      if (rawValues.length === 0) {
-        setForwardProxyValidationEntries([])
-        setForwardProxyValidationError(
-          kind === 'subscriptionUrl'
-            ? proxySettingsStrings.validation.emptySubscriptions
-            : proxySettingsStrings.validation.emptyManual,
-        )
-        return
-      }
-
-      setForwardProxyValidationError(null)
-      setForwardProxyValidatingKind(kind)
-
-      try {
-        const results = await Promise.all(
-          rawValues.map(async (value, index) => {
-            try {
-              const result = await validateForwardProxyCandidate({ kind, value })
-              return {
-                id: `${kind}:${index}:${value}`,
-                kind,
-                value,
-                result,
-              } satisfies ForwardProxyValidationEntry
-            } catch (err) {
-              return {
-                id: `${kind}:${index}:${value}`,
-                kind,
-                value,
-                result: {
-                  ok: false,
-                  message:
-                    err instanceof Error ? err.message : proxySettingsStrings.validation.requestFailed,
-                  normalizedValue: value,
-                  discoveredNodes: 0,
-                  latencyMs: null,
-                },
-              } satisfies ForwardProxyValidationEntry
-            }
-          }),
-        )
-        setForwardProxyValidationEntries(results)
-      } finally {
-        setForwardProxyValidatingKind(null)
-      }
+  const validateForwardProxyCandidates = useCallback(
+    async (
+      kind: ForwardProxyValidationKind,
+      rawValues: string[],
+    ): Promise<ForwardProxyValidationEntry[]> => {
+      return Promise.all(
+        rawValues.map(async (value, index) => {
+          try {
+            const result = await validateForwardProxyCandidate({ kind, value })
+            return {
+              id: `${kind}:${index}:${value}`,
+              kind,
+              value,
+              result,
+            } satisfies ForwardProxyValidationEntry
+          } catch (err) {
+            return {
+              id: `${kind}:${index}:${value}`,
+              kind,
+              value,
+              result: {
+                ok: false,
+                message:
+                  err instanceof Error ? err.message : proxySettingsStrings.validation.requestFailed,
+                normalizedValue: value,
+                discoveredNodes: 0,
+                latencyMs: null,
+              },
+            } satisfies ForwardProxyValidationEntry
+          }
+        }),
+      )
     },
-    [
-      forwardProxyDraft.proxyUrlsText,
-      forwardProxyDraft.subscriptionUrlsText,
-      proxySettingsStrings.validation.emptyManual,
-      proxySettingsStrings.validation.emptySubscriptions,
-      proxySettingsStrings.validation.requestFailed,
-    ],
+    [proxySettingsStrings.validation.requestFailed],
   )
 
-  const saveForwardProxySettings = useCallback(async () => {
-    const parsedInterval = Number.parseInt(forwardProxyDraft.subscriptionUpdateIntervalSecs.trim(), 10)
+  const saveForwardProxySettings = useCallback(async (nextDraft: ForwardProxyDraft) => {
+    const parsedInterval = Number.parseInt(nextDraft.subscriptionUpdateIntervalSecs.trim(), 10)
     if (!Number.isFinite(parsedInterval) || parsedInterval <= 0) {
       setForwardProxySaveError(proxySettingsStrings.config.invalidInterval)
-      return
+      throw new Error(proxySettingsStrings.config.invalidInterval)
     }
 
     setForwardProxySaveError(null)
@@ -1466,13 +1424,12 @@ function AdminDashboard(): JSX.Element {
 
     try {
       const nextSettings = await updateForwardProxySettings({
-        proxyUrls: splitMultilineEntries(forwardProxyDraft.proxyUrlsText),
-        subscriptionUrls: splitMultilineEntries(forwardProxyDraft.subscriptionUrlsText),
+        proxyUrls: splitMultilineEntries(nextDraft.proxyUrlsText),
+        subscriptionUrls: splitMultilineEntries(nextDraft.subscriptionUrlsText),
         subscriptionUpdateIntervalSecs: parsedInterval,
-        insertDirect: forwardProxyDraft.insertDirect,
+        insertDirect: nextDraft.insertDirect,
       })
       setForwardProxySettings(nextSettings)
-      setForwardProxyDraft(createForwardProxyDraft(nextSettings))
       setForwardProxySettingsLoadState('ready')
       setForwardProxySettingsError(null)
       setForwardProxySavedAt(Date.now())
@@ -1481,15 +1438,13 @@ function AdminDashboard(): JSX.Element {
       await loadForwardProxyStatsData({ reason: 'refresh' })
     } catch (err) {
       console.error(err)
-      setForwardProxySaveError(err instanceof Error ? err.message : proxySettingsStrings.config.saveFailed)
+      const message = err instanceof Error ? err.message : proxySettingsStrings.config.saveFailed
+      setForwardProxySaveError(message)
+      throw err instanceof Error ? err : new Error(message)
     } finally {
       setForwardProxySaving(false)
     }
   }, [
-    forwardProxyDraft.insertDirect,
-    forwardProxyDraft.proxyUrlsText,
-    forwardProxyDraft.subscriptionUpdateIntervalSecs,
-    forwardProxyDraft.subscriptionUrlsText,
     loadForwardProxyStatsData,
     proxySettingsStrings.config.invalidInterval,
     proxySettingsStrings.config.saveFailed,
@@ -6099,7 +6054,6 @@ function AdminDashboard(): JSX.Element {
       {showProxySettings && (
         <ForwardProxySettingsModule
           strings={proxySettingsStrings}
-          draft={forwardProxyDraft}
           settings={forwardProxySettings}
           stats={forwardProxyStats}
           settingsLoadState={forwardProxySettingsLoadState}
@@ -6107,26 +6061,10 @@ function AdminDashboard(): JSX.Element {
           settingsError={forwardProxySettingsError}
           statsError={forwardProxyStatsError}
           saveError={forwardProxySaveError}
-          validationError={forwardProxyValidationError}
           saving={forwardProxySaving}
-          validatingKind={forwardProxyValidatingKind}
           savedAt={forwardProxySavedAt}
-          validationEntries={forwardProxyValidationEntries}
-          onProxyUrlsTextChange={(value) =>
-            setForwardProxyDraft((previous) => ({ ...previous, proxyUrlsText: value }))
-          }
-          onSubscriptionUrlsTextChange={(value) =>
-            setForwardProxyDraft((previous) => ({ ...previous, subscriptionUrlsText: value }))
-          }
-          onIntervalChange={(value) =>
-            setForwardProxyDraft((previous) => ({ ...previous, subscriptionUpdateIntervalSecs: value }))
-          }
-          onInsertDirectChange={(value) =>
-            setForwardProxyDraft((previous) => ({ ...previous, insertDirect: value }))
-          }
-          onSave={() => void saveForwardProxySettings()}
-          onValidateSubscriptions={() => void runForwardProxyValidation('subscriptionUrl')}
-          onValidateManual={() => void runForwardProxyValidation('proxyUrl')}
+          onPersistDraft={saveForwardProxySettings}
+          onValidateCandidates={validateForwardProxyCandidates}
           onRefresh={handleManualRefresh}
         />
       )}
