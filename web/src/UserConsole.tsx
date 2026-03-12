@@ -245,6 +245,7 @@ export default function UserConsole(): JSX.Element {
   const pageRef = useRef<HTMLElement>(null)
   const dashboardSectionRef = useRef<HTMLElement | null>(null)
   const tokensSectionRef = useRef<HTMLElement | null>(null)
+  const detailHeadingRef = useRef<HTMLHeadingElement | null>(null)
   const { viewportMode, contentMode, isCompactLayout } = useResponsiveModes(pageRef)
 
   useEffect(() => {
@@ -430,6 +431,15 @@ export default function UserConsole(): JSX.Element {
     })
     return () => window.cancelAnimationFrame(frame)
   }, [consoleUnavailable, route, scrollToLandingSection])
+
+  useEffect(() => {
+    if (consoleUnavailable || route.name !== 'token') return
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: 'auto' })
+      detailHeadingRef.current?.focus({ preventScroll: true })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [consoleUnavailable, route])
 
   const navigateToRoute = useCallback((nextRoute: ConsoleRoute) => {
     const nextHash = userConsoleRouteToHash(nextRoute)
@@ -1239,7 +1249,7 @@ export default function UserConsole(): JSX.Element {
           <section className="surface panel access-panel">
             <header className="panel-header" style={{ marginBottom: 8 }}>
               <div>
-                <h2>{text.detail.title} <code>{route.id}</code></h2>
+                <h2 ref={detailHeadingRef} tabIndex={-1}>{text.detail.title} <code>{route.id}</code></h2>
                 <p className="panel-description">{text.detail.subtitle}</p>
               </div>
               <button type="button" className="btn btn-outline" onClick={goTokens}>{text.detail.back}</button>

@@ -52,6 +52,11 @@ describe('UserConsole Storybook acceptance controls', () => {
       control: { type: 'select' },
       if: { arg: 'consoleView', eq: 'Token Detail' },
     })
+
+    expect(meta.argTypes?.routeHashOverride).toMatchObject({
+      table: { disable: true },
+      control: false,
+    })
   })
 
   it('keeps business-readable preset stories and drops legacy scenario exports', () => {
@@ -59,6 +64,10 @@ describe('UserConsole Storybook acceptance controls', () => {
       consoleView: 'Console Home',
       isAdmin: false,
       landingFocus: 'Overview Focus',
+    })
+    expect(userConsoleStories.ConsoleHomeRoot).toMatchObject({
+      name: 'Console Home Root',
+      args: { consoleView: 'Console Home', isAdmin: false, landingFocus: 'Overview Focus', routeHashOverride: '' },
     })
     expect(userConsoleStories.ConsoleHomeAdmin).toMatchObject({
       name: 'Console Home Admin',
@@ -115,5 +124,15 @@ describe('UserConsole Storybook acceptance controls', () => {
     expect(userConsoleStories).not.toHaveProperty('Tokens')
     expect(userConsoleStories).not.toHaveProperty('TokensAdmin')
     expect(userConsoleStories).not.toHaveProperty('TokensEmpty')
+  })
+
+  it('covers the no-hash console root as the merged landing default', () => {
+    const rootArgs = {
+      ...meta.args,
+      ...userConsoleStories.ConsoleHomeRoot.args,
+    }
+
+    expect(userConsoleStories.__testables.resolveStoryState(rootArgs).routeHash).toBe('')
+    expect(userConsoleStories.__testables.resolveStoryState(meta.args as typeof rootArgs).routeHash).toBe('#/dashboard')
   })
 })

@@ -24,6 +24,7 @@ interface UserConsoleStoryArgs {
   landingFocus: LandingFocus
   tokenListState: TokenListState
   tokenDetailPreview: TokenDetailPreview
+  routeHashOverride?: string
 }
 
 interface UserConsoleStoryState {
@@ -190,8 +191,9 @@ function autoProbeTargetFromPreview(preview: TokenDetailPreview): 'mcp' | 'api' 
   return null
 }
 
-function routeHashFromView(view: ConsoleView, landingFocus: LandingFocus): string {
+function routeHashFromView(view: ConsoleView, landingFocus: LandingFocus, routeHashOverride?: string): string {
   if (view === 'Token Detail') return TOKEN_DETAIL_HASH
+  if (typeof routeHashOverride === 'string') return routeHashOverride
   return userConsoleRouteToHash({
     name: 'landing',
     section: landingFocus === 'Token Focus' ? 'tokens' : 'dashboard',
@@ -207,9 +209,13 @@ function resolveStoryState(args: UserConsoleStoryArgs): UserConsoleStoryState {
     probeMode: args.consoleView === 'Token Detail'
       ? probeModeFromPreview(args.tokenDetailPreview)
       : 'none',
-    routeHash: routeHashFromView(args.consoleView, args.landingFocus),
+    routeHash: routeHashFromView(args.consoleView, args.landingFocus, args.routeHashOverride),
     tokenListEmpty: args.consoleView === 'Console Home' && args.tokenListState === 'Empty',
   }
+}
+
+export const __testables = {
+  resolveStoryState,
 }
 
 function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
@@ -463,6 +469,10 @@ const meta = {
       control: { type: 'select' },
       if: { arg: 'consoleView', eq: 'Token Detail' },
     },
+    routeHashOverride: {
+      table: { disable: true },
+      control: false,
+    },
   },
   render: (args) => <UserConsoleStory {...args} />,
 } satisfies Meta<UserConsoleStoryArgs>
@@ -476,6 +486,16 @@ export const ConsoleHome: Story = {
     consoleView: 'Console Home',
     isAdmin: false,
     landingFocus: 'Overview Focus',
+  },
+}
+
+export const ConsoleHomeRoot: Story = {
+  name: 'Console Home Root',
+  args: {
+    consoleView: 'Console Home',
+    isAdmin: false,
+    landingFocus: 'Overview Focus',
+    routeHashOverride: '',
   },
 }
 
