@@ -1,10 +1,146 @@
-import type { ForwardProxySettings, ForwardProxyStatsResponse } from '../api'
+import type {
+  ForwardProxyActivityBucket,
+  ForwardProxySettings,
+  ForwardProxyStatsResponse,
+  ForwardProxyWeightBucket,
+} from '../api'
 
 import type { ForwardProxyDraft, ForwardProxyValidationEntry } from './ForwardProxySettingsModule'
 
 const STORY_TIME_MS = Date.parse('2026-03-13T02:55:00Z')
+const STORY_RANGE_START = '2026-03-12T00:00:00Z'
+const STORY_RANGE_END = '2026-03-13T00:00:00Z'
+const STORY_BUCKET_SECONDS = 3600
+const STORY_BUCKET_MS = STORY_BUCKET_SECONDS * 1000
+const STORY_BUCKET_COUNT = 24
 
 export const forwardProxyStorySavedAt = STORY_TIME_MS
+
+function createBucketTime(index: number): { bucketStart: string; bucketEnd: string } {
+  const bucketStartMs = Date.parse(STORY_RANGE_START) + index * STORY_BUCKET_MS
+  return {
+    bucketStart: new Date(bucketStartMs).toISOString(),
+    bucketEnd: new Date(bucketStartMs + STORY_BUCKET_MS).toISOString(),
+  }
+}
+
+function buildActivityBuckets(series: Array<[number, number]>): ForwardProxyActivityBucket[] {
+  return Array.from({ length: STORY_BUCKET_COUNT }, (_, index) => {
+    const [successCount, failureCount] = series[index] ?? [0, 0]
+    return {
+      ...createBucketTime(index),
+      successCount,
+      failureCount,
+    }
+  })
+}
+
+function buildWeightBuckets(values: number[]): ForwardProxyWeightBucket[] {
+  return Array.from({ length: STORY_BUCKET_COUNT }, (_, index) => {
+    const lastWeight = values[index] ?? values[Math.max(0, values.length - 1)] ?? 0
+    return {
+      ...createBucketTime(index),
+      sampleCount: 1,
+      minWeight: lastWeight,
+      maxWeight: lastWeight,
+      avgWeight: lastWeight,
+      lastWeight,
+    }
+  })
+}
+
+const TOKYO_ACTIVITY = buildActivityBuckets([
+  [14, 1],
+  [16, 0],
+  [18, 1],
+  [17, 0],
+  [18, 0],
+  [19, 1],
+  [20, 0],
+  [21, 0],
+  [19, 1],
+  [17, 0],
+  [16, 0],
+  [14, 1],
+  [15, 0],
+  [17, 0],
+  [18, 0],
+  [21, 0],
+  [23, 0],
+  [22, 1],
+  [21, 0],
+  [19, 0],
+  [18, 0],
+  [17, 1],
+  [16, 0],
+  [15, 0],
+])
+
+const TOKYO_WEIGHTS = buildWeightBuckets([
+  0.82, 0.83, 0.84, 0.85, 0.84, 0.86, 0.88, 0.89, 0.88, 0.87, 0.86, 0.85,
+  0.86, 0.88, 0.89, 0.9, 0.92, 0.93, 0.92, 0.91, 0.9, 0.89, 0.9, 0.91,
+])
+
+const FRANKFURT_ACTIVITY = buildActivityBuckets([
+  [1, 4],
+  [2, 5],
+  [3, 4],
+  [2, 4],
+  [1, 5],
+  [2, 3],
+  [3, 2],
+  [4, 2],
+  [5, 1],
+  [4, 2],
+  [3, 3],
+  [2, 4],
+  [1, 5],
+  [2, 4],
+  [3, 3],
+  [4, 2],
+  [5, 1],
+  [4, 1],
+  [3, 2],
+  [2, 3],
+  [1, 4],
+  [2, 5],
+  [3, 4],
+  [4, 3],
+])
+
+const FRANKFURT_WEIGHTS = buildWeightBuckets([
+  0.62, 0.58, 0.54, 0.5, 0.46, 0.42, 0.38, 0.34, 0.3, 0.28, 0.31, 0.35,
+  0.39, 0.43, 0.46, 0.49, 0.52, 0.55, 0.51, 0.47, 0.43, 0.4, 0.38, 0.37,
+])
+
+const DIRECT_ACTIVITY = buildActivityBuckets([
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [1, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [0, 0],
+  [1, 0],
+  [0, 0],
+])
+
+const DIRECT_WEIGHTS = buildWeightBuckets(Array.from({ length: STORY_BUCKET_COUNT }, () => 1))
 
 export const forwardProxyStoryDraft: ForwardProxyDraft = {
   proxyUrlsText: 'http://127.0.0.1:8080\nsocks5h://127.0.0.1:1080\nss://demo-node',
@@ -113,9 +249,9 @@ export const forwardProxyStorySettings: ForwardProxySettings = {
 }
 
 export const forwardProxyStoryStats: ForwardProxyStatsResponse = {
-  rangeStart: '2026-03-12T00:00:00Z',
-  rangeEnd: '2026-03-13T00:00:00Z',
-  bucketSeconds: 3600,
+  rangeStart: STORY_RANGE_START,
+  rangeEnd: STORY_RANGE_END,
+  bucketSeconds: STORY_BUCKET_SECONDS,
   nodes: [
     {
       key: 'node-tokyo-a',
@@ -133,31 +269,8 @@ export const forwardProxyStoryStats: ForwardProxyStatsResponse = {
         oneDay: { attempts: 1180, successRate: 0.93, avgLatencyMs: 155 },
         sevenDays: { attempts: 7420, successRate: 0.91, avgLatencyMs: 163 },
       },
-      last24h: [
-        {
-          bucketStart: '2026-03-12T00:00:00Z',
-          bucketEnd: '2026-03-12T01:00:00Z',
-          successCount: 22,
-          failureCount: 1,
-        },
-        {
-          bucketStart: '2026-03-12T01:00:00Z',
-          bucketEnd: '2026-03-12T02:00:00Z',
-          successCount: 18,
-          failureCount: 2,
-        },
-      ],
-      weight24h: [
-        {
-          bucketStart: '2026-03-12T00:00:00Z',
-          bucketEnd: '2026-03-12T01:00:00Z',
-          sampleCount: 1,
-          minWeight: 0.86,
-          maxWeight: 0.93,
-          avgWeight: 0.9,
-          lastWeight: 0.91,
-        },
-      ],
+      last24h: TOKYO_ACTIVITY,
+      weight24h: TOKYO_WEIGHTS,
     },
     {
       key: 'node-frankfurt-b',
@@ -175,31 +288,8 @@ export const forwardProxyStoryStats: ForwardProxyStatsResponse = {
         oneDay: { attempts: 202, successRate: 0.61, avgLatencyMs: 305 },
         sevenDays: { attempts: 1390, successRate: 0.67, avgLatencyMs: 284 },
       },
-      last24h: [
-        {
-          bucketStart: '2026-03-12T00:00:00Z',
-          bucketEnd: '2026-03-12T01:00:00Z',
-          successCount: 3,
-          failureCount: 4,
-        },
-        {
-          bucketStart: '2026-03-12T01:00:00Z',
-          bucketEnd: '2026-03-12T02:00:00Z',
-          successCount: 5,
-          failureCount: 3,
-        },
-      ],
-      weight24h: [
-        {
-          bucketStart: '2026-03-12T00:00:00Z',
-          bucketEnd: '2026-03-12T01:00:00Z',
-          sampleCount: 2,
-          minWeight: 0.28,
-          maxWeight: 0.55,
-          avgWeight: 0.41,
-          lastWeight: 0.37,
-        },
-      ],
+      last24h: FRANKFURT_ACTIVITY,
+      weight24h: FRANKFURT_WEIGHTS,
     },
     {
       key: 'direct',
@@ -217,25 +307,8 @@ export const forwardProxyStoryStats: ForwardProxyStatsResponse = {
         oneDay: { attempts: 10, successRate: 1, avgLatencyMs: 205 },
         sevenDays: { attempts: 12, successRate: 1, avgLatencyMs: 207 },
       },
-      last24h: [
-        {
-          bucketStart: '2026-03-12T00:00:00Z',
-          bucketEnd: '2026-03-12T01:00:00Z',
-          successCount: 2,
-          failureCount: 0,
-        },
-      ],
-      weight24h: [
-        {
-          bucketStart: '2026-03-12T00:00:00Z',
-          bucketEnd: '2026-03-12T01:00:00Z',
-          sampleCount: 1,
-          minWeight: 1,
-          maxWeight: 1,
-          avgWeight: 1,
-          lastWeight: 1,
-        },
-      ],
+      last24h: DIRECT_ACTIVITY,
+      weight24h: DIRECT_WEIGHTS,
     },
   ],
 }

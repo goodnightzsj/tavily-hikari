@@ -84,6 +84,12 @@ interface ForwardProxySettingsModuleProps {
   onRefresh: () => void
 }
 
+interface ForwardProxyBucketRange {
+  rangeStartMs: number
+  bucketMs: number
+  bucketCount: number
+}
+
 function formatNumber(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return '—'
   return numberFormatter.format(value)
@@ -157,12 +163,101 @@ function buildMergedNodes(
     })
   }
 
-  return Array.from(nodeMap.values()).sort((left, right) => {
+  const bucketRange = resolveBucketRange(stats)
+
+  return Array.from(nodeMap.values())
+    .map((node) => normalizeNodeBuckets(node, bucketRange))
+    .sort((left, right) => {
     if (left.source === 'direct' && right.source !== 'direct') return 1
     if (left.source !== 'direct' && right.source === 'direct') return -1
     if (left.penalized !== right.penalized) return left.penalized ? 1 : -1
     return right.weight - left.weight || left.displayName.localeCompare(right.displayName)
+    })
+}
+
+function resolveBucketRange(stats: ForwardProxyStatsResponse | null): ForwardProxyBucketRange | null {
+  if (!stats) return null
+  const rangeStartMs = Date.parse(stats.rangeStart)
+  const rangeEndMs = Date.parse(stats.rangeEnd)
+  const bucketMs = stats.bucketSeconds * 1000
+  if (!Number.isFinite(rangeStartMs) || !Number.isFinite(rangeEndMs) || !Number.isFinite(bucketMs) || bucketMs <= 0) {
+    return null
+  }
+  const bucketCount = Math.max(0, Math.round((rangeEndMs - rangeStartMs) / bucketMs))
+  if (bucketCount <= 0) return null
+  return { rangeStartMs, bucketMs, bucketCount }
+}
+
+function normalizeActivityBuckets(
+  buckets: ForwardProxyActivityBucket[],
+  bucketRange: ForwardProxyBucketRange | null,
+): ForwardProxyActivityBucket[] {
+  if (!bucketRange) return buckets
+  const bucketMap = new Map<number, ForwardProxyActivityBucket>()
+  for (const bucket of buckets) {
+    const startMs = Date.parse(bucket.bucketStart)
+    if (Number.isFinite(startMs)) {
+      bucketMap.set(startMs, bucket)
+    }
+  }
+
+  return Array.from({ length: bucketRange.bucketCount }, (_, index) => {
+    const bucketStartMs = bucketRange.rangeStartMs + index * bucketRange.bucketMs
+    const existing = bucketMap.get(bucketStartMs)
+    if (existing) return existing
+    return {
+      bucketStart: new Date(bucketStartMs).toISOString(),
+      bucketEnd: new Date(bucketStartMs + bucketRange.bucketMs).toISOString(),
+      successCount: 0,
+      failureCount: 0,
+    }
   })
+}
+
+function normalizeWeightBuckets(
+  buckets: ForwardProxyWeightBucket[],
+  bucketRange: ForwardProxyBucketRange | null,
+  fallbackWeight: number,
+): ForwardProxyWeightBucket[] {
+  if (!bucketRange) return buckets
+  const bucketMap = new Map<number, ForwardProxyWeightBucket>()
+  for (const bucket of buckets) {
+    const startMs = Date.parse(bucket.bucketStart)
+    if (Number.isFinite(startMs)) {
+      bucketMap.set(startMs, bucket)
+    }
+  }
+
+  let carryWeight = fallbackWeight
+  return Array.from({ length: bucketRange.bucketCount }, (_, index) => {
+    const bucketStartMs = bucketRange.rangeStartMs + index * bucketRange.bucketMs
+    const existing = bucketMap.get(bucketStartMs)
+    if (existing) {
+      carryWeight = existing.lastWeight
+      return existing
+    }
+    return {
+      bucketStart: new Date(bucketStartMs).toISOString(),
+      bucketEnd: new Date(bucketStartMs + bucketRange.bucketMs).toISOString(),
+      sampleCount: 0,
+      minWeight: carryWeight,
+      maxWeight: carryWeight,
+      avgWeight: carryWeight,
+      lastWeight: carryWeight,
+    }
+  })
+}
+
+function normalizeNodeBuckets(
+  node: ForwardProxyStatsNode,
+  bucketRange: ForwardProxyBucketRange | null,
+): ForwardProxyStatsNode {
+  if (!bucketRange) return node
+  return {
+    ...node,
+    last24h: normalizeActivityBuckets(node.last24h, bucketRange),
+    weight24h: normalizeWeightBuckets(node.weight24h, bucketRange, node.weight),
+  }
 }
 
 function summarizeActivity(node: ForwardProxyStatsNode): { success: number; failure: number } {
