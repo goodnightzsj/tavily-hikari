@@ -3,11 +3,14 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 
 import type { Profile, UserDashboard, UserTokenSummary } from './api'
 import UserConsole from './UserConsole'
+import { userConsoleRouteToHash } from './lib/userConsoleRoutes'
 
-type ConsoleView = 'Dashboard' | 'Tokens' | 'Token Detail'
+type ConsoleView = 'Console Home' | 'Token Detail'
+type LandingFocus = 'Overview Focus' | 'Token Focus'
 type TokenListState = 'Default List' | 'Empty'
 type TokenDetailPreview =
   | 'Overview'
+  | 'Token Revealed'
   | 'API Check Running'
   | 'All Checks Pass'
   | 'Partial Availability'
@@ -19,12 +22,15 @@ type ProbeMockMode = 'none' | 'running' | 'success' | 'partial' | 'auth-fail' | 
 interface UserConsoleStoryArgs {
   consoleView: ConsoleView
   isAdmin: boolean
+  landingFocus: LandingFocus
   tokenListState: TokenListState
   tokenDetailPreview: TokenDetailPreview
+  routeHashOverride?: string
 }
 
 interface UserConsoleStoryState {
   autoProbeTarget: 'mcp' | 'api' | null
+  autoRevealToken: boolean
   isAdmin: boolean
   probeMode: ProbeMockMode
   routeHash: string
@@ -165,6 +171,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function probeModeFromPreview(preview: TokenDetailPreview): ProbeMockMode {
+  if (preview === 'Token Revealed') return 'none'
   if (preview === 'API Check Running') return 'running'
   if (preview === 'All Checks Pass') return 'success'
   if (preview === 'Partial Availability') return 'partial'
@@ -187,10 +194,13 @@ function autoProbeTargetFromPreview(preview: TokenDetailPreview): 'mcp' | 'api' 
   return null
 }
 
-function routeHashFromView(view: ConsoleView): string {
-  if (view === 'Tokens') return '#/tokens'
+function routeHashFromView(view: ConsoleView, landingFocus: LandingFocus, routeHashOverride?: string): string {
   if (view === 'Token Detail') return TOKEN_DETAIL_HASH
-  return '#/dashboard'
+  if (typeof routeHashOverride === 'string') return routeHashOverride
+  return userConsoleRouteToHash({
+    name: 'landing',
+    section: landingFocus === 'Token Focus' ? 'tokens' : 'dashboard',
+  })
 }
 
 function resolveStoryState(args: UserConsoleStoryArgs): UserConsoleStoryState {
@@ -198,13 +208,18 @@ function resolveStoryState(args: UserConsoleStoryArgs): UserConsoleStoryState {
     autoProbeTarget: args.consoleView === 'Token Detail'
       ? autoProbeTargetFromPreview(args.tokenDetailPreview)
       : null,
+    autoRevealToken: args.consoleView === 'Token Detail' && args.tokenDetailPreview === 'Token Revealed',
     isAdmin: args.isAdmin,
     probeMode: args.consoleView === 'Token Detail'
       ? probeModeFromPreview(args.tokenDetailPreview)
       : 'none',
-    routeHash: routeHashFromView(args.consoleView),
-    tokenListEmpty: args.consoleView === 'Tokens' && args.tokenListState === 'Empty',
+    routeHash: routeHashFromView(args.consoleView, args.landingFocus, args.routeHashOverride),
+    tokenListEmpty: args.consoleView === 'Console Home' && args.tokenListState === 'Empty',
   }
+}
+
+export const __testables = {
+  resolveStoryState,
 }
 
 function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
@@ -364,7 +379,7 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
   const [ready, setReady] = useState(false)
   const storyState = useMemo(
     () => resolveStoryState(args),
-    [args.consoleView, args.isAdmin, args.tokenListState, args.tokenDetailPreview],
+    [args.consoleView, args.isAdmin, args.landingFocus, args.tokenListState, args.tokenDetailPreview, args.routeHashOverride],
   )
 
   useLayoutEffect(() => {
@@ -379,6 +394,15 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
       setReady(false)
     }
   }, [storyState.isAdmin, storyState.probeMode, storyState.routeHash, storyState.tokenListEmpty])
+
+  useEffect(() => {
+    if (!ready || !storyState.autoRevealToken) return
+    const timer = window.setTimeout(() => {
+      const button = document.querySelector<HTMLButtonElement>('.user-console-token-box .token-visibility-button')
+      button?.click()
+    }, 80)
+    return () => window.clearTimeout(timer)
+  }, [ready, storyState.autoRevealToken])
 
   useEffect(() => {
     if (!ready || !storyState.autoProbeTarget) return
@@ -398,6 +422,7 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
     storyState.routeHash,
     storyState.isAdmin ? 'admin' : 'user',
     storyState.tokenListEmpty ? 'empty' : 'default',
+    storyState.autoRevealToken ? 'revealed' : 'hidden',
     storyState.probeMode,
   ].join(':')
 
@@ -406,22 +431,24 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
 
 const meta = {
   title: 'User Console/UserConsole',
+  excludeStories: ['__testables'],
   parameters: {
     controls: { expanded: true },
     layout: 'fullscreen',
     viewport: { defaultViewport: '1440-device-desktop' },
   },
   args: {
-    consoleView: 'Dashboard',
+    consoleView: 'Console Home',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
     tokenListState: 'Default List',
     tokenDetailPreview: 'Overview',
   },
   argTypes: {
     consoleView: {
       name: 'Console view',
-      description: 'Pick the main console page to preview.',
-      options: ['Dashboard', 'Tokens', 'Token Detail'],
+      description: 'Pick the merged console landing page or the dedicated token detail page.',
+      options: ['Console Home', 'Token Detail'],
       control: { type: 'inline-radio' },
     },
     isAdmin: {
@@ -429,18 +456,26 @@ const meta = {
       description: 'Toggle the console between a regular user session and an admin session.',
       control: { type: 'boolean' },
     },
+    landingFocus: {
+      name: 'Landing focus',
+      description: 'Preview which merged section the legacy hash should auto-focus.',
+      options: ['Overview Focus', 'Token Focus'],
+      control: { type: 'inline-radio' },
+      if: { arg: 'consoleView', eq: 'Console Home' },
+    },
     tokenListState: {
       name: 'Token list state',
-      description: 'Pick the list presentation for the Tokens page.',
+      description: 'Pick the token list presentation for the merged landing page.',
       options: ['Default List', 'Empty'],
       control: { type: 'inline-radio' },
-      if: { arg: 'consoleView', eq: 'Tokens' },
+      if: { arg: 'consoleView', eq: 'Console Home' },
     },
     tokenDetailPreview: {
       name: 'Token detail preview',
       description: 'Pick the overview or special state to preview on the Token Detail page.',
       options: [
         'Overview',
+        'Token Revealed',
         'API Check Running',
         'All Checks Pass',
         'Partial Availability',
@@ -450,6 +485,10 @@ const meta = {
       control: { type: 'select' },
       if: { arg: 'consoleView', eq: 'Token Detail' },
     },
+    routeHashOverride: {
+      table: { disable: true },
+      control: false,
+    },
   },
   render: (args) => <UserConsoleStory {...args} />,
 } satisfies Meta<UserConsoleStoryArgs>
@@ -458,54 +497,71 @@ export default meta
 
 type Story = StoryObj<typeof meta>
 
-export const Dashboard: Story = {
+export const ConsoleHome: Story = {
   args: {
-    consoleView: 'Dashboard',
+    consoleView: 'Console Home',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
   },
 }
 
-export const DashboardAdmin: Story = {
-  name: 'Dashboard Admin',
+export const ConsoleHomeRoot: Story = {
+  name: 'Console Home Root',
   args: {
-    consoleView: 'Dashboard',
-    isAdmin: true,
+    consoleView: 'Console Home',
+    isAdmin: false,
+    landingFocus: 'Overview Focus',
+    routeHashOverride: '',
   },
 }
 
-export const DashboardAdminMobile: Story = {
-  name: 'Dashboard Admin Mobile',
+export const ConsoleHomeAdmin: Story = {
+  name: 'Console Home Admin',
   args: {
-    consoleView: 'Dashboard',
+    consoleView: 'Console Home',
     isAdmin: true,
+    landingFocus: 'Overview Focus',
+  },
+}
+
+export const ConsoleHomeAdminMobile: Story = {
+  name: 'Console Home Admin Mobile',
+  args: {
+    consoleView: 'Console Home',
+    isAdmin: true,
+    landingFocus: 'Overview Focus',
   },
   parameters: {
     viewport: { defaultViewport: '0390-device-iphone-14' },
   },
 }
 
-export const Tokens: Story = {
+export const ConsoleHomeTokensFocus: Story = {
+  name: 'Console Home Tokens Focus',
   args: {
-    consoleView: 'Tokens',
+    consoleView: 'Console Home',
     isAdmin: false,
+    landingFocus: 'Token Focus',
     tokenListState: 'Default List',
   },
 }
 
-export const TokensAdmin: Story = {
-  name: 'Tokens Admin',
+export const ConsoleHomeTokensFocusAdmin: Story = {
+  name: 'Console Home Tokens Focus Admin',
   args: {
-    consoleView: 'Tokens',
+    consoleView: 'Console Home',
     isAdmin: true,
+    landingFocus: 'Token Focus',
     tokenListState: 'Default List',
   },
 }
 
-export const TokensEmpty: Story = {
-  name: 'Tokens Empty',
+export const ConsoleHomeEmptyTokens: Story = {
+  name: 'Console Home Empty Tokens',
   args: {
-    consoleView: 'Tokens',
+    consoleView: 'Console Home',
     isAdmin: false,
+    landingFocus: 'Token Focus',
     tokenListState: 'Empty',
   },
 }
@@ -515,7 +571,17 @@ export const TokenDetailOverview: Story = {
   args: {
     consoleView: 'Token Detail',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
     tokenDetailPreview: 'Overview',
+  },
+}
+
+export const TokenRevealed: Story = {
+  name: 'Token Revealed',
+  args: {
+    consoleView: 'Token Detail',
+    isAdmin: false,
+    tokenDetailPreview: 'Token Revealed',
   },
 }
 
@@ -524,6 +590,7 @@ export const TokenDetailAdmin: Story = {
   args: {
     consoleView: 'Token Detail',
     isAdmin: true,
+    landingFocus: 'Overview Focus',
     tokenDetailPreview: 'Overview',
   },
 }
@@ -533,6 +600,7 @@ export const ApiCheckRunning: Story = {
   args: {
     consoleView: 'Token Detail',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
     tokenDetailPreview: 'API Check Running',
   },
 }
@@ -542,6 +610,7 @@ export const AllChecksPass: Story = {
   args: {
     consoleView: 'Token Detail',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
     tokenDetailPreview: 'All Checks Pass',
   },
 }
@@ -551,6 +620,7 @@ export const PartialAvailability: Story = {
   args: {
     consoleView: 'Token Detail',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
     tokenDetailPreview: 'Partial Availability',
   },
 }
@@ -560,6 +630,7 @@ export const AuthenticationFailed: Story = {
   args: {
     consoleView: 'Token Detail',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
     tokenDetailPreview: 'Authentication Failed',
   },
 }
@@ -569,6 +640,7 @@ export const QuotaBlocked: Story = {
   args: {
     consoleView: 'Token Detail',
     isAdmin: false,
+    landingFocus: 'Overview Focus',
     tokenDetailPreview: 'Quota Blocked',
   },
 }
