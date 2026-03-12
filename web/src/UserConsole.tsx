@@ -1320,10 +1320,12 @@ export default function UserConsole(): JSX.Element {
               readOnly
             />
             {tokenSecretLoading ? (
-              <p className="user-console-token-status">{text.detail.tokenSecret.loading}</p>
+              <p className="sr-only" role="status" aria-live="polite">
+                {text.detail.tokenSecret.loading}
+              </p>
             ) : null}
             {tokenSecretError ? (
-              <p className="user-console-token-error" role="status">{tokenSecretError}</p>
+              <p className="user-console-token-error" role="status" aria-live="polite">{tokenSecretError}</p>
             ) : null}
 
             <div className="user-console-probe-box">

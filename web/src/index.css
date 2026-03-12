@@ -5129,14 +5129,9 @@ tbody .log-details-row:hover {
   min-width: 0;
 }
 
-.user-console-token-status,
 .user-console-token-error {
   margin: -2px 0 0;
   font-size: 0.92rem;
-}
-
-.user-console-token-status {
-  color: hsl(var(--muted-foreground));
 }
 
 .user-console-token-error {
