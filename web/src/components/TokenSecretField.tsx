@@ -7,7 +7,7 @@ import { Input } from './ui/input'
 
 export type TokenSecretCopyState = 'idle' | 'copied' | 'error'
 
-interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> {
+interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange' | 'onCopy'> {
   inputId: string
   label: string
   value: string

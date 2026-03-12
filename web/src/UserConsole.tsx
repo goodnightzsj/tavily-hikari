@@ -443,7 +443,6 @@ export default function UserConsole(): JSX.Element {
     tokenSecretRequestRef.current.set(tokenId, request)
     return await request
   }, [route, tokenSecretTokenId, tokenSecretValue])
-  }, [route, tokenSecretTokenId, tokenSecretValue])
 
   useEffect(() => {
     if (consoleAvailability !== 'enabled') return
@@ -490,7 +489,6 @@ export default function UserConsole(): JSX.Element {
     window.setTimeout(() => {
       setCopyState((prev) => ({ ...prev, [tokenId]: 'idle' }))
     }, 1800)
-  }, [resolveTokenSecret, route, tokenSecretTokenId, tokenSecretValue])
   }, [resolveTokenSecret, route, tokenSecretTokenId, tokenSecretValue])
 
   const toggleTokenSecretVisibility = useCallback(async () => {
