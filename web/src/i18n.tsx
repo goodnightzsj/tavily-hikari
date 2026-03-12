@@ -629,6 +629,12 @@ interface AdminTranslationsShape {
       moreShow: string
       moreHide: string
     }
+    filters: {
+      status: string
+      clearGroups: string
+      clearStatuses: string
+      selectedSuffix: string
+    }
     table: {
       keyId: string
       status: string
@@ -1504,6 +1510,12 @@ export const translations: Record<Language, TranslationShape> = {
           moreShow: 'Show all groups',
           moreHide: 'Collapse groups',
         },
+        filters: {
+          status: 'Status',
+          clearGroups: 'Show all groups',
+          clearStatuses: 'Show all statuses',
+          selectedSuffix: 'selected',
+        },
       table: {
         keyId: 'Key ID',
         status: 'Status',
@@ -1522,7 +1534,7 @@ export const translations: Record<Language, TranslationShape> = {
         empty: {
           loading: 'Loading key statistics…',
           none: 'No key data recorded yet.',
-          filtered: 'No keys in this group.',
+          filtered: 'No keys match the current filters.',
         },
         actions: {
           copy: 'Copy original API key',
@@ -2363,6 +2375,12 @@ export const translations: Record<Language, TranslationShape> = {
           moreShow: '展开全部分组',
           moreHide: '收起分组',
         },
+        filters: {
+          status: '状态',
+          clearGroups: '显示全部分组',
+          clearStatuses: '显示全部状态',
+          selectedSuffix: '项已选',
+        },
         table: {
           keyId: 'Key ID',
           status: '状态',
@@ -2381,7 +2399,7 @@ export const translations: Record<Language, TranslationShape> = {
         empty: {
           loading: '正在加载密钥统计…',
           none: '暂时没有密钥数据。',
-          filtered: '该分组下暂无密钥。',
+          filtered: '当前筛选条件下暂无密钥。',
         },
         actions: {
           copy: '复制原始 API Key',

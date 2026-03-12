@@ -20,6 +20,15 @@ import {
   DialogTitle,
 } from './components/ui/dialog'
 import { Input } from './components/ui/input'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './components/ui/dropdown-menu'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select'
 import SegmentedTabs from './components/ui/SegmentedTabs'
 import { Card } from './components/ui/card'
@@ -191,6 +200,93 @@ function formatQuotaLimitValue(value: number): string {
 function formatQuotaUsagePair(used: number, limit: number): string {
   return `${formatNumber(Math.max(0, used))} / ${formatQuotaLimitValue(limit)}`
 }
+
+function formatKeyGroupName(group: string | null | undefined, ungroupedLabel: string): string {
+  const normalized = group?.trim() ?? ''
+  return normalized.length > 0 ? normalized : ungroupedLabel
+}
+
+function toggleSelection(values: string[], value: string): string[] {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]
+}
+
+function summarizeFilterSelection(
+  label: string,
+  selectedLabels: string[],
+  allLabel: string,
+  selectedSuffix: string,
+): string {
+  if (selectedLabels.length === 0) return `${label}: ${allLabel}`
+  if (selectedLabels.length === 1) return `${label}: ${selectedLabels[0]}`
+  return `${label}: ${selectedLabels.length} ${selectedSuffix}`
+}
+
+const adminTableStackStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 4,
+  minWidth: 0,
+} as const
+
+const adminTableFieldStyle = {
+  whiteSpace: 'nowrap',
+  lineHeight: 1.35,
+} as const
+
+const adminTableSecondaryFieldStyle = {
+  ...adminTableFieldStyle,
+  fontSize: '0.92em',
+  opacity: 0.68,
+} as const
+
+const adminTableInlineFieldStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 8,
+  whiteSpace: 'nowrap',
+  lineHeight: 1.35,
+} as const
+
+const adminTableHeaderStackStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 2,
+  minHeight: 40,
+  justifyContent: 'center',
+} as const
+
+const keysUtilityRowStyle = {
+  display: 'flex',
+  alignItems: 'stretch',
+  justifyContent: 'space-between',
+  gap: 16,
+  flexWrap: 'wrap',
+  marginBottom: 16,
+} as const
+
+const keysFilterClusterStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'wrap',
+  flex: '1 1 360px',
+  minWidth: 260,
+} as const
+
+const keysQuickAddCardStyle = {
+  flex: '0 1 420px',
+  minWidth: 300,
+  width: 'min(420px, 100%)',
+  padding: 0,
+} as const
+
+const keysQuickAddActionsStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'nowrap',
+  width: '100%',
+} as const
 
 function formatSignedQuotaDelta(value: number): string {
   if (value > 0) {
@@ -740,7 +836,6 @@ function AdminDashboard(): JSX.Element {
   const secretCacheRef = useRef<Map<string, string>>(new Map())
   const tokenSecretCacheRef = useRef<Map<string, string>>(new Map())
   const tokenGroupsListRef = useRef<HTMLDivElement | null>(null)
-  const keyGroupsListRef = useRef<HTMLDivElement | null>(null)
   const [copyState, setCopyState] = useState<Map<string, 'loading' | 'copied'>>(() => new Map())
   const [expandedLogs, setExpandedLogs] = useState<Set<number>>(() => new Set())
   type AddKeysBatchReportState =
@@ -749,10 +844,8 @@ function AdminDashboard(): JSX.Element {
 
   const [newKeysText, setNewKeysText] = useState('')
   const [newKeysGroup, setNewKeysGroup] = useState('')
-  const [selectedKeyGroupName, setSelectedKeyGroupName] = useState<string | null>(null)
-  const [selectedKeyUngrouped, setSelectedKeyUngrouped] = useState(false)
-  const [keyGroupsExpanded, setKeyGroupsExpanded] = useState(false)
-  const [keyGroupsCollapsedOverflowing, setKeyGroupsCollapsedOverflowing] = useState(false)
+  const [selectedKeyGroups, setSelectedKeyGroups] = useState<string[]>([])
+  const [selectedKeyStatuses, setSelectedKeyStatuses] = useState<string[]>([])
   const [keysBatchExpanded, setKeysBatchExpanded] = useState(false)
   const [keysBatchClosing, setKeysBatchClosing] = useState(false)
   const keysBatchOpenReasonRef = useRef<'hover' | 'focus' | null>(null)
@@ -1930,9 +2023,33 @@ function AdminDashboard(): JSX.Element {
     return out
   }, [dedupedKeys])
 
-  const ungroupedKeyGroup = keyGroupList.find((group) => group.name.trim().length === 0)
   const namedKeyGroups = keyGroupList.filter((group) => group.name.trim().length > 0)
   const hasKeyGroups = keyGroupList.length > 0
+
+  const keyGroupFilterOptions = useMemo(
+    () =>
+      keyGroupList.map((group) => ({
+        value: group.name,
+        label: group.name.trim().length > 0 ? group.name : keyStrings.groups.ungrouped,
+        count: group.keyCount,
+      })),
+    [keyGroupList, keyStrings.groups.ungrouped],
+  )
+
+  const keyStatusFilterOptions = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const item of dedupedKeys) {
+      const badgeStatus = keyBadgeStatus(item)
+      counts.set(badgeStatus, (counts.get(badgeStatus) ?? 0) + 1)
+    }
+    return Array.from(counts.entries())
+      .map(([value, count]) => ({
+        value,
+        label: statusLabel(value, adminStrings),
+        count,
+      }))
+      .sort((left, right) => left.label.localeCompare(right.label))
+  }, [adminStrings, dedupedKeys])
 
   const ungroupedTokenGroup = tokenGroups.find((group) => group.name.trim().length === 0)
   const namedTokenGroups = tokenGroups.filter((group) => group.name.trim().length > 0)
@@ -1949,34 +2066,52 @@ function AdminDashboard(): JSX.Element {
   }, [selectedTokenGroupName, selectedTokenUngrouped, tokens])
 
   const visibleKeys = useMemo(() => {
-    if (selectedKeyUngrouped) {
-      return sortedKeys.filter((item) => (item.group ?? '').trim().length === 0)
-    }
-    if (selectedKeyGroupName != null) {
-      return sortedKeys.filter((item) => (item.group ?? '').trim() === selectedKeyGroupName)
-    }
-    return sortedKeys
-  }, [selectedKeyGroupName, selectedKeyUngrouped, sortedKeys])
+    return sortedKeys.filter((item) => {
+      const groupKey = (item.group ?? '').trim()
+      const badgeStatus = keyBadgeStatus(item)
+      const groupMatched = selectedKeyGroups.length === 0 || selectedKeyGroups.includes(groupKey)
+      const statusMatched = selectedKeyStatuses.length === 0 || selectedKeyStatuses.includes(badgeStatus)
+      return groupMatched && statusMatched
+    })
+  }, [selectedKeyGroups, selectedKeyStatuses, sortedKeys])
 
-  // Detect whether the collapsed key groups row overflows horizontally.
-  // If everything fits in a single line, we hide the "more" toggle button.
-  useEffect(() => {
-    if (!Array.isArray(keyGroupList) || keyGroupList.length === 0 || keyGroupsExpanded) {
-      setKeyGroupsCollapsedOverflowing(false)
-      return
-    }
-    const el = keyGroupsListRef.current
-    if (!el) return
+  const selectedKeyGroupLabels = useMemo(
+    () =>
+      keyGroupFilterOptions
+        .filter((option) => selectedKeyGroups.includes(option.value))
+        .map((option) => option.label),
+    [keyGroupFilterOptions, selectedKeyGroups],
+  )
 
-    const measure = () => {
-      const overflowing = el.scrollWidth > el.clientWidth
-      setKeyGroupsCollapsedOverflowing(overflowing)
-    }
+  const selectedKeyStatusLabels = useMemo(
+    () =>
+      keyStatusFilterOptions
+        .filter((option) => selectedKeyStatuses.includes(option.value))
+        .map((option) => option.label),
+    [keyStatusFilterOptions, selectedKeyStatuses],
+  )
 
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [keyGroupList, keyGroupsExpanded, selectedKeyGroupName, selectedKeyUngrouped])
+  const keyGroupFilterSummary = useMemo(
+    () =>
+      summarizeFilterSelection(
+        keyStrings.groups.label,
+        selectedKeyGroupLabels,
+        keyStrings.groups.all,
+        keyStrings.filters.selectedSuffix,
+      ),
+    [keyStrings.filters.selectedSuffix, keyStrings.groups.all, keyStrings.groups.label, selectedKeyGroupLabels],
+  )
+
+  const keyStatusFilterSummary = useMemo(
+    () =>
+      summarizeFilterSelection(
+        keyStrings.filters.status,
+        selectedKeyStatusLabels,
+        keyStrings.groups.all,
+        keyStrings.filters.selectedSuffix,
+      ),
+    [keyStrings.filters.selectedSuffix, keyStrings.filters.status, keyStrings.groups.all, selectedKeyStatusLabels],
+  )
 
   const keysBatchParsed = useMemo(() => {
     return extractTvlyDevApiKeysFromText(newKeysText)
@@ -2809,23 +2944,20 @@ function AdminDashboard(): JSX.Element {
     setTokenGroupsExpanded((previous) => !previous)
   }
 
-  const handleSelectKeyGroupAll = () => {
-    setSelectedKeyGroupName(null)
-    setSelectedKeyUngrouped(false)
+  const handleToggleKeyGroupFilter = (group: string) => {
+    setSelectedKeyGroups((current) => toggleSelection(current, group))
   }
 
-  const handleSelectKeyGroupUngrouped = () => {
-    setSelectedKeyGroupName(null)
-    setSelectedKeyUngrouped(true)
+  const handleToggleKeyStatusFilter = (status: string) => {
+    setSelectedKeyStatuses((current) => toggleSelection(current, status))
   }
 
-  const handleSelectKeyGroupNamed = (group: string) => {
-    setSelectedKeyGroupName(group)
-    setSelectedKeyUngrouped(false)
+  const handleClearKeyGroupFilters = () => {
+    setSelectedKeyGroups([])
   }
 
-  const toggleKeyGroupsExpanded = () => {
-    setKeyGroupsExpanded((previous) => !previous)
+  const handleClearKeyStatusFilters = () => {
+    setSelectedKeyStatuses([])
   }
 
   const openBatchDialog = () => {
@@ -4803,7 +4935,90 @@ function AdminDashboard(): JSX.Element {
 	            <h2>{keyStrings.title}</h2>
 	            <p className="panel-description">{keyStrings.description}</p>
 	          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: '0 1 auto', justifyContent: 'flex-end', marginLeft: 'auto' }}>
+	        </div>
+          <div style={keysUtilityRowStyle}>
+            <div style={keysFilterClusterStyle}>
+              {hasKeyGroups && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="outline" size="sm" aria-label={keyGroupFilterSummary}>
+                      <Icon icon="mdi:filter-variant" width={16} height={16} aria-hidden="true" />
+                      <span style={{ whiteSpace: 'nowrap' }}>{keyGroupFilterSummary}</span>
+                      {selectedKeyGroups.length > 0 ? (
+                        <Badge variant="neutral" className="ml-1 px-1.5 py-0 text-[10px]">
+                          {selectedKeyGroups.length}
+                        </Badge>
+                      ) : null}
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-64">
+                    <DropdownMenuLabel>{keyStrings.groups.label}</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      className="cursor-pointer"
+                      disabled={selectedKeyGroups.length === 0}
+                      onSelect={(event) => {
+                        event.preventDefault()
+                        handleClearKeyGroupFilters()
+                      }}
+                    >
+                      {keyStrings.filters.clearGroups}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    {keyGroupFilterOptions.map((option) => (
+                      <DropdownMenuCheckboxItem
+                        key={option.value || '__ungrouped__'}
+                        className="cursor-pointer"
+                        checked={selectedKeyGroups.includes(option.value)}
+                        onSelect={(event) => event.preventDefault()}
+                        onCheckedChange={() => handleToggleKeyGroupFilter(option.value)}
+                      >
+                        <span>{option.label}</span>
+                        <span className="ml-auto text-xs opacity-60">{formatNumber(option.count)}</span>
+                      </DropdownMenuCheckboxItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" variant="outline" size="sm" aria-label={keyStatusFilterSummary}>
+                    <Icon icon="mdi:filter-outline" width={16} height={16} aria-hidden="true" />
+                    <span style={{ whiteSpace: 'nowrap' }}>{keyStatusFilterSummary}</span>
+                    {selectedKeyStatuses.length > 0 ? (
+                      <Badge variant="neutral" className="ml-1 px-1.5 py-0 text-[10px]">
+                        {selectedKeyStatuses.length}
+                      </Badge>
+                    ) : null}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-64">
+                  <DropdownMenuLabel>{keyStrings.filters.status}</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    className="cursor-pointer"
+                    disabled={selectedKeyStatuses.length === 0}
+                    onSelect={(event) => {
+                      event.preventDefault()
+                      handleClearKeyStatusFilters()
+                    }}
+                  >
+                    {keyStrings.filters.clearStatuses}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {keyStatusFilterOptions.map((option) => (
+                    <DropdownMenuCheckboxItem
+                      key={option.value}
+                      className="cursor-pointer"
+                      checked={selectedKeyStatuses.includes(option.value)}
+                      onSelect={(event) => event.preventDefault()}
+                      onCheckedChange={() => handleToggleKeyStatusFilter(option.value)}
+                    >
+                      <span>{option.label}</span>
+                      <span className="ml-auto text-xs opacity-60">{formatNumber(option.count)}</span>
+                    </DropdownMenuCheckboxItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
             {isAdmin && (
               <div
                 ref={keysBatchAnchorRef}
@@ -4829,113 +5044,42 @@ function AdminDashboard(): JSX.Element {
                   keysBatchOpenReasonRef.current = 'focus'
                   setKeysBatchExpanded(true)
                 }}
-                style={{ position: 'relative' }}
+                style={{ ...keysQuickAddCardStyle, position: 'relative' }}
               >
                 <div
                   className={`keys-batch-collapsed${keysBatchVisible ? ' is-hidden' : ''}`}
                   aria-hidden={keysBatchVisible}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    flexWrap: 'wrap',
-                    justifyContent: 'flex-end',
-                    maxWidth: 'min(520px, 100%)',
-                  }}
+                  style={keysQuickAddActionsStyle}
                 >
-<Input
-  ref={keysBatchCollapsedInputRef}
-  type="text"
-  name="collapsed-key-input"
-  placeholder={keyStrings.placeholder}
-  aria-label={keyStrings.placeholder}
-  value={keysBatchFirstLine}
-  onChange={(e) => setNewKeysText(e.target.value)}
-  disabled={keysBatchVisible}
-  style={{ flex: '1 1 160px', minWidth: 160, maxWidth: '100%' }}
-/>
-<Button
-  type="button"
-  onClick={() => void handleAddKey()}
-  disabled={keysBatchVisible || submitting || keysBatchParsed.length === 0}
-  style={{ flexShrink: 0 }}
->
-  {submitting ? keyStrings.adding : keyStrings.addButton}
-</Button>
-	                </div>
-	                <datalist id="api-key-group-datalist">
-	                  {namedKeyGroups.map((group) => (
-	                    <option key={group.name} value={group.name} />
-	                  ))}
-	                </datalist>
-	              </div>
-	            )}
-	          </div>
-	        </div>
-	        {hasKeyGroups && (
-	          <div className="token-groups-container">
-	            <div className="token-groups-label">
-	              <span>{keyStrings.groups.label}</span>
-	            </div>
-	            <div className="token-groups-row">
-	              <div
-	                ref={keyGroupsListRef}
-	                className={`token-groups-list${keyGroupsExpanded ? ' token-groups-list-expanded' : ''}`}
-	              >
-	                <button
-	                  type="button"
-	                  className={`token-group-chip${
-	                    !selectedKeyUngrouped && selectedKeyGroupName == null ? ' token-group-chip-active' : ''
-	                  }`}
-	                  onClick={handleSelectKeyGroupAll}
-	                >
-	                  <span className="token-group-name">{keyStrings.groups.all}</span>
-	                </button>
-	                {ungroupedKeyGroup && (
-	                  <button
-	                    type="button"
-	                    className={`token-group-chip${selectedKeyUngrouped ? ' token-group-chip-active' : ''}`}
-	                    onClick={handleSelectKeyGroupUngrouped}
-	                  >
-	                    <span className="token-group-name">{keyStrings.groups.ungrouped}</span>
-	                    {keyGroupsExpanded && (
-	                      <span className="token-group-count">
-	                        {formatNumber(ungroupedKeyGroup.keyCount)}
-	                      </span>
-	                    )}
-	                  </button>
-	                )}
-	                {namedKeyGroups.map((group) => (
-	                  <button
-	                    key={group.name}
-	                    type="button"
-	                    className={`token-group-chip${
-	                      !selectedKeyUngrouped && selectedKeyGroupName === group.name ? ' token-group-chip-active' : ''
-	                    }`}
-	                    onClick={() => handleSelectKeyGroupNamed(group.name)}
-	                  >
-	                    <span className="token-group-name">{group.name}</span>
-	                    {keyGroupsExpanded && (
-	                      <span className="token-group-count">
-	                        {formatNumber(group.keyCount)}
-	                      </span>
-	                    )}
-	                  </button>
-	                ))}
-	              </div>
-	              {(keyGroupsCollapsedOverflowing || keyGroupsExpanded) && (
-	                <button
-	                  type="button"
-	                  className={`token-group-chip token-group-toggle${keyGroupsExpanded ? ' token-group-toggle-active' : ''}`}
-	                  onClick={toggleKeyGroupsExpanded}
-	                  aria-label={keyGroupsExpanded ? keyStrings.groups.moreHide : keyStrings.groups.moreShow}
-	                >
-	                  <Icon icon={keyGroupsExpanded ? 'mdi:chevron-up' : 'mdi:chevron-down'} width={18} height={18} />
-	                </button>
-	              )}
-	            </div>
-	          </div>
-	        )}
+                  <Input
+                    ref={keysBatchCollapsedInputRef}
+                    type="text"
+                    name="collapsed-key-input"
+                    placeholder={keyStrings.placeholder}
+                    aria-label={keyStrings.placeholder}
+                    value={keysBatchFirstLine}
+                    onChange={(e) => setNewKeysText(e.target.value)}
+                    disabled={keysBatchVisible}
+                    style={{ flex: '1 1 260px', minWidth: 260, maxWidth: '100%' }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => void handleAddKey()}
+                    disabled={keysBatchVisible || submitting || keysBatchParsed.length === 0}
+                    style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                  >
+                    {submitting ? keyStrings.adding : keyStrings.addButton}
+                  </Button>
+                </div>
+                <datalist id="api-key-group-datalist">
+                  {namedKeyGroups.map((group) => (
+                    <option key={group.name} value={group.name} />
+                  ))}
+                </datalist>
+              </div>
+            )}
+          </div>
 	        <div className="table-wrapper jobs-table-wrapper admin-responsive-up">
 	          {visibleKeys.length === 0 ? (
 	            <div className="empty-state alert">
@@ -4945,36 +5089,67 @@ function AdminDashboard(): JSX.Element {
 	            <Table>
 	              <thead>
                 <tr>
-                  <th>{keyStrings.table.keyId}</th>
-                  <th>{keyStrings.table.status}</th>
-                  <th>{keyStrings.table.total}</th>
-                  <th>{keyStrings.table.success}</th>
-                  <th>{keyStrings.table.errors}</th>
-                  <th>{keyStrings.table.quotaLeft}</th>
-                  <th>{keyStrings.table.lastUsed}</th>
-                  <th>{keyStrings.table.statusChanged}</th>
-                  {isAdmin && <th>{keyStrings.table.actions}</th>}
+                  <th>
+                    <div style={adminTableHeaderStackStyle}>
+                      <span style={adminTableFieldStyle}>{keyStrings.table.keyId}</span>
+                      <span style={adminTableSecondaryFieldStyle}>{keyStrings.groups.label}</span>
+                    </div>
+                  </th>
+                  <th>
+                    <div style={adminTableHeaderStackStyle}>
+                      <span style={adminTableFieldStyle}>{keyStrings.table.status}</span>
+                      <span style={adminTableSecondaryFieldStyle} aria-hidden="true">&nbsp;</span>
+                    </div>
+                  </th>
+                  <th>
+                    <div style={adminTableHeaderStackStyle}>
+                      <span style={adminTableFieldStyle}>{keyStrings.table.success}</span>
+                      <span style={adminTableSecondaryFieldStyle}>{keyStrings.table.errors}</span>
+                    </div>
+                  </th>
+                  <th>
+                    <div style={adminTableHeaderStackStyle}>
+                      <span style={adminTableFieldStyle}>{keyStrings.table.quotaLeft}</span>
+                      <span style={adminTableSecondaryFieldStyle} aria-hidden="true">&nbsp;</span>
+                    </div>
+                  </th>
+                  <th>
+                    <div style={adminTableHeaderStackStyle}>
+                      <span style={adminTableFieldStyle}>{keyStrings.table.lastUsed}</span>
+                      <span style={adminTableSecondaryFieldStyle}>{keyStrings.table.statusChanged}</span>
+                    </div>
+                  </th>
+                  {isAdmin && (
+                    <th>
+                      <div style={adminTableHeaderStackStyle}>
+                        <span style={adminTableFieldStyle}>{keyStrings.table.actions}</span>
+                        <span style={adminTableSecondaryFieldStyle} aria-hidden="true">&nbsp;</span>
+                      </div>
+                    </th>
+                  )}
                 </tr>
 	              </thead>
 	              <tbody>
 	                {visibleKeys.map((item) => {
-	                  const total = item.total_requests || 0
 	                  const stateKey = copyStateKey('keys', item.id)
 	                  const state = copyState.get(stateKey)
+                    const keyGroupName = formatKeyGroupName(item.group, keyStrings.groups.ungrouped)
 	                  return (
                     <tr key={item.id}>
                       <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <button
-                            type="button"
-                            className="link-button"
-                            onClick={() => navigateKey(item.id)}
-                            title={keyStrings.actions.details}
-                            aria-label={keyStrings.actions.details}
-                          >
-                            <code>{item.id}</code>
-                          </button>
-                          {isAdmin && (
+                        <div style={adminTableStackStyle}>
+                          <div style={adminTableInlineFieldStyle}>
+                            <button
+                              type="button"
+                              className="link-button"
+                              onClick={() => navigateKey(item.id)}
+                              title={keyStrings.actions.details}
+                              aria-label={keyStrings.actions.details}
+                              style={{ whiteSpace: 'nowrap' }}
+                            >
+                              <code>{item.id}</code>
+                            </button>
+                            {isAdmin && (
 <Button
   type="button"
   variant={state === 'copied' ? 'success' : 'ghost'}
@@ -4987,32 +5162,42 @@ function AdminDashboard(): JSX.Element {
 >
   <Icon icon={state === 'copied' ? 'mdi:check' : 'mdi:content-copy'} width={18} height={18} />
 </Button>
-                          )}
+                            )}
+                          </div>
+                          <span style={adminTableSecondaryFieldStyle}>{keyGroupName}</span>
                         </div>
                       </td>
                       <td>
-                        <StatusBadge tone={statusTone(keyBadgeStatus(item))}>
-                          {statusLabel(keyBadgeStatus(item), adminStrings)}
-                        </StatusBadge>
-                        {item.quarantine && (
-                          <div className="panel-description" style={{ marginTop: 4 }}>
-                            {keyStrings.quarantine.badge}: {item.quarantine.reasonSummary || keyStrings.quarantine.noReason}
-                          </div>
-                        )}
+                        <div style={adminTableStackStyle}>
+                          <span style={adminTableFieldStyle}>
+                            <StatusBadge tone={statusTone(keyBadgeStatus(item))}>
+                              {statusLabel(keyBadgeStatus(item), adminStrings)}
+                            </StatusBadge>
+                          </span>
+                        </div>
                       </td>
-                      <td>{formatNumber(total)}</td>
-                      <td>{formatNumber(item.success_count)}</td>
-                      <td>{formatNumber(item.error_count)}</td>
                       <td>
-                        {item.quota_remaining != null && item.quota_limit != null
-                          ? `${formatNumber(item.quota_remaining)} / ${formatNumber(item.quota_limit)}`
-                          : '—'}
+                        <div style={adminTableStackStyle}>
+                          <span style={adminTableFieldStyle}>{formatNumber(item.success_count)}</span>
+                          <span style={adminTableSecondaryFieldStyle}>{formatNumber(item.error_count)}</span>
+                        </div>
                       </td>
-                      <td>{formatTimestampNoYear(item.last_used_at)}</td>
-                      <td>{formatTimestamp(item.status_changed_at)}</td>
+                      <td>
+                        <span style={adminTableFieldStyle}>
+                          {item.quota_remaining != null && item.quota_limit != null
+                            ? `${formatNumber(item.quota_remaining)} / ${formatNumber(item.quota_limit)}`
+                            : '—'}
+                        </span>
+                      </td>
+                      <td>
+                        <div style={adminTableStackStyle}>
+                          <span style={adminTableFieldStyle}>{formatTimestampNoYear(item.last_used_at)}</span>
+                          <span style={adminTableSecondaryFieldStyle}>{formatTimestamp(item.status_changed_at)}</span>
+                        </div>
+                      </td>
                       {isAdmin && (
                         <td>
-                          <div className="table-actions">
+                          <div className="table-actions" style={{ flexWrap: 'nowrap' }}>
                             {item.status === 'disabled' ? (
   <Button
     type="button"
@@ -5065,8 +5250,8 @@ function AdminDashboard(): JSX.Element {
   title={keyStrings.actions.details}
   aria-label={keyStrings.actions.details}
   onClick={() => navigateKey(item.id)}
->
-  <Icon icon="mdi:eye-outline" width={18} height={18} />
+  >
+    <Icon icon="mdi:eye-outline" width={18} height={18} />
 </Button>
                           </div>
                         </td>
