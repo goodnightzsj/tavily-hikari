@@ -7162,24 +7162,42 @@ tbody .log-details-row:hover {
   gap: 0.75rem;
 }
 
+.forward-proxy-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.forward-proxy-panel-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.forward-proxy-panel-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
 .forward-proxy-summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 0.9rem;
-  margin-top: 1rem;
 }
 
 .forward-proxy-summary-card {
+  overflow: hidden;
+}
+
+.forward-proxy-summary-card-content {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
   padding: 1rem;
-  border: 1px solid hsl(var(--border) / 0.78);
-  border-radius: 1rem;
-  background:
-    linear-gradient(180deg, hsl(var(--card) / 0.92), hsl(var(--muted) / 0.38)),
-    hsl(var(--card));
-  box-shadow: 0 12px 24px -22px hsl(var(--foreground) / 0.28);
+  background: linear-gradient(180deg, hsl(var(--card) / 0.96), hsl(var(--muted) / 0.32));
 }
 
 .forward-proxy-summary-label {
@@ -7203,7 +7221,6 @@ tbody .log-details-row:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
-  margin-top: 1rem;
 }
 
 .forward-proxy-config-grid {
@@ -7213,13 +7230,7 @@ tbody .log-details-row:hover {
 }
 
 .forward-proxy-editor-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-  padding: 1rem;
-  border-radius: 1rem;
-  border: 1px solid hsl(var(--border) / 0.78);
-  background: hsl(var(--card) / 0.82);
+  height: 100%;
 }
 
 .forward-proxy-editor-head {
@@ -7227,11 +7238,13 @@ tbody .log-details-row:hover {
   justify-content: space-between;
   align-items: flex-start;
   gap: 0.75rem;
+  padding-bottom: 0.9rem;
 }
 
-.forward-proxy-editor-head h3 {
-  margin: 0;
-  font-size: 1rem;
+.forward-proxy-editor-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
 }
 
 .forward-proxy-textarea {
@@ -7245,8 +7258,18 @@ tbody .log-details-row:hover {
   display: grid;
   grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
   gap: 1rem;
-  margin-top: 1rem;
   align-items: start;
+}
+
+.forward-proxy-field-card,
+.forward-proxy-checkbox-card {
+  height: 100%;
+}
+
+.forward-proxy-field-card-content,
+.forward-proxy-checkbox-card-content {
+  height: 100%;
+  padding: 1rem;
 }
 
 .forward-proxy-field {
@@ -7265,10 +7288,11 @@ tbody .log-details-row:hover {
   display: flex;
   gap: 0.85rem;
   align-items: flex-start;
-  padding: 1rem;
+  min-height: 100%;
   border-radius: 1rem;
   border: 1px dashed hsl(var(--border) / 0.88);
   background: hsl(var(--muted) / 0.22);
+  padding: 1rem;
 }
 
 .forward-proxy-checkbox input {
@@ -7285,13 +7309,14 @@ tbody .log-details-row:hover {
 }
 
 .forward-proxy-validation-card {
+  height: 100%;
+}
+
+.forward-proxy-validation-card-content {
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
   padding: 1rem;
-  border-radius: 1rem;
-  border: 1px solid hsl(var(--border) / 0.78);
-  background: hsl(var(--card) / 0.82);
 }
 
 .forward-proxy-validation-head {
@@ -7361,16 +7386,18 @@ tbody .log-details-row:hover {
 }
 
 .forward-proxy-window-card {
+  font-size: 0.78rem;
+}
+
+.forward-proxy-window-card-content {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
   padding: 0.6rem 0.7rem;
-  border-radius: 0.8rem;
   background: hsl(var(--muted) / 0.3);
-  font-size: 0.78rem;
 }
 
-.forward-proxy-window-card strong {
+.forward-proxy-window-card-content strong {
   font-size: 0.95rem;
   color: hsl(var(--foreground));
 }
@@ -7386,6 +7413,7 @@ tbody .log-details-row:hover {
     grid-template-columns: 1fr;
   }
 
+  .forward-proxy-panel-header,
   .forward-proxy-editor-head {
     flex-direction: column;
   }
