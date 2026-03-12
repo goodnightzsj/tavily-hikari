@@ -1,11 +1,17 @@
 async fn fetch_summary(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Json<SummaryView>, StatusCode> {
     state
         .proxy
         .summary()
         .await
-        .map(|summary| Json(summary.into()))
+        .map(|mut summary| {
+            if !is_admin_request(state.as_ref(), &headers) {
+                summary.quarantined_keys = 0;
+            }
+            Json(summary.into())
+        })
         .map_err(|err| {
             eprintln!("summary error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR

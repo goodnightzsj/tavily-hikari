@@ -1228,8 +1228,7 @@ impl TavilyProxy {
                     }
                     return Ok(lease);
                 }
-                let mut state = self.research_request_affinity.lock().await;
-                state.drop_mapping(request_id);
+                return Err(ProxyError::NoAvailableKeys);
             }
         }
 
@@ -10768,7 +10767,7 @@ impl KeyStore {
             sqlx::query(
                 r#"
                 UPDATE api_key_quarantines
-                SET source = ?, reason_code = ?, reason_summary = ?, reason_detail = ?, created_at = ?
+                SET source = ?, reason_code = ?, reason_summary = ?, reason_detail = ?
                 WHERE key_id = ? AND cleared_at IS NULL
                 "#,
             )
@@ -10776,7 +10775,6 @@ impl KeyStore {
             .bind(reason_code)
             .bind(reason_summary)
             .bind(reason_detail)
-            .bind(now)
             .bind(key_id)
             .execute(&self.pool)
             .await?;
@@ -12894,8 +12892,8 @@ fn classify_quarantine_reason(status_code: Option<i64>, body: &[u8]) -> Option<Q
             format!("Tavily key revoked ({status_label})"),
         )
     } else if normalized.contains("invalid api key")
-        || normalized.contains("invalid key")
         || normalized.contains("invalid_token")
+        || normalized.contains("api key is invalid")
     {
         (
             "invalid_api_key",
@@ -14645,6 +14643,66 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test]
+    async fn research_result_keeps_affinity_when_original_key_is_quarantined() {
+        let db_path = temp_db_path("research-affinity-quarantine");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec![
+                "tvly-research-affinity-a".to_string(),
+                "tvly-research-affinity-b".to_string(),
+            ],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, api_key FROM api_keys ORDER BY api_key ASC",
+        )
+        .fetch_all(&proxy.key_store.pool)
+        .await
+        .expect("fetch keys");
+        let (affinity_key_id, _other_key_id) =
+            rows.into_iter()
+                .fold((None, None), |mut acc, (id, secret)| {
+                    if secret == "tvly-research-affinity-a" {
+                        acc.0 = Some(id);
+                    } else if secret == "tvly-research-affinity-b" {
+                        acc.1 = Some(id);
+                    }
+                    acc
+                });
+        let affinity_key_id = affinity_key_id.expect("affinity key exists");
+        let request_id = "req-affinity-quarantine";
+
+        proxy
+            .record_research_request_affinity(request_id, &affinity_key_id, "tok1")
+            .await
+            .expect("record research affinity");
+        proxy
+            .key_store
+            .quarantine_key_by_id(
+                &affinity_key_id,
+                "/api/tavily/search",
+                "account_deactivated",
+                "Tavily account deactivated (HTTP 401)",
+                "deactivated",
+            )
+            .await
+            .expect("quarantine affinity key");
+
+        let err = proxy
+            .acquire_key_for_research_request(Some("tok1"), Some(request_id))
+            .await
+            .expect_err("result retrieval should not fall back to a different key");
+        assert!(matches!(err, ProxyError::NoAvailableKeys));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn classify_quarantine_reason_ignores_generic_unauthorized_errors() {
         let unauthorized = classify_quarantine_reason(Some(401), br#"{"error":"unauthorized"}"#);
@@ -14652,6 +14710,10 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
 
         let forbidden = classify_quarantine_reason(Some(403), br#"{"error":"forbidden"}"#);
         assert!(forbidden.is_none());
+
+        let invalid_payload_key =
+            classify_quarantine_reason(None, br#"{"error":"invalid key \"depth\""}"#);
+        assert!(invalid_payload_key.is_none());
     }
 
     #[tokio::test]
@@ -14794,6 +14856,70 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         .await
         .expect("count quarantine rows");
         assert_eq!(quarantine_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn quarantine_key_by_id_preserves_original_created_at() {
+        let db_path = temp_db_path("quarantine-created-at");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-quarantine-created-at".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let key_id: String = sqlx::query_scalar("SELECT id FROM api_keys LIMIT 1")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("seeded key id");
+
+        proxy
+            .key_store
+            .quarantine_key_by_id(
+                &key_id,
+                "/api/tavily/search",
+                "account_deactivated",
+                "Tavily account deactivated (HTTP 401)",
+                "first detail",
+            )
+            .await
+            .expect("first quarantine");
+
+        let first_created_at: i64 = sqlx::query_scalar(
+            "SELECT created_at FROM api_key_quarantines WHERE key_id = ? AND cleared_at IS NULL",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("first created_at");
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        proxy
+            .key_store
+            .quarantine_key_by_id(
+                &key_id,
+                "/api/tavily/search",
+                "account_deactivated",
+                "Tavily account deactivated (HTTP 401)",
+                "second detail",
+            )
+            .await
+            .expect("second quarantine");
+
+        let second_created_at: i64 = sqlx::query_scalar(
+            "SELECT created_at FROM api_key_quarantines WHERE key_id = ? AND cleared_at IS NULL",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("second created_at");
+        assert_eq!(second_created_at, first_created_at);
 
         let _ = std::fs::remove_file(db_path);
     }
