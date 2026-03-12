@@ -112,6 +112,12 @@
 
 ## Visual Evidence (PR)
 
+- source_type: storybook_canvas
+  story_id_or_title: Admin/Pages/TokenDetail/Dense Request Records
+  state: dense-request-records (dark theme)
+  evidence_note: 验证 Request Records 在高密度数据下的 Request Type 列、着色 badge 与收紧后的多选筛选头部布局。
+  image:
+  ![Token detail request type filter](./assets/token-detail-request-type-filter-dark.png)
 - 本地浏览器验收已完成：在 `http://127.0.0.1:58097/admin/tokens/497Q` 验证了 `Request Type` 列、多选 OR 语义筛选，以及 `MCP | batch` 展开后的 detail。
 - PR `#119` 已创建，`type:minor` / `channel:stable` 标签已补齐，CI checks 已转绿。
 - review-loop 首轮指出了 raw MCP 子路径折叠、legacy backfill 方式，以及多选筛选在跨时间窗 / 非第一页 SSE 下的状态问题；对应修复已在当前分支落地并重新回归。
