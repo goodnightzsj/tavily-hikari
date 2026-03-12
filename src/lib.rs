@@ -1335,7 +1335,7 @@ impl TavilyProxy {
 
     async fn maybe_quarantine_usage_error(
         &self,
-        lease: &ApiKeyLease,
+        key_id: &str,
         source: &str,
         err: &ProxyError,
     ) -> Result<(), ProxyError> {
@@ -1349,7 +1349,7 @@ impl TavilyProxy {
         };
         self.key_store
             .quarantine_key_by_id(
-                &lease.id,
+                key_id,
                 source,
                 &decision.reason_code,
                 &decision.reason_summary,
@@ -1641,7 +1641,7 @@ impl TavilyProxy {
         {
             Ok(usage) => usage,
             Err(err) => {
-                self.maybe_quarantine_usage_error(&lease, "/api/tavily/research#usage", &err)
+                self.maybe_quarantine_usage_error(&lease.id, "/api/tavily/research#usage", &err)
                     .await?;
                 return Err(err);
             }
@@ -1738,8 +1738,8 @@ impl TavilyProxy {
                     Ok(usage) => Some(usage),
                     Err(err) => {
                         self.maybe_quarantine_usage_error(
-                            &lease,
-                            "/api/tavily/research#usage",
+                            &lease.id,
+                            "/api/tavily/research#usage_after",
                             &err,
                         )
                         .await?;
@@ -3641,9 +3641,17 @@ impl TavilyProxy {
         let Some(secret) = self.key_store.fetch_api_key_secret(key_id).await? else {
             return Err(ProxyError::Database(sqlx::Error::RowNotFound));
         };
-        let (limit, remaining) = self
+        let (limit, remaining) = match self
             .fetch_usage_quota_for_secret(&secret, usage_base, None)
-            .await?;
+            .await
+        {
+            Ok(quota) => quota,
+            Err(err) => {
+                self.maybe_quarantine_usage_error(key_id, "/api/tavily/usage", &err)
+                    .await?;
+                return Err(err);
+            }
+        };
         let now = Utc::now().timestamp();
         self.key_store
             .update_quota_for_key(key_id, limit, remaining, now)
@@ -10736,20 +10744,27 @@ impl KeyStore {
         reason_detail: &str,
     ) -> Result<(), ProxyError> {
         let now = Utc::now().timestamp();
-        let active_exists = sqlx::query_scalar::<_, i64>(
+        let quarantine_id = nanoid!(12);
+        let insert_result = sqlx::query(
             r#"
-            SELECT 1
-            FROM api_key_quarantines
-            WHERE key_id = ? AND cleared_at IS NULL
-            LIMIT 1
+            INSERT INTO api_key_quarantines (
+                id, key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(key_id) WHERE cleared_at IS NULL DO NOTHING
             "#,
         )
+        .bind(quarantine_id)
         .bind(key_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .is_some();
+        .bind(source)
+        .bind(reason_code)
+        .bind(reason_summary)
+        .bind(reason_detail)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
 
-        if active_exists {
+        if insert_result.rows_affected() == 0 {
             sqlx::query(
                 r#"
                 UPDATE api_key_quarantines
@@ -10765,27 +10780,7 @@ impl KeyStore {
             .bind(key_id)
             .execute(&self.pool)
             .await?;
-            return Ok(());
         }
-
-        let quarantine_id = nanoid!(12);
-        sqlx::query(
-            r#"
-            INSERT INTO api_key_quarantines (
-                id, key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-            "#,
-        )
-        .bind(quarantine_id)
-        .bind(key_id)
-        .bind(source)
-        .bind(reason_code)
-        .bind(reason_summary)
-        .bind(reason_detail)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
 
         Ok(())
     }
@@ -11444,7 +11439,13 @@ impl KeyStore {
             r#"
             SELECT id
             FROM api_keys
-            WHERE deleted_at IS NULL AND (
+            WHERE deleted_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM api_key_quarantines aq
+                  WHERE aq.key_id = api_keys.id AND aq.cleared_at IS NULL
+              )
+              AND (
                 quota_synced_at IS NULL OR quota_synced_at = 0 OR quota_synced_at < ?
             )
             ORDER BY CASE WHEN quota_synced_at IS NULL OR quota_synced_at = 0 THEN 0 ELSE 1 END, quota_synced_at ASC
@@ -14663,6 +14664,128 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
     }
 
     #[tokio::test]
+    async fn quarantine_key_by_id_is_safe_under_concurrent_calls() {
+        let db_path = temp_db_path("quarantine-concurrent");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-quarantine-race".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let key_id: String = sqlx::query_scalar("SELECT id FROM api_keys LIMIT 1")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("seeded key id");
+        let store = proxy.key_store.clone();
+
+        let first = {
+            let store = store.clone();
+            let key_id = key_id.clone();
+            async move {
+                store
+                    .quarantine_key_by_id(
+                        &key_id,
+                        "/api/tavily/search",
+                        "account_deactivated",
+                        "Tavily account deactivated (HTTP 401)",
+                        "first detail",
+                    )
+                    .await
+            }
+        };
+        let second = {
+            let store = store.clone();
+            let key_id = key_id.clone();
+            async move {
+                store
+                    .quarantine_key_by_id(
+                        &key_id,
+                        "/api/tavily/search",
+                        "account_deactivated",
+                        "Tavily account deactivated (HTTP 401)",
+                        "second detail",
+                    )
+                    .await
+            }
+        };
+
+        let (first_result, second_result) = tokio::join!(first, second);
+        first_result.expect("first quarantine succeeds");
+        second_result.expect("second quarantine succeeds");
+
+        let quarantine_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM api_key_quarantines WHERE key_id = ? AND cleared_at IS NULL",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("count quarantine rows");
+        assert_eq!(quarantine_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn list_keys_pending_quota_sync_skips_quarantined_keys() {
+        let db_path = temp_db_path("quota-sync-skip-quarantine");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec![
+                "tvly-quota-sync-a".to_string(),
+                "tvly-quota-sync-b".to_string(),
+            ],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, api_key FROM api_keys ORDER BY api_key ASC",
+        )
+        .fetch_all(&proxy.key_store.pool)
+        .await
+        .expect("fetch keys");
+        let (quarantined_id, active_id) =
+            rows.into_iter()
+                .fold((None, None), |mut acc, (id, secret)| {
+                    if secret == "tvly-quota-sync-a" {
+                        acc.0 = Some(id);
+                    } else if secret == "tvly-quota-sync-b" {
+                        acc.1 = Some(id);
+                    }
+                    acc
+                });
+        let quarantined_id = quarantined_id.expect("quarantined key exists");
+        let active_id = active_id.expect("active key exists");
+
+        proxy
+            .key_store
+            .quarantine_key_by_id(
+                &quarantined_id,
+                "/api/tavily/usage",
+                "account_deactivated",
+                "Tavily account deactivated (HTTP 401)",
+                "deactivated",
+            )
+            .await
+            .expect("quarantine key");
+
+        let pending = proxy
+            .list_keys_pending_quota_sync(24 * 60 * 60)
+            .await
+            .expect("list pending keys");
+        assert_eq!(pending, vec![active_id]);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn research_usage_probe_401_quarantines_key() {
         let db_path = temp_db_path("research-usage-quarantine");
         let db_str = db_path.to_string_lossy().to_string();
@@ -14725,6 +14848,68 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                WHERE key_id = (SELECT id FROM api_keys WHERE api_key = ?) AND cleared_at IS NULL"#,
         )
         .bind(expected_api_key)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("count quarantine rows");
+        assert_eq!(quarantine_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn sync_key_quota_quarantines_usage_auth_failures() {
+        let db_path = temp_db_path("sync-usage-quarantine");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-sync-quarantine".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let key_id: String = sqlx::query_scalar("SELECT id FROM api_keys LIMIT 1")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("seeded key id");
+
+        let app = Router::new().route(
+            "/usage",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "detail": {
+                            "error": "The account associated with this API key has been deactivated."
+                        }
+                    })),
+                )
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+
+        let usage_base = format!("http://{addr}");
+        let err = proxy
+            .sync_key_quota(&key_id, &usage_base)
+            .await
+            .expect_err("sync should fail");
+        match err {
+            ProxyError::UsageHttp { status, .. } => assert_eq!(status, StatusCode::UNAUTHORIZED),
+            other => panic!("expected usage http error, got {other:?}"),
+        }
+
+        let quarantine_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM api_key_quarantines WHERE key_id = ? AND cleared_at IS NULL",
+        )
+        .bind(&key_id)
         .fetch_one(&proxy.key_store.pool)
         .await
         .expect("count quarantine rows");
