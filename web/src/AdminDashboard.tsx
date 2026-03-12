@@ -1,6 +1,7 @@
 import { Icon } from '@iconify/react'
 import { StatusBadge, type StatusTone } from './components/StatusBadge'
 import AdminTablePagination from './components/AdminTablePagination'
+import AdminLoadingRegion from './components/AdminLoadingRegion'
 import AdminTableShell from './components/AdminTableShell'
 import { ApiKeysValidationDialog } from './components/ApiKeysValidationDialog'
 import QuotaRangeField from './components/QuotaRangeField'
@@ -30,6 +31,13 @@ import TokenDetail from './pages/TokenDetail'
 import AdminShell, { type AdminNavItem } from './admin/AdminShell'
 import DashboardOverview from './admin/DashboardOverview'
 import ModulePlaceholder from './admin/ModulePlaceholder'
+import {
+  type QueryLoadState,
+  getBlockingLoadState,
+  getRefreshingLoadState,
+  isBlockingLoadState,
+  isRefreshingLoadState,
+} from './admin/queryLoadState'
 import {
   buildQuotaSliderTrack,
   clampQuotaSliderStageIndex,
@@ -623,6 +631,7 @@ function AdminDashboard(): JSX.Element {
   const translations = useTranslate()
   const adminStrings = translations.admin
   const headerStrings = adminStrings.header
+  const loadingStateStrings = adminStrings.loadingStates
   const userConsoleHref = ADMIN_USER_CONSOLE_HREF
   const tokenStrings = adminStrings.tokens
   const tokenLeaderboardStrings = adminStrings.tokenLeaderboard
@@ -647,13 +656,14 @@ function AdminDashboard(): JSX.Element {
   const [tokensPage, setTokensPage] = useState(1)
   const tokensPerPage = 10
   const [tokensTotal, setTokensTotal] = useState(0)
+  const [tokensLoadState, setTokensLoadState] = useState<QueryLoadState>('initial_loading')
   const [tokenGroups, setTokenGroups] = useState<TokenGroup[]>([])
   const [selectedTokenGroupName, setSelectedTokenGroupName] = useState<string | null>(null)
   const [selectedTokenUngrouped, setSelectedTokenUngrouped] = useState(false)
   const [tokenGroupsExpanded, setTokenGroupsExpanded] = useState(false)
   const [tokenGroupsCollapsedOverflowing, setTokenGroupsCollapsedOverflowing] = useState(false)
   const [tokenLeaderboard, setTokenLeaderboard] = useState<TokenUsageLeaderboardItem[]>([])
-  const [tokenLeaderboardLoading, setTokenLeaderboardLoading] = useState(false)
+  const [tokenLeaderboardLoadState, setTokenLeaderboardLoadState] = useState<QueryLoadState>('initial_loading')
   const [tokenLeaderboardError, setTokenLeaderboardError] = useState<string | null>(null)
   const [tokenLeaderboardPeriod, setTokenLeaderboardPeriod] = useState<TokenLeaderboardPeriod>('day')
   const [tokenLeaderboardFocus, setTokenLeaderboardFocus] = useState<TokenLeaderboardFocus>('usage')
@@ -663,19 +673,24 @@ function AdminDashboard(): JSX.Element {
   const [logsTotal, setLogsTotal] = useState(0)
   const [logsPage, setLogsPage] = useState(1)
   const [logResultFilter, setLogResultFilter] = useState<'all' | 'success' | 'error' | 'quota_exhausted'>('all')
+  const [requestsLoadState, setRequestsLoadState] = useState<QueryLoadState>('initial_loading')
+  const [requestsError, setRequestsError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<JobLogView[]>([])
   const [dashboardJobs, setDashboardJobs] = useState<JobLogView[]>([])
   const [jobFilter, setJobFilter] = useState<'all' | 'quota' | 'usage' | 'logs'>('all')
   const [jobsPage, setJobsPage] = useState(1)
   const jobsPerPage = 10
   const [jobsTotal, setJobsTotal] = useState(0)
+  const [jobsLoadState, setJobsLoadState] = useState<QueryLoadState>('initial_loading')
+  const [jobsError, setJobsError] = useState<string | null>(null)
   const [users, setUsers] = useState<AdminUserSummary[]>([])
   const [usersTotal, setUsersTotal] = useState(0)
   const [usersPage, setUsersPage] = useState(1)
   const [usersQueryInput, setUsersQueryInput] = useState('')
   const [usersQuery, setUsersQuery] = useState('')
   const [usersTagFilterId, setUsersTagFilterId] = useState<string | null>(null)
-  const [usersLoading, setUsersLoading] = useState(false)
+  const [usersLoadState, setUsersLoadState] = useState<QueryLoadState>('initial_loading')
+  const [usersError, setUsersError] = useState<string | null>(null)
   const [selectedUserDetail, setSelectedUserDetail] = useState<AdminUserDetail | null>(null)
   const [userDetailLoading, setUserDetailLoading] = useState(false)
   const [userQuotaSnapshot, setUserQuotaSnapshot] = useState<UserQuotaSnapshot | null>(null)
@@ -702,6 +717,17 @@ function AdminDashboard(): JSX.Element {
   const loadDashboardOverviewRef = useRef<((signal?: AbortSignal) => Promise<void>) | null>(null)
   const dashboardOverviewInFlightRef = useRef(false)
   const dashboardOverviewLastSseRefreshAtRef = useRef(0)
+  const baseDataLoadedRef = useRef(false)
+  const tokenLeaderboardQueryKeyRef = useRef<string | null>(null)
+  const tokenLeaderboardNonceRef = useRef(0)
+  const requestsLoadedRef = useRef(false)
+  const jobsLoadedRef = useRef(false)
+  const usersLoadedRef = useRef(false)
+  const usersQueryKeyRef = useRef<string | null>(null)
+  const baseDataAbortRef = useRef<AbortController | null>(null)
+  const requestsAbortRef = useRef<AbortController | null>(null)
+  const jobsAbortRef = useRef<AbortController | null>(null)
+  const usersAbortRef = useRef<AbortController | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [version, setVersion] = useState<{ backend: string; frontend: string } | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
@@ -988,6 +1014,35 @@ function AdminDashboard(): JSX.Element {
     return secret
   }, [])
 
+  const beginManagedRequest = useCallback(
+    (ref: { current: AbortController | null }, upstreamSignal?: AbortSignal) => {
+      ref.current?.abort()
+      const controller = new AbortController()
+      ref.current = controller
+      const forwardAbort = () => controller.abort()
+      if (upstreamSignal) {
+        if (upstreamSignal.aborted) {
+          controller.abort()
+        } else {
+          upstreamSignal.addEventListener('abort', forwardAbort, { once: true })
+        }
+      }
+      return {
+        signal: controller.signal,
+        abort: () => controller.abort(),
+        cleanup: () => {
+          if (upstreamSignal) {
+            upstreamSignal.removeEventListener('abort', forwardAbort)
+          }
+          if (ref.current === controller) {
+            ref.current = null
+          }
+        },
+      }
+    },
+    [],
+  )
+
   const loadAllTokensForDashboard = useCallback(async (
     signal?: AbortSignal,
   ): Promise<{ items: AuthToken[]; truncated: boolean }> => {
@@ -1034,18 +1089,36 @@ function AdminDashboard(): JSX.Element {
   )
 
   const loadData = useCallback(
-    async (signal?: AbortSignal) => {
+    async ({
+      signal,
+      reason = 'refresh',
+      showGlobalLoading = false,
+    }: {
+      signal?: AbortSignal
+      reason?: 'initial' | 'switch' | 'refresh'
+      showGlobalLoading?: boolean
+    } = {}) => {
+      const request = beginManagedRequest(baseDataAbortRef, signal)
+      setTokensLoadState(
+        reason === 'refresh'
+          ? getRefreshingLoadState(baseDataLoadedRef.current)
+          : getBlockingLoadState(baseDataLoadedRef.current),
+      )
+      if (reason !== 'refresh') {
+        setTokens([])
+        setTokensTotal(0)
+      }
       try {
         const [summaryData, keyData, ver, profileData, tokenData, tokenGroupsData] = await Promise.all([
-          fetchSummary(signal),
-          fetchApiKeys(signal),
-          fetchVersion(signal).catch(() => null),
-          fetchProfile(signal).catch(() => null),
+          fetchSummary(request.signal),
+          fetchApiKeys(request.signal),
+          fetchVersion(request.signal).catch(() => null),
+          fetchProfile(request.signal).catch(() => null),
           fetchTokens(
             tokensPage,
             tokensPerPage,
             { group: selectedTokenGroupName, ungrouped: selectedTokenUngrouped },
-            signal,
+            request.signal,
           ).catch(
             () =>
               ({
@@ -1055,10 +1128,10 @@ function AdminDashboard(): JSX.Element {
                 perPage: tokensPerPage,
               }) as Paginated<AuthToken>,
           ),
-          fetchTokenGroups(signal).catch(() => [] as TokenGroup[]),
+          fetchTokenGroups(request.signal).catch(() => [] as TokenGroup[]),
         ])
 
-        if (signal?.aborted) {
+        if (request.signal.aborted) {
           return
         }
 
@@ -1071,18 +1144,22 @@ function AdminDashboard(): JSX.Element {
         setVersion(ver ?? null)
         setLastUpdated(new Date())
         setError(null)
+        setTokensLoadState('ready')
+        baseDataLoadedRef.current = true
       } catch (err) {
         if ((err as Error).name === 'AbortError') {
           return
         }
         setError(err instanceof Error ? err.message : 'Unexpected error occurred')
+        setTokensLoadState('error')
       } finally {
-        if (!(signal?.aborted ?? false)) {
+        if (showGlobalLoading && !request.signal.aborted) {
           setLoading(false)
         }
+        request.cleanup()
       }
     },
-    [tokensPage, selectedTokenGroupName, selectedTokenUngrouped],
+    [beginManagedRequest, tokensPage, selectedTokenGroupName, selectedTokenUngrouped],
   )
 
   const loadDashboardOverview = useCallback(
@@ -1151,10 +1228,23 @@ function AdminDashboard(): JSX.Element {
   }, [loadDashboardOverview])
 
   const loadTokenLeaderboard = useCallback(
-    async (signal?: AbortSignal) => {
+    async ({
+      signal,
+      reason = 'refresh',
+    }: {
+      signal?: AbortSignal
+      reason?: 'initial' | 'switch' | 'refresh'
+    } = {}) => {
       try {
-        setTokenLeaderboardLoading(true)
+        setTokenLeaderboardLoadState(
+          reason === 'refresh'
+            ? getRefreshingLoadState(tokenLeaderboardQueryKeyRef.current != null)
+            : getBlockingLoadState(tokenLeaderboardQueryKeyRef.current != null),
+        )
         setTokenLeaderboardError(null)
+        if (reason !== 'refresh') {
+          setTokenLeaderboard([])
+        }
         const items = await fetchTokenUsageLeaderboard(
           tokenLeaderboardPeriod,
           tokenLeaderboardFocus,
@@ -1163,24 +1253,30 @@ function AdminDashboard(): JSX.Element {
         if (signal?.aborted) return
         const sorted = sortLeaderboard(items, tokenLeaderboardPeriod, tokenLeaderboardFocus).slice(0, 50)
         setTokenLeaderboard(sorted)
+        setTokenLeaderboardLoadState('ready')
+        tokenLeaderboardQueryKeyRef.current = `${tokenLeaderboardPeriod}:${tokenLeaderboardFocus}`
+        tokenLeaderboardNonceRef.current = tokenLeaderboardNonce
       } catch (err) {
         if (signal?.aborted) return
         console.error(err)
         setTokenLeaderboard([])
         setTokenLeaderboardError(err instanceof Error ? err.message : tokenLeaderboardStrings.error)
-      } finally {
-        if (!(signal?.aborted ?? false)) {
-          setTokenLeaderboardLoading(false)
-        }
+        setTokenLeaderboardLoadState('error')
       }
   },
-    [tokenLeaderboardFocus, tokenLeaderboardPeriod, tokenLeaderboardStrings.error],
+    [tokenLeaderboardFocus, tokenLeaderboardNonce, tokenLeaderboardPeriod, tokenLeaderboardStrings.error],
   )
 
   useEffect(() => {
     const controller = new AbortController()
-    setLoading(true)
-    void loadData(controller.signal)
+    if (!baseDataLoadedRef.current) {
+      setLoading(true)
+    }
+    void loadData({
+      signal: controller.signal,
+      reason: baseDataLoadedRef.current ? 'switch' : 'initial',
+      showGlobalLoading: !baseDataLoadedRef.current,
+    })
     return () => controller.abort()
   }, [loadData])
 
@@ -1196,68 +1292,86 @@ function AdminDashboard(): JSX.Element {
 
   useEffect(() => {
     const controller = new AbortController()
-    void loadTokenLeaderboard(controller.signal)
+    const queryKey = `${tokenLeaderboardPeriod}:${tokenLeaderboardFocus}`
+    const isRefreshOnly =
+      tokenLeaderboardQueryKeyRef.current === queryKey && tokenLeaderboardNonceRef.current !== tokenLeaderboardNonce
+    void loadTokenLeaderboard({
+      signal: controller.signal,
+      reason: isRefreshOnly ? 'refresh' : tokenLeaderboardQueryKeyRef.current ? 'switch' : 'initial',
+    })
     return () => controller.abort()
-  }, [loadTokenLeaderboard, tokenLeaderboardNonce])
+  }, [loadTokenLeaderboard, tokenLeaderboardFocus, tokenLeaderboardNonce, tokenLeaderboardPeriod])
 
   // Logs list: backend pagination & result filter
   useEffect(() => {
-    const controller = new AbortController()
+    const request = beginManagedRequest(requestsAbortRef)
     const resultParam =
       logResultFilter === 'all' ? undefined : (logResultFilter as 'success' | 'error' | 'quota_exhausted')
+    setRequestsLoadState(getBlockingLoadState(requestsLoadedRef.current))
+    setRequestsError(null)
+    setLogs([])
+    setLogsTotal(0)
+    setExpandedLogs(new Set())
 
-    fetchRequestLogs(logsPage, LOGS_PER_PAGE, resultParam, controller.signal)
+    fetchRequestLogs(logsPage, LOGS_PER_PAGE, resultParam, request.signal)
       .then((result) => {
-        if (controller.signal.aborted) return
+        if (request.signal.aborted) return
         setLogs(result.items)
         setLogsTotal(result.total)
-        setExpandedLogs((previous) => {
-          if (previous.size === 0) return new Set()
-          const visibleIds = new Set(result.items.map((item) => item.id))
-          const next = new Set<number>()
-          for (const id of previous) {
-            if (visibleIds.has(id)) next.add(id)
-          }
-          return next
-        })
+        setRequestsLoadState('ready')
+        requestsLoadedRef.current = true
       })
       .catch((err) => {
-        if (controller.signal.aborted) return
+        if (request.signal.aborted) return
         console.error(err)
         setLogs([])
         setLogsTotal(0)
+        setRequestsError(err instanceof Error ? err.message : loadingStateStrings.error)
+        setRequestsLoadState('error')
+      })
+      .finally(() => {
+        request.cleanup()
       })
 
-    return () => controller.abort()
-  }, [logsPage, logResultFilter])
+    return () => {
+      request.abort()
+      request.cleanup()
+    }
+  }, [beginManagedRequest, logsPage, logResultFilter])
 
   // Jobs list: refetch when filter or page changes
   useEffect(() => {
-    const controller = new AbortController()
-    fetchJobs(jobsPage, jobsPerPage, jobFilter, controller.signal)
+    const request = beginManagedRequest(jobsAbortRef)
+    setJobsLoadState(getBlockingLoadState(jobsLoadedRef.current))
+    setJobsError(null)
+    setJobs([])
+    setJobsTotal(0)
+    setExpandedJobs(new Set())
+    fetchJobs(jobsPage, jobsPerPage, jobFilter, request.signal)
       .then((result) => {
-        if (!controller.signal.aborted) {
+        if (!request.signal.aborted) {
           setJobs(result.items)
           setJobsTotal(result.total)
-          setExpandedJobs((previous) => {
-            if (previous.size === 0) return new Set()
-            const visibleIds = new Set(result.items.map((item) => item.id))
-            const next = new Set<number>()
-            for (const id of previous) {
-              if (visibleIds.has(id)) next.add(id)
-            }
-            return next
-          })
+          setJobsLoadState('ready')
+          jobsLoadedRef.current = true
         }
       })
       .catch(() => {
-        if (!controller.signal.aborted) {
+        if (!request.signal.aborted) {
           setJobs([])
           setJobsTotal(0)
+          setJobsError(loadingStateStrings.error)
+          setJobsLoadState('error')
         }
       })
-    return () => controller.abort()
-  }, [jobFilter, jobsPage])
+      .finally(() => {
+        request.cleanup()
+      })
+    return () => {
+      request.abort()
+      request.cleanup()
+    }
+  }, [beginManagedRequest, jobFilter, jobsPage])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1276,28 +1390,43 @@ function AdminDashboard(): JSX.Element {
       (route.name === 'module' && route.module === 'users') || route.name === 'user'
     if (!usersRouteActive) return
 
-    const controller = new AbortController()
-    setUsersLoading(true)
-    fetchAdminUsers(usersPage, USERS_PER_PAGE, usersQuery, usersTagFilterId, controller.signal)
+    const request = beginManagedRequest(usersAbortRef)
+    const nextQueryKey = `${usersPage}:${usersQuery}:${usersTagFilterId ?? ''}`
+    const sameQueryRefresh = usersLoadedRef.current && usersQueryKeyRef.current === nextQueryKey
+    setUsersLoadState(
+      sameQueryRefresh ? getRefreshingLoadState(true) : getBlockingLoadState(usersLoadedRef.current),
+    )
+    setUsersError(null)
+    if (!sameQueryRefresh) {
+      setUsers([])
+      setUsersTotal(0)
+    }
+    fetchAdminUsers(usersPage, USERS_PER_PAGE, usersQuery, usersTagFilterId, request.signal)
       .then((result) => {
-        if (controller.signal.aborted) return
+        if (request.signal.aborted) return
         setUsers(result.items)
         setUsersTotal(result.total)
+        setUsersLoadState('ready')
+        usersLoadedRef.current = true
+        usersQueryKeyRef.current = nextQueryKey
       })
       .catch((err) => {
-        if (controller.signal.aborted) return
+        if (request.signal.aborted) return
         console.error(err)
         setUsers([])
         setUsersTotal(0)
+        setUsersError(err instanceof Error ? err.message : loadingStateStrings.error)
+        setUsersLoadState('error')
       })
       .finally(() => {
-        if (!controller.signal.aborted) {
-          setUsersLoading(false)
-        }
+        request.cleanup()
       })
 
-    return () => controller.abort()
-  }, [route, usersPage, usersQuery, usersTagFilterId])
+    return () => {
+      request.abort()
+      request.cleanup()
+    }
+  }, [beginManagedRequest, route, usersPage, usersQuery, usersTagFilterId])
 
   useEffect(() => {
     const userTagRouteActive =
@@ -1410,7 +1539,7 @@ function AdminDashboard(): JSX.Element {
     if (pollingTimerRef.current == null) {
       pollingTimerRef.current = window.setInterval(() => {
         const controller = new AbortController()
-        const tasks: Array<Promise<unknown>> = [loadData(controller.signal)]
+        const tasks: Array<Promise<unknown>> = [loadData({ signal: controller.signal, reason: 'refresh' })]
         if (route.name === 'module' && route.module === 'dashboard') {
           tasks.push(loadDashboardOverview(controller.signal))
         }
@@ -1620,7 +1749,75 @@ function AdminDashboard(): JSX.Element {
     const controller = new AbortController()
     setLoading(true)
     setTokenLeaderboardNonce((value) => value + 1)
-    const tasks: Array<Promise<unknown>> = [loadData(controller.signal)]
+    const tasks: Array<Promise<unknown>> = [loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })]
+    if (route.name === 'module' && route.module === 'requests') {
+      const request = beginManagedRequest(requestsAbortRef, controller.signal)
+      setRequestsLoadState(getRefreshingLoadState(requestsLoadedRef.current))
+      setRequestsError(null)
+      tasks.push(
+        fetchRequestLogs(
+          logsPage,
+          LOGS_PER_PAGE,
+          logResultFilter === 'all' ? undefined : (logResultFilter as 'success' | 'error' | 'quota_exhausted'),
+          request.signal,
+        )
+          .then((result) => {
+            if (request.signal.aborted) return
+            setLogs(result.items)
+            setLogsTotal(result.total)
+            setRequestsLoadState('ready')
+          })
+          .catch((err) => {
+            if (request.signal.aborted) return
+            console.error(err)
+            setRequestsError(err instanceof Error ? err.message : loadingStateStrings.error)
+            setRequestsLoadState('error')
+          })
+          .finally(() => {
+            request.cleanup()
+          }),
+      )
+    }
+    if (route.name === 'module' && route.module === 'jobs') {
+      const request = beginManagedRequest(jobsAbortRef, controller.signal)
+      setJobsLoadState(getRefreshingLoadState(jobsLoadedRef.current))
+      setJobsError(null)
+      tasks.push(
+        fetchJobs(jobsPage, jobsPerPage, jobFilter, request.signal).then((result) => {
+          if (request.signal.aborted) return
+          setJobs(result.items)
+          setJobsTotal(result.total)
+          setJobsLoadState('ready')
+        }).catch((err) => {
+          if (request.signal.aborted) return
+          console.error(err)
+          setJobsError(err instanceof Error ? err.message : loadingStateStrings.error)
+          setJobsLoadState('error')
+        }).finally(() => {
+          request.cleanup()
+        }),
+      )
+    }
+    if ((route.name === 'module' && route.module === 'users') || route.name === 'user') {
+      const request = beginManagedRequest(usersAbortRef, controller.signal)
+      setUsersLoadState(getRefreshingLoadState(usersLoadedRef.current))
+      setUsersError(null)
+      tasks.push(
+        fetchAdminUsers(usersPage, USERS_PER_PAGE, usersQuery, usersTagFilterId, request.signal).then((result) => {
+          if (request.signal.aborted) return
+          setUsers(result.items)
+          setUsersTotal(result.total)
+          setUsersLoadState('ready')
+        }).catch((err) => {
+          if (request.signal.aborted) return
+          console.error(err)
+          setUsersError(err instanceof Error ? err.message : loadingStateStrings.error)
+          setUsersLoadState('error')
+        }).finally(() => {
+          request.cleanup()
+        }),
+      )
+    }
     if (route.name === 'module' && route.module === 'dashboard') {
       tasks.push(loadDashboardOverview(controller.signal))
     }
@@ -1967,6 +2164,22 @@ function AdminDashboard(): JSX.Element {
   const logsTotalPages = Math.min(logsTotalPagesRaw, LOGS_MAX_PAGES)
 
   const safeLogsPage = Math.min(logsPage, logsTotalPages)
+  const tokensBlocking = isBlockingLoadState(tokensLoadState)
+  const tokensRefreshing = isRefreshingLoadState(tokensLoadState)
+  const requestsBlocking = isBlockingLoadState(requestsLoadState)
+  const requestsRefreshing = isRefreshingLoadState(requestsLoadState)
+  const jobsBlocking = isBlockingLoadState(jobsLoadState)
+  const jobsRefreshing = isRefreshingLoadState(jobsLoadState)
+  const usersBlocking = isBlockingLoadState(usersLoadState)
+  const usersRefreshing = isRefreshingLoadState(usersLoadState)
+  const tokenLeaderboardBlocking = isBlockingLoadState(tokenLeaderboardLoadState)
+  const tokenLeaderboardRefreshing = isRefreshingLoadState(tokenLeaderboardLoadState)
+  const activeModuleBlocking =
+    (route.name === 'module' && route.module === 'tokens' && tokensBlocking)
+    || (route.name === 'module' && route.module === 'requests' && requestsBlocking)
+    || (route.name === 'module' && route.module === 'jobs' && jobsBlocking)
+    || ((route.name === 'module' && route.module === 'users') || route.name === 'user') && usersBlocking
+    || (route.name === 'token-usage' && tokenLeaderboardBlocking)
 
   const displayName = profile?.displayName ?? null
 
@@ -2274,7 +2487,7 @@ function AdminDashboard(): JSX.Element {
       }
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -2296,7 +2509,7 @@ function AdminDashboard(): JSX.Element {
       try { await navigator.clipboard?.writeText(token) } catch {}
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -2618,7 +2831,7 @@ function AdminDashboard(): JSX.Element {
       setTokensPage(1)
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -2670,7 +2883,7 @@ function AdminDashboard(): JSX.Element {
       await setTokenEnabled(id, !enabled)
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -2694,7 +2907,7 @@ function AdminDashboard(): JSX.Element {
       setPendingTokenDeleteId(null)
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -2722,7 +2935,7 @@ function AdminDashboard(): JSX.Element {
       setEditingTokenNote('')
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -2751,7 +2964,7 @@ function AdminDashboard(): JSX.Element {
       setPendingDeleteId(null)
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -2772,7 +2985,7 @@ function AdminDashboard(): JSX.Element {
       await setKeyStatus(id, toDisabled ? 'disabled' : 'active')
       const controller = new AbortController()
       setLoading(true)
-      await loadData(controller.signal)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
       controller.abort()
     } catch (err) {
       console.error(err)
@@ -3232,7 +3445,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectModule={navigateModule}
       >
-        <KeyDetails id={route.id} onBack={() => navigateModule('keys')} />
+        <KeyDetails key={route.id} id={route.id} onBack={() => navigateModule('keys')} />
       </AdminShell>
     )
   }
@@ -3244,7 +3457,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectModule={navigateModule}
       >
-        <TokenDetail id={route.id} onBack={() => navigateModule('tokens')} onOpenUser={navigateUser} />
+        <TokenDetail key={route.id} id={route.id} onBack={() => navigateModule('tokens')} onOpenUser={navigateUser} />
       </AdminShell>
     )
   }
@@ -3806,7 +4019,7 @@ function AdminDashboard(): JSX.Element {
           refreshingLabel={headerStrings.refreshing}
           userConsoleLabel={headerStrings.returnToConsole}
           userConsoleHref={userConsoleHref}
-          isRefreshing={tokenLeaderboardLoading}
+          isRefreshing={tokenLeaderboardRefreshing}
           period={tokenLeaderboardPeriod}
           focus={tokenLeaderboardFocus}
           periodOptions={[
@@ -3819,16 +4032,22 @@ function AdminDashboard(): JSX.Element {
             { value: 'errors', label: tokenLeaderboardStrings.focus.errors },
             { value: 'other', label: tokenLeaderboardStrings.focus.other },
           ]}
+          controlsDisabled={tokenLeaderboardBlocking}
           onBack={() => navigateModule('tokens')}
           onRefresh={() => setTokenLeaderboardNonce((x) => x + 1)}
           onPeriodChange={setTokenLeaderboardPeriod}
           onFocusChange={setTokenLeaderboardFocus}
         />
         <section className="surface panel token-leaderboard-panel">
-          <div className="table-wrapper jobs-table-wrapper token-leaderboard-wrapper admin-responsive-up">
+          <AdminLoadingRegion
+            className="table-wrapper jobs-table-wrapper token-leaderboard-wrapper admin-responsive-up"
+            loadState={tokenLeaderboardLoadState}
+            loadingLabel={tokenLeaderboardRefreshing ? loadingStateStrings.refreshing : tokenLeaderboardStrings.empty.loading}
+            minHeight={340}
+          >
           {tokenLeaderboardView.length === 0 ? (
             <div className="empty-state alert">
-              {tokenLeaderboardLoading ? tokenLeaderboardStrings.empty.loading : tokenLeaderboardStrings.empty.none}
+              {tokenLeaderboardStrings.empty.none}
             </div>
           ) : (
             <Table className="jobs-table token-leaderboard-table">
@@ -3897,11 +4116,16 @@ function AdminDashboard(): JSX.Element {
                 </tbody>
               </Table>
             )}
-          </div>
-          <div className="admin-mobile-list admin-responsive-down">
+          </AdminLoadingRegion>
+          <AdminLoadingRegion
+            className="admin-mobile-list admin-responsive-down"
+            loadState={tokenLeaderboardLoadState}
+            loadingLabel={tokenLeaderboardRefreshing ? loadingStateStrings.refreshing : tokenLeaderboardStrings.empty.loading}
+            minHeight={260}
+          >
             {tokenLeaderboardView.length === 0 ? (
               <div className="empty-state alert">
-                {tokenLeaderboardLoading ? tokenLeaderboardStrings.empty.loading : tokenLeaderboardStrings.empty.none}
+                {tokenLeaderboardStrings.empty.none}
               </div>
             ) : (
               tokenLeaderboardView.map((item) => (
@@ -3952,7 +4176,7 @@ function AdminDashboard(): JSX.Element {
                 </article>
               ))
             )}
-          </div>
+          </AdminLoadingRegion>
           {tokenLeaderboardError && tokenLeaderboardView.length === 0 && (
             <div className="surface error-banner" style={{ marginTop: 12 }}>
               {tokenLeaderboardError}
@@ -4113,6 +4337,7 @@ function AdminDashboard(): JSX.Element {
         updatedPrefix={headerStrings.updatedPrefix}
         updatedTime={lastUpdated ? timeOnlyFormatter.format(lastUpdated) : null}
         isRefreshing={loading}
+        refreshDisabled={activeModuleBlocking}
         refreshLabel={headerStrings.refreshNow}
         refreshingLabel={headerStrings.refreshing}
         userConsoleLabel={headerStrings.returnToConsole}
@@ -4215,6 +4440,7 @@ function AdminDashboard(): JSX.Element {
                     !selectedTokenUngrouped && selectedTokenGroupName == null ? ' token-group-chip-active' : ''
                   }`}
                   onClick={handleSelectTokenGroupAll}
+                  disabled={tokensBlocking}
                 >
                   <span className="token-group-name">{tokenStrings.groups.all}</span>
                 </button>
@@ -4223,6 +4449,7 @@ function AdminDashboard(): JSX.Element {
                     type="button"
                     className={`token-group-chip${selectedTokenUngrouped ? ' token-group-chip-active' : ''}`}
                     onClick={handleSelectTokenGroupUngrouped}
+                    disabled={tokensBlocking}
                   >
                     <span className="token-group-name">{tokenStrings.groups.ungrouped}</span>
                     {tokenGroupsExpanded && (
@@ -4240,6 +4467,7 @@ function AdminDashboard(): JSX.Element {
                       !selectedTokenUngrouped && selectedTokenGroupName === group.name ? ' token-group-chip-active' : ''
                     }`}
                     onClick={() => handleSelectTokenGroupNamed(group.name)}
+                    disabled={tokensBlocking}
                   >
                     <span className="token-group-name">{group.name}</span>
                     {tokenGroupsExpanded && (
@@ -4256,6 +4484,7 @@ function AdminDashboard(): JSX.Element {
                   className={`token-group-chip token-group-toggle${tokenGroupsExpanded ? ' token-group-toggle-active' : ''}`}
                   onClick={toggleTokenGroupsExpanded}
                   aria-label={tokenGroupsExpanded ? tokenStrings.groups.moreHide : tokenStrings.groups.moreShow}
+                  disabled={tokensBlocking}
                 >
                   <Icon icon={tokenGroupsExpanded ? 'mdi:chevron-up' : 'mdi:chevron-down'} width={18} height={18} />
                 </button>
@@ -4263,11 +4492,23 @@ function AdminDashboard(): JSX.Element {
             </div>
           </div>
         )}
-        <div className="table-wrapper jobs-table-wrapper admin-responsive-up">
+        <AdminTableShell
+          className="jobs-table-wrapper admin-responsive-up"
+          tableClassName="jobs-table tokens-table"
+          loadState={tokensLoadState}
+          loadingLabel={tokensRefreshing ? loadingStateStrings.refreshing : tokenStrings.empty.loading}
+          minHeight={320}
+        >
           {tokenList.length === 0 ? (
-            <div className="empty-state alert">{loading ? tokenStrings.empty.loading : tokenStrings.empty.none}</div>
+            <tbody>
+              <tr>
+                <td colSpan={isAdmin ? 7 : 6}>
+                  <div className="empty-state alert">{tokenStrings.empty.none}</div>
+                </td>
+              </tr>
+            </tbody>
           ) : (
-            <Table className="jobs-table tokens-table">
+            <>
               <thead>
                 <tr>
                   <th>{tokenStrings.table.id}</th>
@@ -4416,12 +4657,17 @@ function AdminDashboard(): JSX.Element {
                   )
                 })}
               </tbody>
-            </Table>
+            </>
           )}
-        </div>
-        <div className="admin-mobile-list admin-responsive-down">
+        </AdminTableShell>
+        <AdminLoadingRegion
+          className="admin-mobile-list admin-responsive-down"
+          loadState={tokensLoadState}
+          loadingLabel={tokensRefreshing ? loadingStateStrings.refreshing : tokenStrings.empty.loading}
+          minHeight={260}
+        >
           {tokenList.length === 0 ? (
-            <div className="empty-state alert">{loading ? tokenStrings.empty.loading : tokenStrings.empty.none}</div>
+            <div className="empty-state alert">{tokenStrings.empty.none}</div>
           ) : (
             tokenList.map((t) => {
               const stateKey = copyStateKey('tokens', t.id)
@@ -4510,7 +4756,7 @@ function AdminDashboard(): JSX.Element {
               )
             })
           )}
-        </div>
+        </AdminLoadingRegion>
         {tokensTotal > tokensPerPage && (
           <AdminTablePagination
             page={tokensPage}
@@ -4526,6 +4772,7 @@ function AdminDashboard(): JSX.Element {
             nextLabel={tokenStrings.pagination.next}
             previousDisabled={tokensPage <= 1}
             nextDisabled={tokensPage >= totalPages}
+            disabled={tokensBlocking}
             onPrevious={goPrevPage}
             onNext={goNextPage}
           />
@@ -4938,14 +5185,28 @@ function AdminDashboard(): JSX.Element {
                 { value: 'quota_exhausted', label: logStrings.filters.quota },
               ]}
               ariaLabel={logStrings.title}
+              disabled={requestsBlocking}
             />
           </div>
         </div>
-        <div className="table-wrapper jobs-table-wrapper admin-responsive-up">
+        <AdminTableShell
+          className="jobs-table-wrapper admin-responsive-up"
+          tableClassName="admin-logs-table"
+          loadState={requestsLoadState}
+          loadingLabel={requestsRefreshing ? loadingStateStrings.refreshing : logStrings.empty.loading}
+          errorLabel={requestsError ?? loadingStateStrings.error}
+          minHeight={320}
+        >
           {logs.length === 0 ? (
-            <div className="empty-state alert">{loading ? logStrings.empty.loading : logStrings.empty.none}</div>
+            <tbody>
+              <tr>
+                <td colSpan={7}>
+                  <div className="empty-state alert">{logStrings.empty.none}</div>
+                </td>
+              </tr>
+            </tbody>
           ) : (
-            <Table className="admin-logs-table">
+            <>
               <thead>
                 <tr>
                   <th>{logStrings.table.time}</th>
@@ -4970,12 +5231,18 @@ function AdminDashboard(): JSX.Element {
                   />
                 ))}
               </tbody>
-            </Table>
+            </>
           )}
-        </div>
-        <div className="admin-mobile-list admin-responsive-down">
+        </AdminTableShell>
+        <AdminLoadingRegion
+          className="admin-mobile-list admin-responsive-down"
+          loadState={requestsLoadState}
+          loadingLabel={requestsRefreshing ? loadingStateStrings.refreshing : logStrings.empty.loading}
+          errorLabel={requestsError ?? loadingStateStrings.error}
+          minHeight={240}
+        >
           {logs.length === 0 ? (
-            <div className="empty-state alert">{loading ? logStrings.empty.loading : logStrings.empty.none}</div>
+            <div className="empty-state alert">{logStrings.empty.none}</div>
           ) : (
             logs.map((log) => (
               <article key={log.id} className="admin-mobile-card">
@@ -5016,7 +5283,7 @@ function AdminDashboard(): JSX.Element {
               </article>
             ))
           )}
-        </div>
+        </AdminLoadingRegion>
         {hasLogsPagination && (
           <AdminTablePagination
             page={safeLogsPage}
@@ -5026,6 +5293,7 @@ function AdminDashboard(): JSX.Element {
             nextLabel={tokenStrings.pagination.next}
             previousDisabled={safeLogsPage <= 1}
             nextDisabled={safeLogsPage >= logsTotalPages}
+            disabled={requestsBlocking}
             onPrevious={goPrevLogsPage}
             onNext={goNextLogsPage}
           />
@@ -5051,16 +5319,28 @@ function AdminDashboard(): JSX.Element {
                 { value: 'logs', label: jobsStrings.filters.logs },
               ]}
               ariaLabel={jobsStrings.title}
+              disabled={jobsBlocking}
             />
           </div>
         </div>
-        <div className="table-wrapper jobs-table-wrapper admin-responsive-up">
+        <AdminTableShell
+          className="jobs-table-wrapper admin-responsive-up"
+          tableClassName="jobs-table jobs-module-table"
+          loadState={jobsLoadState}
+          loadingLabel={jobsRefreshing ? loadingStateStrings.refreshing : jobsStrings.empty.loading}
+          errorLabel={jobsError ?? loadingStateStrings.error}
+          minHeight={320}
+        >
           {jobs.length === 0 ? (
-            <div className="empty-state alert">
-              {loading ? jobsStrings.empty.loading : jobsStrings.empty.none}
-            </div>
+            <tbody>
+              <tr>
+                <td colSpan={7}>
+                  <div className="empty-state alert">{jobsStrings.empty.none}</div>
+                </td>
+              </tr>
+            </tbody>
           ) : (
-            <Table className="jobs-table jobs-module-table">
+            <>
               <thead>
                 <tr>
                   <th>{jobsStrings.table.id}</th>
@@ -5224,14 +5504,18 @@ function AdminDashboard(): JSX.Element {
                   return rows
                 })}
               </tbody>
-            </Table>
+            </>
           )}
-        </div>
-        <div className="admin-mobile-list admin-responsive-down">
+        </AdminTableShell>
+        <AdminLoadingRegion
+          className="admin-mobile-list admin-responsive-down"
+          loadState={jobsLoadState}
+          loadingLabel={jobsRefreshing ? loadingStateStrings.refreshing : jobsStrings.empty.loading}
+          errorLabel={jobsError ?? loadingStateStrings.error}
+          minHeight={240}
+        >
           {jobs.length === 0 ? (
-            <div className="empty-state alert">
-              {loading ? jobsStrings.empty.loading : jobsStrings.empty.none}
-            </div>
+            <div className="empty-state alert">{jobsStrings.empty.none}</div>
           ) : (
             jobs.map((j) => {
               const job: any = j as any
@@ -5274,7 +5558,7 @@ function AdminDashboard(): JSX.Element {
               )
             })
           )}
-        </div>
+        </AdminLoadingRegion>
         {jobsTotal > jobsPerPage && (
           <AdminTablePagination
             page={jobsPage}
@@ -5288,6 +5572,7 @@ function AdminDashboard(): JSX.Element {
             nextLabel={tokenStrings.pagination.next}
             previousDisabled={jobsPage <= 1}
             nextDisabled={jobsPage >= Math.ceil(jobsTotal / jobsPerPage)}
+            disabled={jobsBlocking}
             onPrevious={() => setJobsPage((page) => Math.max(1, page - 1))}
             onNext={() => setJobsPage((page) => page + 1)}
           />
@@ -5312,6 +5597,7 @@ function AdminDashboard(): JSX.Element {
                   className="users-search-input"
                   placeholder={usersStrings.searchPlaceholder}
                   value={usersQueryInput}
+                  disabled={usersBlocking}
                   onChange={(event) => setUsersQueryInput(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') {
@@ -5320,24 +5606,35 @@ function AdminDashboard(): JSX.Element {
                     }
                   }}
                 />
-                <Button type="button" variant="outline" onClick={applyUserSearch}>
+                <Button type="button" variant="outline" onClick={applyUserSearch} disabled={usersBlocking}>
                   {usersStrings.search}
                 </Button>
                 {(usersQueryInput.length > 0 || usersQuery.length > 0 || usersTagFilterId != null) && (
-                  <Button type="button" variant="ghost" onClick={resetUserSearch}>
+                  <Button type="button" variant="ghost" onClick={resetUserSearch} disabled={usersBlocking}>
                     {usersStrings.clear}
                   </Button>
                 )}
               </div>
             </div>
 
-            <div className="table-wrapper jobs-table-wrapper">
+            <AdminTableShell
+              className="jobs-table-wrapper"
+              tableClassName="jobs-table admin-users-table admin-users-list-table"
+              loadState={usersLoadState}
+              loadingLabel={usersRefreshing ? loadingStateStrings.refreshing : usersStrings.empty.loading}
+              errorLabel={usersError ?? loadingStateStrings.error}
+              minHeight={360}
+            >
               {users.length === 0 ? (
-                <div className="empty-state alert">
-                  {usersLoading ? usersStrings.empty.loading : usersStrings.empty.none}
-                </div>
+                <tbody>
+                  <tr>
+                    <td colSpan={13}>
+                      <div className="empty-state alert">{usersStrings.empty.none}</div>
+                    </td>
+                  </tr>
+                </tbody>
               ) : (
-                <Table className="jobs-table admin-users-table admin-users-list-table">
+                <>
                   <thead>
                     <tr>
                       <th>{usersStrings.table.user}</th>
@@ -5408,9 +5705,89 @@ function AdminDashboard(): JSX.Element {
                       </tr>
                     ))}
                   </tbody>
-                </Table>
+                </>
               )}
-            </div>
+            </AdminTableShell>
+            <AdminLoadingRegion
+              className="admin-mobile-list admin-responsive-down"
+              loadState={usersLoadState}
+              loadingLabel={usersRefreshing ? loadingStateStrings.refreshing : usersStrings.empty.loading}
+              errorLabel={usersError ?? loadingStateStrings.error}
+              minHeight={260}
+            >
+              {users.length === 0 ? (
+                <div className="empty-state alert">{usersStrings.empty.none}</div>
+              ) : (
+                users.map((item) => (
+                  <article key={item.userId} className="admin-mobile-card">
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.user}</span>
+                      <strong>{item.displayName || item.username || item.userId}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.status}</span>
+                      <StatusBadge tone={item.active ? 'success' : 'neutral'}>
+                        {item.active ? usersStrings.status.active : usersStrings.status.inactive}
+                      </StatusBadge>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.tokenCount}</span>
+                      <strong>{formatNumber(item.tokenCount)}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.tags}</span>
+                      <UserTagBadgeList
+                        tags={item.tags}
+                        usersStrings={usersStrings}
+                        emptyLabel={usersStrings.userTags.empty}
+                      />
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.hourlyAny}</span>
+                      <strong>{formatQuotaUsagePair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.hourly}</span>
+                      <strong>{formatQuotaUsagePair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.daily}</span>
+                      <strong>{formatQuotaUsagePair(item.quotaDailyUsed, item.quotaDailyLimit)}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.monthly}</span>
+                      <strong>{formatQuotaUsagePair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.successDaily}</span>
+                      <strong>{`${formatNumber(item.dailySuccess)} / ${formatNumber(item.dailyFailure)}`}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.successMonthly}</span>
+                      <strong>{formatNumber(item.monthlySuccess)}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.lastActivity}</span>
+                      <strong>{formatTimestamp(item.lastActivity)}</strong>
+                    </div>
+                    <div className="admin-mobile-kv">
+                      <span>{usersStrings.table.lastLogin}</span>
+                      <strong>{formatTimestamp(item.lastLoginAt)}</strong>
+                    </div>
+                    <div className="admin-mobile-actions">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => navigateUser(item.userId, { preserveUsersContext: true })}
+                      >
+                        {usersStrings.actions.view}
+                      </Button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </AdminLoadingRegion>
 
             {usersTotal > USERS_PER_PAGE && (
               <AdminTablePagination
@@ -5427,6 +5804,7 @@ function AdminDashboard(): JSX.Element {
                 nextLabel={tokenStrings.pagination.next}
                 previousDisabled={usersPage <= 1}
                 nextDisabled={usersPage >= usersTotalPages}
+                disabled={usersBlocking}
                 onPrevious={goPrevUsersPage}
                 onNext={goNextUsersPage}
               />
@@ -5954,16 +6332,20 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
   const adminStrings = translations.admin
   const keyDetailsStrings = adminStrings.keyDetails
   const logsTableStrings = adminStrings.logs.table
+  const loadingStateStrings = adminStrings.loadingStates
   const [detail, setDetail] = useState<ApiKeyStats | null>(null)
   const [period, setPeriod] = useState<'day' | 'week' | 'month'>('month')
   const [startDate, setStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10))
   const [summary, setSummary] = useState<KeySummary | null>(null)
   const [logs, setLogs] = useState<RequestLog[]>([])
-  const [loading, setLoading] = useState(true)
+  const [detailLoadState, setDetailLoadState] = useState<QueryLoadState>('initial_loading')
   const [error, setError] = useState<string | null>(null)
   const [syncState, setSyncState] = useState<'idle' | 'syncing' | 'success'>('idle')
   const syncInFlightRef = useRef(false)
   const syncFeedbackTimerRef = useRef<number | null>(null)
+  const loadAbortRef = useRef<AbortController | null>(null)
+  const queryKeyRef = useRef<string | null>(null)
+  const queryKey = `${id}:${period}:${startDate}`
 
   const computeSince = useCallback((): number => {
     const base = new Date(startDate + 'T00:00:00Z')
@@ -5981,30 +6363,49 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
     return Math.floor(d.getTime() / 1000)
   }, [period, startDate])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (reason: 'initial' | 'switch' | 'refresh' = 'refresh') => {
+    loadAbortRef.current?.abort()
+    const controller = new AbortController()
+    loadAbortRef.current = controller
     try {
-      setLoading(true)
+      setDetailLoadState(
+        reason === 'refresh'
+          ? getRefreshingLoadState(queryKeyRef.current != null)
+          : getBlockingLoadState(queryKeyRef.current != null),
+      )
       setError(null)
+      if (reason !== 'refresh') {
+        setDetail(null)
+        setSummary(null)
+        setLogs([])
+      }
       const since = computeSince()
       const [s, ls, d] = await Promise.all([
-        fetchKeyMetrics(id, period, since),
-        fetchKeyLogs(id, 50, since),
-        fetchApiKeyDetail(id).catch(() => null),
+        fetchKeyMetrics(id, period, since, controller.signal),
+        fetchKeyLogs(id, 50, since, controller.signal),
+        fetchApiKeyDetail(id, controller.signal).catch(() => null),
       ])
+      if (controller.signal.aborted) return
       setSummary(s)
       setLogs(ls)
       setDetail(d)
+      setDetailLoadState('ready')
+      queryKeyRef.current = queryKey
     } catch (err) {
+      if ((err as Error).name === 'AbortError') return
       console.error(err)
       setError(err instanceof Error ? err.message : adminStrings.errors.loadKeyDetails)
-    } finally {
-      setLoading(false)
+      setDetailLoadState('error')
     }
-  }, [id, period, computeSince])
+  }, [adminStrings.errors.loadKeyDetails, computeSince, id, period, queryKey])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    const reason = queryKeyRef.current == null ? 'initial' : queryKeyRef.current === queryKey ? 'refresh' : 'switch'
+    void load(reason)
+    return () => {
+      loadAbortRef.current?.abort()
+    }
+  }, [load, queryKey])
 
   useEffect(() => () => {
     if (syncFeedbackTimerRef.current != null) {
@@ -6019,7 +6420,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
       setSyncState('syncing')
       setError(null)
       await syncApiKeyUsage(id)
-      await load()
+      await load('refresh')
       setSyncState('success')
       if (syncFeedbackTimerRef.current != null) {
         window.clearTimeout(syncFeedbackTimerRef.current)
@@ -6050,6 +6451,9 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
       { id: 'quota', label: keyDetailsStrings.metrics.quota, value: formatNumber(summary.quota_exhausted_count), subtitle: formatPercent(summary.quota_exhausted_count, total) },
     ]
   }, [summary, keyDetailsStrings])
+  const detailBlocking = isBlockingLoadState(detailLoadState)
+  const detailRefreshing = isRefreshingLoadState(detailLoadState)
+  const detailLoadingLabel = detailRefreshing ? loadingStateStrings.refreshing : loadingStateStrings.switching
 
   return (
     <div className="admin-detail-stack">
@@ -6103,29 +6507,35 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
             <p className="panel-description">Tavily Usage for this key</p>
           </div>
         </div>
-        <section className="metrics-grid">
-          {(!detail || loading) ? (
-            <div className="empty-state alert" style={{ gridColumn: '1 / -1' }}>{keyDetailsStrings.loading}</div>
-          ) : (
-            (() => {
-              const limit = detail?.quota_limit ?? null
-              const remaining = detail?.quota_remaining ?? null
-              const used = (limit != null && remaining != null) ? Math.max(limit - remaining, 0) : null
-              const percent = (limit && remaining != null && limit > 0) ? formatPercent(remaining, limit) : '—'
-              return [
-                { id: 'used', label: 'Used', value: used != null ? formatNumber(used) : '—', subtitle: limit != null ? `of ${formatNumber(limit)}` : '—' },
-                { id: 'remaining', label: 'Remaining', value: remaining != null ? formatNumber(remaining) : '—', subtitle: percent },
-                { id: 'synced', label: 'Synced', value: detail?.quota_synced_at ? formatTimestamp(detail.quota_synced_at) : '—', subtitle: '' },
-              ].map((m) => (
-                <div key={m.id} className="metric-card">
-                  <h3>{m.label}</h3>
-                  <div className="metric-value">{m.value}</div>
-                  <div className="metric-subtitle">{m.subtitle}</div>
-                </div>
-              ))
-            })()
-          )}
-        </section>
+        <AdminLoadingRegion
+          loadState={detailLoadState}
+          loadingLabel={detailLoadingLabel}
+          minHeight={180}
+        >
+          <section className="metrics-grid">
+            {!detail ? (
+              <div className="empty-state alert" style={{ gridColumn: '1 / -1' }}>{keyDetailsStrings.loading}</div>
+            ) : (
+              (() => {
+                const limit = detail?.quota_limit ?? null
+                const remaining = detail?.quota_remaining ?? null
+                const used = (limit != null && remaining != null) ? Math.max(limit - remaining, 0) : null
+                const percent = (limit && remaining != null && limit > 0) ? formatPercent(remaining, limit) : '—'
+                return [
+                  { id: 'used', label: 'Used', value: used != null ? formatNumber(used) : '—', subtitle: limit != null ? `of ${formatNumber(limit)}` : '—' },
+                  { id: 'remaining', label: 'Remaining', value: remaining != null ? formatNumber(remaining) : '—', subtitle: percent },
+                  { id: 'synced', label: 'Synced', value: detail?.quota_synced_at ? formatTimestamp(detail.quota_synced_at) : '—', subtitle: '' },
+                ].map((m) => (
+                  <div key={m.id} className="metric-card">
+                    <h3>{m.label}</h3>
+                    <div className="metric-value">{m.value}</div>
+                    <div className="metric-subtitle">{m.subtitle}</div>
+                  </div>
+                ))
+              })()
+            )}
+          </section>
+        </AdminLoadingRegion>
       </section>
 
       <section className="surface panel">
@@ -6134,42 +6544,49 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
             <h2>{keyDetailsStrings.usageTitle}</h2>
             <p className="panel-description">{keyDetailsStrings.usageDescription}</p>
           </div>
-<div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-  <Select value={period} onValueChange={(value) => setPeriod(value as 'day' | 'week' | 'month')}>
-    <SelectTrigger className="w-[132px]" aria-label={keyDetailsStrings.usageTitle}>
-      <SelectValue />
-    </SelectTrigger>
-    <SelectContent align="end">
-      <SelectItem value="day">{keyDetailsStrings.periodOptions.day}</SelectItem>
-      <SelectItem value="week">{keyDetailsStrings.periodOptions.week}</SelectItem>
-      <SelectItem value="month">{keyDetailsStrings.periodOptions.month}</SelectItem>
-    </SelectContent>
-  </Select>
-  <Input
-    type="date"
-    name="key-usage-start-date"
-    value={startDate}
-    onChange={(e) => setStartDate(e.target.value)}
-    className="w-[176px]"
-  />
-  <Button type="button" onClick={() => void load()} disabled={loading}>
-    {keyDetailsStrings.apply}
-  </Button>
-</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Select value={period} onValueChange={(value) => setPeriod(value as 'day' | 'week' | 'month')} disabled={detailBlocking}>
+              <SelectTrigger className="w-[132px]" aria-label={keyDetailsStrings.usageTitle} disabled={detailBlocking}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="day">{keyDetailsStrings.periodOptions.day}</SelectItem>
+                <SelectItem value="week">{keyDetailsStrings.periodOptions.week}</SelectItem>
+                <SelectItem value="month">{keyDetailsStrings.periodOptions.month}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              type="date"
+              name="key-usage-start-date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="w-[176px]"
+              disabled={detailBlocking}
+            />
+            <Button type="button" onClick={() => void load('refresh')} disabled={detailBlocking}>
+              {keyDetailsStrings.apply}
+            </Button>
           </div>
-        <section className="metrics-grid">
-          {(!summary || loading) ? (
-            <div className="empty-state alert" style={{ gridColumn: '1 / -1' }}>{keyDetailsStrings.loading}</div>
-          ) : (
-            metricCards.map((m) => (
-              <div key={m.id} className="metric-card">
-                <h3>{m.label}</h3>
-                <div className="metric-value">{m.value}</div>
-                <div className="metric-subtitle">{m.subtitle}</div>
-              </div>
-            ))
-          )}
-        </section>
+        </div>
+        <AdminLoadingRegion
+          loadState={detailLoadState}
+          loadingLabel={detailLoadingLabel}
+          minHeight={180}
+        >
+          <section className="metrics-grid">
+            {!summary ? (
+              <div className="empty-state alert" style={{ gridColumn: '1 / -1' }}>{keyDetailsStrings.loading}</div>
+            ) : (
+              metricCards.map((m) => (
+                <div key={m.id} className="metric-card">
+                  <h3>{m.label}</h3>
+                  <div className="metric-value">{m.value}</div>
+                  <div className="metric-subtitle">{m.subtitle}</div>
+                </div>
+              ))
+            )}
+          </section>
+        </AdminLoadingRegion>
       </section>
 
       <section className="surface panel">
@@ -6179,9 +6596,14 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
             <p className="panel-description">{keyDetailsStrings.logsDescription}</p>
           </div>
         </div>
-        <div className="table-wrapper admin-responsive-up">
+        <AdminLoadingRegion
+          className="table-wrapper admin-responsive-up"
+          loadState={detailLoadState}
+          loadingLabel={detailLoadingLabel}
+          minHeight={260}
+        >
           {logs.length === 0 ? (
-            <div className="empty-state alert">{loading ? keyDetailsStrings.loading : keyDetailsStrings.logsEmpty}</div>
+            <div className="empty-state alert">{keyDetailsStrings.logsEmpty}</div>
           ) : (
             <Table className="admin-logs-table">
               <thead>
@@ -6210,10 +6632,15 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
               </tbody>
             </Table>
           )}
-        </div>
-        <div className="admin-mobile-list admin-responsive-down">
+        </AdminLoadingRegion>
+        <AdminLoadingRegion
+          className="admin-mobile-list admin-responsive-down"
+          loadState={detailLoadState}
+          loadingLabel={detailLoadingLabel}
+          minHeight={220}
+        >
           {logs.length === 0 ? (
-            <div className="empty-state alert">{loading ? keyDetailsStrings.loading : keyDetailsStrings.logsEmpty}</div>
+            <div className="empty-state alert">{keyDetailsStrings.logsEmpty}</div>
           ) : (
             logs.map((log) => (
               <article key={log.id} className="admin-mobile-card">
@@ -6242,7 +6669,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
               </article>
             ))
           )}
-        </div>
+        </AdminLoadingRegion>
       </section>
     </div>
   )
