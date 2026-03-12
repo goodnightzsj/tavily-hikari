@@ -4851,6 +4851,24 @@ tbody .log-details-row:hover {
   flex-shrink: 0;
 }
 
+.user-console-landing-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.user-console-landing-stack > .panel {
+  margin-top: 0;
+}
+
+.user-console-section {
+  scroll-margin-top: 28px;
+}
+
+.user-console-section-header {
+  align-items: flex-start;
+}
+
 @media (max-width: 767px) {
   .app-shell {
     padding: 20px 16px 36px;
@@ -4949,6 +4967,10 @@ tbody .log-details-row:hover {
   .admin-panel-refresh-button {
     align-self: flex-start;
     min-width: 104px;
+  }
+
+  .user-console-landing-stack {
+    gap: 14px;
   }
 
   .token-usage-header {

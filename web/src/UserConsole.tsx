@@ -42,6 +42,12 @@ import {
 import { useResponsiveModes } from './lib/responsive'
 import { getUserConsoleAdminHref } from './lib/userConsoleAdminEntry'
 import { resolveUserConsoleAvailability } from './lib/userConsoleAvailability'
+import {
+  parseUserConsoleHash,
+  userConsoleRouteToHash,
+  type UserConsoleLandingSection,
+  type UserConsoleRoute as ConsoleRoute,
+} from './lib/userConsoleRoutes'
 
 const REPO_URL = 'https://github.com/IvanLi-CN/tavily-hikari'
 const CODEX_DOC_URL = 'https://github.com/openai/codex/blob/main/docs/config.md'
@@ -78,11 +84,6 @@ const GUIDE_KEY_ORDER: GuideKey[] = [
   'cherryStudio',
   'other',
 ]
-
-type ConsoleRoute =
-  | { name: 'dashboard' }
-  | { name: 'tokens' }
-  | { name: 'token'; id: string }
 
 type ProbeButtonState = 'idle' | 'running' | 'success' | 'partial' | 'failed'
 type ProbeStepStatus = 'running' | 'success' | 'failed' | 'blocked'
@@ -130,22 +131,6 @@ function formatNumber(value: number): string {
 
 function formatQuotaPair(used: number, limit: number): string {
   return `${formatNumber(used)} / ${formatNumber(limit)}`
-}
-
-function parseRouteFromHash(): ConsoleRoute {
-  const hash = window.location.hash || ''
-  const tokenMatch = hash.match(/^#\/tokens\/([^/?#]+)/)
-  if (tokenMatch) {
-    try {
-      return { name: 'token', id: decodeURIComponent(tokenMatch[1]) }
-    } catch {
-      return { name: 'tokens' }
-    }
-  }
-  if (hash.startsWith('#/tokens')) {
-    return { name: 'tokens' }
-  }
-  return { name: 'dashboard' }
 }
 
 function errorStatus(err: unknown): number | undefined {
@@ -242,7 +227,7 @@ export default function UserConsole(): JSX.Element {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [dashboard, setDashboard] = useState<UserDashboard | null>(null)
   const [tokens, setTokens] = useState<UserTokenSummary[]>([])
-  const [route, setRoute] = useState<ConsoleRoute>(() => parseRouteFromHash())
+  const [route, setRoute] = useState<ConsoleRoute>(() => parseUserConsoleHash(window.location.hash || ''))
   const [detail, setDetail] = useState<UserTokenSummary | null>(null)
   const [detailLogs, setDetailLogs] = useState<PublicTokenLog[]>([])
   const [loading, setLoading] = useState(true)
@@ -263,12 +248,32 @@ export default function UserConsole(): JSX.Element {
   const probeRunIdRef = useRef(0)
   const tokenSecretRunIdRef = useRef(0)
   const pageRef = useRef<HTMLElement>(null)
+  const dashboardSectionRef = useRef<HTMLElement | null>(null)
+  const tokensSectionRef = useRef<HTMLElement | null>(null)
+  const detailHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const historyTraversalRef = useRef(false)
+  const landingScrollBehaviorRef = useRef<ScrollBehavior>('auto')
+  const shouldScrollLandingSectionRef = useRef(route.name === 'landing' && route.section !== null)
   const { viewportMode, contentMode, isCompactLayout } = useResponsiveModes(pageRef)
 
   useEffect(() => {
-    const onHash = () => setRoute(parseRouteFromHash())
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    const handlePopState = () => {
+      historyTraversalRef.current = true
+    }
+    const syncRoute = () => {
+      const nextRoute = parseUserConsoleHash(window.location.hash || '')
+      if (nextRoute.name === 'landing' && nextRoute.section && !historyTraversalRef.current) {
+        shouldScrollLandingSectionRef.current = true
+      }
+      setRoute(nextRoute)
+      historyTraversalRef.current = false
+    }
+    window.addEventListener('popstate', handlePopState)
+    window.addEventListener('hashchange', syncRoute)
+    return () => {
+      window.removeEventListener('popstate', handlePopState)
+      window.removeEventListener('hashchange', syncRoute)
+    }
   }, [])
 
   const reloadBase = useCallback(async (signal: AbortSignal) => {
@@ -354,7 +359,7 @@ export default function UserConsole(): JSX.Element {
     setApiProbe(createProbeButtonModel(6))
     setProbeBubble(null)
     setProbeBubbleShift(0)
-  }, [route.name === 'token' ? route.id : route.name])
+  }, [route.name === 'token' ? route.id : route.section ?? 'landing'])
 
   useEffect(() => {
     tokenSecretRunIdRef.current += 1
@@ -481,6 +486,54 @@ export default function UserConsole(): JSX.Element {
   const anyProbeRunning = mcpProbe.state === 'running' || apiProbe.state === 'running'
   const adminHref = getUserConsoleAdminHref(profile)
   const consoleUnavailable = consoleAvailability === 'disabled'
+  const showTokenListLoading = loading && tokens.length === 0
+  const showEmptyTokens = !loading && tokens.length === 0
+
+  const scrollToLandingSection = useCallback((section: UserConsoleLandingSection, behavior: ScrollBehavior = 'auto') => {
+    const target = section === 'dashboard' ? dashboardSectionRef.current : tokensSectionRef.current
+    if (!target) return
+    const finalBehavior = behavior === 'smooth' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? 'auto'
+      : behavior
+    target.scrollIntoView({ behavior: finalBehavior, block: 'start' })
+  }, [])
+
+  useEffect(() => {
+    if (consoleUnavailable || route.name !== 'landing' || !route.section) return
+    if (!shouldScrollLandingSectionRef.current) {
+      landingScrollBehaviorRef.current = 'auto'
+      return
+    }
+    const section = route.section
+    const behavior = landingScrollBehaviorRef.current
+    const frame = window.requestAnimationFrame(() => {
+      scrollToLandingSection(section, behavior)
+      shouldScrollLandingSectionRef.current = false
+      landingScrollBehaviorRef.current = 'auto'
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [consoleUnavailable, route, scrollToLandingSection])
+
+  useEffect(() => {
+    if (consoleUnavailable || route.name !== 'token') return
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: 'auto' })
+      detailHeadingRef.current?.focus({ preventScroll: true })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [consoleUnavailable, route])
+
+  const navigateToRoute = useCallback((nextRoute: ConsoleRoute) => {
+    const nextHash = userConsoleRouteToHash(nextRoute)
+    if (window.location.hash !== nextHash) {
+      if (nextHash) {
+        window.location.hash = nextHash
+        return
+      }
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+    }
+    setRoute(nextRoute)
+  }, [])
 
   const runMcpProbe = useCallback(async () => {
     if (route.name !== 'token' || anyProbeRunning) return
@@ -948,17 +1001,16 @@ export default function UserConsole(): JSX.Element {
     )
   }
 
-  const goDashboard = () => {
-    window.location.hash = '#/dashboard'
-  }
   const goHome = () => {
     window.location.href = '/'
   }
-  const goTokens = () => {
-    window.location.hash = '#/tokens'
+  const goTokens = (behavior: ScrollBehavior = 'auto') => {
+    shouldScrollLandingSectionRef.current = true
+    landingScrollBehaviorRef.current = behavior
+    navigateToRoute({ name: 'landing', section: 'tokens' })
   }
   const goTokenDetail = (tokenId: string) => {
-    window.location.hash = `#/tokens/${encodeURIComponent(tokenId)}`
+    navigateToRoute({ name: 'token', id: tokenId })
   }
 
   const probeButtonLabel = useCallback((
@@ -1011,19 +1063,6 @@ export default function UserConsole(): JSX.Element {
         </div>
       </section>
 
-      {!consoleUnavailable && (
-        <section className="surface panel" style={{ marginBottom: 16 }}>
-          <div className="table-actions">
-            <button type="button" className={`btn ${route.name === 'dashboard' ? 'btn-primary' : 'btn-outline'}`} onClick={goDashboard}>
-              {text.nav.dashboard}
-            </button>
-            <button type="button" className={`btn ${route.name !== 'dashboard' ? 'btn-primary' : 'btn-outline'}`} onClick={goTokens}>
-              {text.nav.tokens}
-            </button>
-          </div>
-        </section>
-      )}
-
       {consoleUnavailable && (
         <section className="surface panel access-panel">
           <div className="console-unavailable-state">
@@ -1045,11 +1084,19 @@ export default function UserConsole(): JSX.Element {
 
       {!consoleUnavailable && error && <section className="surface error-banner">{error}</section>}
 
-      {!consoleUnavailable && route.name === 'dashboard' && (
-        <>
-          <section className="surface panel access-panel">
-            <header className="panel-header">
-              <h2>{text.dashboard.usage}</h2>
+      {!consoleUnavailable && route.name === 'landing' && (
+        <div className="user-console-landing-stack">
+          <section
+            ref={dashboardSectionRef}
+            id="console-dashboard-section"
+            className="surface panel user-console-section"
+            data-console-section="dashboard"
+          >
+            <header className="panel-header user-console-section-header">
+              <div>
+                <h2>{text.dashboard.usage}</h2>
+                <p className="panel-description">{text.dashboard.description}</p>
+              </div>
             </header>
             <div className="access-stats">
               <div className="access-stat">
@@ -1096,150 +1143,160 @@ export default function UserConsole(): JSX.Element {
               </div>
             </div>
           </section>
-        </>
-      )}
 
-      {!consoleUnavailable && route.name === 'tokens' && (
-        <section className="surface panel">
-          <div className="panel-header">
-            <h2>{text.tokens.title}</h2>
-          </div>
-          <div className="table-wrapper jobs-table-wrapper user-console-md-up">
-            {tokens.length === 0 ? (
-              <div className="empty-state alert">{text.tokens.empty}</div>
-            ) : (
-              <table className="user-console-tokens-table">
-                <thead>
-                  <tr>
-                    <th>{text.tokens.table.id}</th>
-                    <th>{text.tokens.table.quotas}</th>
-                    <th>{text.tokens.table.stats}</th>
-                    <th>{text.tokens.table.actions}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tokens.map((item) => {
-                    const state = copyState[item.tokenId] ?? 'idle'
-                    return (
-                      <tr key={item.tokenId}>
-                        <td>
-                          <code>{item.tokenId}</code>
-                        </td>
-                        <td>
-                          <div className="user-console-cell-stack">
-                            <div className="user-console-cell-item">
-                              <span>{text.tokens.table.any}</span>
-                              <strong>{formatQuotaPair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</strong>
+          <section
+            ref={tokensSectionRef}
+            id="console-tokens-section"
+            className="surface panel user-console-section"
+            data-console-section="tokens"
+          >
+            <div className="panel-header user-console-section-header">
+              <div>
+                <h2>{text.tokens.title}</h2>
+                <p className="panel-description">{text.tokens.description}</p>
+              </div>
+            </div>
+            <div className="table-wrapper jobs-table-wrapper user-console-md-up">
+              {showTokenListLoading ? (
+                <div className="empty-state">{text.tokens.loading}</div>
+              ) : showEmptyTokens ? (
+                <div className="empty-state alert">{text.tokens.empty}</div>
+              ) : (
+                <table className="user-console-tokens-table">
+                  <thead>
+                    <tr>
+                      <th>{text.tokens.table.id}</th>
+                      <th>{text.tokens.table.quotas}</th>
+                      <th>{text.tokens.table.stats}</th>
+                      <th>{text.tokens.table.actions}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tokens.map((item) => {
+                      const state = copyState[item.tokenId] ?? 'idle'
+                      return (
+                        <tr key={item.tokenId}>
+                          <td>
+                            <code>{item.tokenId}</code>
+                          </td>
+                          <td>
+                            <div className="user-console-cell-stack">
+                              <div className="user-console-cell-item">
+                                <span>{text.tokens.table.any}</span>
+                                <strong>{formatQuotaPair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</strong>
+                              </div>
+                              <div className="user-console-cell-item">
+                                <span>{text.tokens.table.hourly}</span>
+                                <strong>{formatQuotaPair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</strong>
+                              </div>
+                              <div className="user-console-cell-item">
+                                <span>{text.tokens.table.daily}</span>
+                                <strong>{formatQuotaPair(item.quotaDailyUsed, item.quotaDailyLimit)}</strong>
+                              </div>
+                              <div className="user-console-cell-item">
+                                <span>{text.tokens.table.monthly}</span>
+                                <strong>{formatQuotaPair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</strong>
+                              </div>
                             </div>
-                            <div className="user-console-cell-item">
-                              <span>{text.tokens.table.hourly}</span>
-                              <strong>{formatQuotaPair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</strong>
+                          </td>
+                          <td>
+                            <div className="user-console-cell-stack">
+                              <div className="user-console-cell-item">
+                                <span>{text.tokens.table.dailySuccess}</span>
+                                <strong>{formatNumber(item.dailySuccess)}</strong>
+                              </div>
+                              <div className="user-console-cell-item">
+                                <span>{text.tokens.table.dailyFailure}</span>
+                                <strong>{formatNumber(item.dailyFailure)}</strong>
+                              </div>
+                              <div className="user-console-cell-item">
+                                <span>{text.dashboard.monthlySuccess}</span>
+                                <strong>{formatNumber(item.monthlySuccess)}</strong>
+                              </div>
                             </div>
-                            <div className="user-console-cell-item">
-                              <span>{text.tokens.table.daily}</span>
-                              <strong>{formatQuotaPair(item.quotaDailyUsed, item.quotaDailyLimit)}</strong>
+                          </td>
+                          <td>
+                            <div className="table-actions">
+                              <button
+                                type="button"
+                                className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
+                                onClick={() => void copyToken(item.tokenId)}
+                              >
+                                {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
+                              </button>
+                              <button type="button" className="btn btn-primary btn-sm" onClick={() => goTokenDetail(item.tokenId)}>
+                                {text.tokens.detail}
+                              </button>
                             </div>
-                            <div className="user-console-cell-item">
-                              <span>{text.tokens.table.monthly}</span>
-                              <strong>{formatQuotaPair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</strong>
-                            </div>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="user-console-cell-stack">
-                            <div className="user-console-cell-item">
-                              <span>{text.tokens.table.dailySuccess}</span>
-                              <strong>{formatNumber(item.dailySuccess)}</strong>
-                            </div>
-                            <div className="user-console-cell-item">
-                              <span>{text.tokens.table.dailyFailure}</span>
-                              <strong>{formatNumber(item.dailyFailure)}</strong>
-                            </div>
-                            <div className="user-console-cell-item">
-                              <span>{text.dashboard.monthlySuccess}</span>
-                              <strong>{formatNumber(item.monthlySuccess)}</strong>
-                            </div>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="table-actions">
-                            <button
-                              type="button"
-                              className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
-                              onClick={() => void copyToken(item.tokenId)}
-                            >
-                              {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
-                            </button>
-                            <button type="button" className="btn btn-primary btn-sm" onClick={() => goTokenDetail(item.tokenId)}>
-                              {text.tokens.detail}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-          <div className="user-console-mobile-list user-console-md-down">
-            {tokens.length === 0 ? (
-              <div className="empty-state alert">{text.tokens.empty}</div>
-            ) : (
-              tokens.map((item) => {
-                const state = copyState[item.tokenId] ?? 'idle'
-                return (
-                  <article key={item.tokenId} className="user-console-mobile-card">
-                    <header className="user-console-mobile-card-header">
-                      <strong>{text.tokens.table.id}</strong>
-                      <code>{item.tokenId}</code>
-                    </header>
-                    <div className="user-console-mobile-kv">
-                      <span>{text.tokens.table.any}</span>
-                      <strong>{formatQuotaPair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</strong>
-                    </div>
-                    <div className="user-console-mobile-kv">
-                      <span>{text.tokens.table.hourly}</span>
-                      <strong>{formatQuotaPair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</strong>
-                    </div>
-                    <div className="user-console-mobile-kv">
-                      <span>{text.tokens.table.daily}</span>
-                      <strong>{formatQuotaPair(item.quotaDailyUsed, item.quotaDailyLimit)}</strong>
-                    </div>
-                    <div className="user-console-mobile-kv">
-                      <span>{text.tokens.table.monthly}</span>
-                      <strong>{formatQuotaPair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</strong>
-                    </div>
-                    <div className="user-console-mobile-kv">
-                      <span>{text.tokens.table.dailySuccess}</span>
-                      <strong>{formatNumber(item.dailySuccess)}</strong>
-                    </div>
-                    <div className="user-console-mobile-kv">
-                      <span>{text.tokens.table.dailyFailure}</span>
-                      <strong>{formatNumber(item.dailyFailure)}</strong>
-                    </div>
-                    <div className="user-console-mobile-kv">
-                      <span>{text.dashboard.monthlySuccess}</span>
-                      <strong>{formatNumber(item.monthlySuccess)}</strong>
-                    </div>
-                    <div className="table-actions user-console-mobile-actions">
-                      <button
-                        type="button"
-                        className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
-                        onClick={() => void copyToken(item.tokenId)}
-                      >
-                        {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
-                      </button>
-                      <button type="button" className="btn btn-primary btn-sm" onClick={() => goTokenDetail(item.tokenId)}>
-                        {text.tokens.detail}
-                      </button>
-                    </div>
-                  </article>
-                )
-              })
-            )}
-          </div>
-        </section>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <div className="user-console-mobile-list user-console-md-down">
+              {showTokenListLoading ? (
+                <div className="empty-state">{text.tokens.loading}</div>
+              ) : showEmptyTokens ? (
+                <div className="empty-state alert">{text.tokens.empty}</div>
+              ) : (
+                tokens.map((item) => {
+                  const state = copyState[item.tokenId] ?? 'idle'
+                  return (
+                    <article key={item.tokenId} className="user-console-mobile-card">
+                      <header className="user-console-mobile-card-header">
+                        <strong>{text.tokens.table.id}</strong>
+                        <code>{item.tokenId}</code>
+                      </header>
+                      <div className="user-console-mobile-kv">
+                        <span>{text.tokens.table.any}</span>
+                        <strong>{formatQuotaPair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</strong>
+                      </div>
+                      <div className="user-console-mobile-kv">
+                        <span>{text.tokens.table.hourly}</span>
+                        <strong>{formatQuotaPair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</strong>
+                      </div>
+                      <div className="user-console-mobile-kv">
+                        <span>{text.tokens.table.daily}</span>
+                        <strong>{formatQuotaPair(item.quotaDailyUsed, item.quotaDailyLimit)}</strong>
+                      </div>
+                      <div className="user-console-mobile-kv">
+                        <span>{text.tokens.table.monthly}</span>
+                        <strong>{formatQuotaPair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</strong>
+                      </div>
+                      <div className="user-console-mobile-kv">
+                        <span>{text.tokens.table.dailySuccess}</span>
+                        <strong>{formatNumber(item.dailySuccess)}</strong>
+                      </div>
+                      <div className="user-console-mobile-kv">
+                        <span>{text.tokens.table.dailyFailure}</span>
+                        <strong>{formatNumber(item.dailyFailure)}</strong>
+                      </div>
+                      <div className="user-console-mobile-kv">
+                        <span>{text.dashboard.monthlySuccess}</span>
+                        <strong>{formatNumber(item.monthlySuccess)}</strong>
+                      </div>
+                      <div className="table-actions user-console-mobile-actions">
+                        <button
+                          type="button"
+                          className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
+                          onClick={() => void copyToken(item.tokenId)}
+                        >
+                          {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
+                        </button>
+                        <button type="button" className="btn btn-primary btn-sm" onClick={() => goTokenDetail(item.tokenId)}>
+                          {text.tokens.detail}
+                        </button>
+                      </div>
+                    </article>
+                  )
+                })
+              )}
+            </div>
+          </section>
+        </div>
       )}
 
       {!consoleUnavailable && route.name === 'token' && (
@@ -1247,10 +1304,10 @@ export default function UserConsole(): JSX.Element {
           <section className="surface panel access-panel">
             <header className="panel-header" style={{ marginBottom: 8 }}>
               <div>
-                <h2>{text.detail.title} <code>{route.id}</code></h2>
+                <h2 ref={detailHeadingRef} tabIndex={-1}>{text.detail.title} <code>{route.id}</code></h2>
                 <p className="panel-description">{text.detail.subtitle}</p>
               </div>
-              <button type="button" className="btn btn-outline" onClick={goTokens}>{text.detail.back}</button>
+              <button type="button" className="btn btn-outline" onClick={() => goTokens()}>{text.detail.back}</button>
             </header>
 
             <div className="access-stats">
@@ -1837,12 +1894,9 @@ function buildCurlSnippet(baseUrl: string, prettyToken: string): string {
 const EN = {
   title: 'User Console',
   subtitle: 'Your account dashboard and token management',
-  nav: {
-    dashboard: 'Dashboard',
-    tokens: 'Token Management',
-  },
   dashboard: {
     usage: 'Account Usage Overview',
+    description: 'Track account-level throughput, failures, and quota windows without switching pages.',
     dailySuccess: 'Daily Success',
     dailyFailure: 'Daily Failure',
     monthlySuccess: 'Monthly Success',
@@ -1853,6 +1907,8 @@ const EN = {
   },
   tokens: {
     title: 'Token List',
+    description: 'Copy any token or jump into its detail view from the same landing page.',
+    loading: 'Loading token list…',
     empty: 'No token available for this account.',
     copy: 'Copy',
     copied: 'Copied',
@@ -1879,7 +1935,7 @@ const EN = {
   detail: {
     title: 'Token Detail',
     subtitle: 'Same token-level modules as home page (without global site card).',
-    back: 'Back',
+    back: 'Back to Token List',
     tokenLabel: 'Token',
     tokenSecret: {
       show: 'Show full token',
@@ -1974,12 +2030,9 @@ const EN = {
 const ZH = {
   title: '用户控制台',
   subtitle: '账户仪表盘与 Token 管理',
-  nav: {
-    dashboard: '控制台仪表盘',
-    tokens: 'Token 管理',
-  },
   dashboard: {
     usage: '账户用量概览',
+    description: '在同一页集中查看账户级成功率、失败量与各配额窗口。',
     dailySuccess: '今日成功',
     dailyFailure: '今日失败',
     monthlySuccess: '本月成功',
@@ -1990,6 +2043,8 @@ const ZH = {
   },
   tokens: {
     title: 'Token 列表',
+    description: '在同一落地页里完成复制 Token 与进入详情，不再切换独立列表页。',
+    loading: 'Token 列表加载中…',
     empty: '当前账户暂无 Token。',
     copy: '复制',
     copied: '已复制',
@@ -2016,7 +2071,7 @@ const ZH = {
   detail: {
     title: 'Token 详情',
     subtitle: '保留首页 token 相关模块（不展示首个站点全局卡片）。',
-    back: '返回',
+    back: '返回 Token 列表',
     tokenLabel: 'Token',
     tokenSecret: {
       show: '显示完整 Token',
