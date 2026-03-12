@@ -60,14 +60,18 @@ async fn list_jobs(
 async fn get_api_key_detail(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiKeyView>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let items = state
         .proxy
-        .list_api_key_metrics()
+        .get_api_key_metric(&id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Some(found) = items.into_iter().find(|k| k.id == id) {
-        Ok(Json(ApiKeyView::from(found)))
+    if let Some(found) = items {
+        Ok(Json(ApiKeyView::from_detail(found)))
     } else {
         Err(StatusCode::NOT_FOUND)
     }
@@ -142,6 +146,26 @@ async fn post_sync_key_usage(
             Ok((StatusCode::BAD_GATEWAY, body).into_response())
         }
     }
+}
+
+async fn delete_api_key_quarantine(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    state
+        .proxy
+        .clear_key_quarantine_by_id(&id)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|err| {
+            eprintln!("clear api key quarantine error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 #[derive(Debug, Serialize)]

@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::form_urlencoded;
-type SummarySig = (i64, i64, i64, i64, i64, i64, Option<i64>);
+type SummarySig = (i64, i64, i64, i64, i64, i64, i64, Option<i64>);
 use std::time::{Duration, Instant};
 use tavily_hikari::{
     ApiKeyMetrics, AuthToken, OAuthAccountProfile, PendingBillingSettleOutcome, ProxyError,

@@ -532,11 +532,13 @@ interface AdminTranslationsShape {
         errors: string
         quota: string
         keys: string
+        quarantined: string
         remaining: string
       }
       subtitles: {
         keysAll: string
         keysExhausted: string
+        keysAvailability: string
       }
     loading: string
   }
@@ -627,6 +629,12 @@ interface AdminTranslationsShape {
       moreShow: string
       moreHide: string
     }
+    filters: {
+      status: string
+      clearGroups: string
+      clearStatuses: string
+      selectedSuffix: string
+    }
     table: {
       keyId: string
       status: string
@@ -651,8 +659,14 @@ interface AdminTranslationsShape {
       copy: string
       enable: string
       disable: string
+      clearQuarantine: string
       delete: string
       details: string
+    }
+    quarantine: {
+      badge: string
+      sourcePrefix: string
+      noReason: string
     }
     dialogs: {
       disable: {
@@ -769,6 +783,16 @@ interface AdminTranslationsShape {
       lastActivityPrefix: string
       noActivity: string
     }
+    quarantine: {
+      title: string
+      description: string
+      source: string
+      reason: string
+      detail: string
+      createdAt: string
+      clearAction: string
+      clearing: string
+    }
     logsTitle: string
     logsDescription: string
     logsEmpty: string
@@ -784,6 +808,7 @@ interface AdminTranslationsShape {
       updateTokenNote: string
       deleteKey: string
       toggleKey: string
+      clearQuarantine: string
       loadKeyDetails: string
       syncUsage: string
     }
@@ -1388,11 +1413,13 @@ export const translations: Record<Language, TranslationShape> = {
           errors: 'Errors',
           quota: 'Quota Exhausted',
           keys: 'Active Keys',
+          quarantined: 'Quarantined',
           remaining: 'Remaining',
         },
         subtitles: {
           keysAll: 'All keys available',
           keysExhausted: '{count} exhausted',
+          keysAvailability: '{active} active · {quarantined} quarantined · {exhausted} exhausted',
         },
         loading: 'Loading latest metrics…',
       },
@@ -1483,6 +1510,12 @@ export const translations: Record<Language, TranslationShape> = {
           moreShow: 'Show all groups',
           moreHide: 'Collapse groups',
         },
+        filters: {
+          status: 'Status',
+          clearGroups: 'Show all groups',
+          clearStatuses: 'Show all statuses',
+          selectedSuffix: 'selected',
+        },
       table: {
         keyId: 'Key ID',
         status: 'Status',
@@ -1501,14 +1534,20 @@ export const translations: Record<Language, TranslationShape> = {
         empty: {
           loading: 'Loading key statistics…',
           none: 'No key data recorded yet.',
-          filtered: 'No keys in this group.',
+          filtered: 'No keys match the current filters.',
         },
         actions: {
           copy: 'Copy original API key',
           enable: 'Enable key',
           disable: 'Disable key',
+          clearQuarantine: 'Clear quarantine',
           delete: 'Remove key',
           details: 'Details',
+        },
+        quarantine: {
+          badge: 'Quarantined',
+          sourcePrefix: 'Source: {source}',
+          noReason: 'No quarantine reason recorded.',
         },
         dialogs: {
           disable: {
@@ -1600,6 +1639,7 @@ export const translations: Record<Language, TranslationShape> = {
       },
       statuses: {
         active: 'Active',
+        quarantined: 'Quarantined',
         exhausted: 'Exhausted',
         success: 'Success',
         running: 'Running',
@@ -1649,6 +1689,16 @@ export const translations: Record<Language, TranslationShape> = {
           lastActivityPrefix: 'Last activity',
           noActivity: 'No activity',
         },
+        quarantine: {
+          title: 'System Quarantine',
+          description: 'This key is excluded from rotation until an admin clears the quarantine.',
+          source: 'Source',
+          reason: 'Reason',
+          detail: 'Detail',
+          createdAt: 'Quarantined at',
+          clearAction: 'Clear quarantine',
+          clearing: 'Clearing…',
+        },
         logsTitle: 'Recent Requests',
         logsDescription: 'Up to the latest 200 for this key.',
         logsEmpty: 'No request logs for this period.',
@@ -1664,6 +1714,7 @@ export const translations: Record<Language, TranslationShape> = {
         updateTokenNote: 'Failed to update token note',
         deleteKey: 'Failed to delete API key',
         toggleKey: 'Failed to update key status',
+        clearQuarantine: 'Failed to clear key quarantine',
         loadKeyDetails: 'Failed to load details',
         syncUsage: 'Failed to sync usage',
       },
@@ -2227,11 +2278,13 @@ export const translations: Record<Language, TranslationShape> = {
           errors: '错误',
           quota: '额度耗尽',
           keys: '活跃密钥',
+          quarantined: '隔离中',
           remaining: '剩余可用',
         },
         subtitles: {
           keysAll: '全部可用',
           keysExhausted: '{count} 个耗尽',
+          keysAvailability: '{active} 个可用 · {quarantined} 个隔离中 · {exhausted} 个耗尽',
         },
         loading: '正在加载最新指标…',
       },
@@ -2322,6 +2375,12 @@ export const translations: Record<Language, TranslationShape> = {
           moreShow: '展开全部分组',
           moreHide: '收起分组',
         },
+        filters: {
+          status: '状态',
+          clearGroups: '显示全部分组',
+          clearStatuses: '显示全部状态',
+          selectedSuffix: '项已选',
+        },
         table: {
           keyId: 'Key ID',
           status: '状态',
@@ -2340,14 +2399,20 @@ export const translations: Record<Language, TranslationShape> = {
         empty: {
           loading: '正在加载密钥统计…',
           none: '暂时没有密钥数据。',
-          filtered: '该分组下暂无密钥。',
+          filtered: '当前筛选条件下暂无密钥。',
         },
         actions: {
           copy: '复制原始 API Key',
           enable: '启用密钥',
           disable: '禁用密钥',
+          clearQuarantine: '解除隔离',
           delete: '移除密钥',
           details: '查看详情',
+        },
+        quarantine: {
+          badge: '隔离中',
+          sourcePrefix: '来源：{source}',
+          noReason: '没有记录隔离原因。',
         },
         dialogs: {
           disable: {
@@ -2439,6 +2504,7 @@ export const translations: Record<Language, TranslationShape> = {
       },
       statuses: {
         active: '活跃',
+        quarantined: '隔离中',
         exhausted: '耗尽',
         success: '成功',
         running: '运行中',
@@ -2488,6 +2554,16 @@ export const translations: Record<Language, TranslationShape> = {
           lastActivityPrefix: '最近活跃时间',
           noActivity: '暂无活跃记录',
         },
+        quarantine: {
+          title: '系统隔离',
+          description: '该密钥当前已被移出轮转池，只有管理员手动解除后才会重新参与调度。',
+          source: '来源',
+          reason: '原因摘要',
+          detail: '原始详情',
+          createdAt: '隔离时间',
+          clearAction: '解除隔离',
+          clearing: '解除中…',
+        },
         logsTitle: '近期请求',
         logsDescription: '最多展示该密钥的 200 条请求。',
         logsEmpty: '该时间段内没有请求。',
@@ -2503,6 +2579,7 @@ export const translations: Record<Language, TranslationShape> = {
         updateTokenNote: '更新令牌备注失败',
         deleteKey: '删除 API Key 失败',
         toggleKey: '更新密钥状态失败',
+        clearQuarantine: '解除密钥隔离失败',
         loadKeyDetails: '加载详情失败',
         syncUsage: '同步额度失败',
       },

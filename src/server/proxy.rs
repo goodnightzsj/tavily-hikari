@@ -1004,8 +1004,16 @@ fn quota_window_stats(verdict: &TokenQuotaVerdict, projected_delta: i64) -> (i64
     }
 }
 
-impl From<ApiKeyMetrics> for ApiKeyView {
-    fn from(metrics: ApiKeyMetrics) -> Self {
+impl ApiKeyView {
+    fn from_list(metrics: ApiKeyMetrics) -> Self {
+        Self::from_metrics(metrics, false)
+    }
+
+    fn from_detail(metrics: ApiKeyMetrics) -> Self {
+        Self::from_metrics(metrics, true)
+    }
+
+    fn from_metrics(metrics: ApiKeyMetrics, include_quarantine_detail: bool) -> Self {
         Self {
             id: metrics.id,
             status: metrics.status,
@@ -1020,6 +1028,13 @@ impl From<ApiKeyMetrics> for ApiKeyView {
             success_count: metrics.success_count,
             error_count: metrics.error_count,
             quota_exhausted_count: metrics.quota_exhausted_count,
+            quarantine: metrics.quarantine.map(|quarantine| ApiKeyQuarantineView {
+                source: quarantine.source,
+                reason_code: quarantine.reason_code,
+                reason_summary: quarantine.reason_summary,
+                reason_detail: include_quarantine_detail.then_some(quarantine.reason_detail),
+                created_at: quarantine.created_at,
+            }),
         }
     }
 }
@@ -1063,6 +1078,7 @@ impl From<ProxySummary> for SummaryView {
             quota_exhausted_count: summary.quota_exhausted_count,
             active_keys: summary.active_keys,
             exhausted_keys: summary.exhausted_keys,
+            quarantined_keys: summary.quarantined_keys,
             last_activity: summary.last_activity,
             total_quota_limit: summary.total_quota_limit,
             total_quota_remaining: summary.total_quota_remaining,

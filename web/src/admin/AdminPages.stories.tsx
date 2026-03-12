@@ -20,6 +20,15 @@ import QuotaRangeField from '../components/QuotaRangeField'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
 import SegmentedTabs from '../components/ui/SegmentedTabs'
 import { Button } from '../components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../components/ui/dropdown-menu'
 import { Input } from '../components/ui/input'
 import { Card } from '../components/ui/card'
 import { Badge } from '../components/ui/badge'
@@ -43,6 +52,93 @@ import {
 import type { AdminModuleId } from './routes'
 
 const now = 1_762_380_000
+
+function formatKeyGroupName(group: string | null | undefined, ungroupedLabel: string): string {
+  const normalized = group?.trim() ?? ''
+  return normalized.length > 0 ? normalized : ungroupedLabel
+}
+
+function toggleSelection(values: string[], value: string): string[] {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]
+}
+
+function summarizeFilterSelection(
+  label: string,
+  selectedLabels: string[],
+  allLabel: string,
+  selectedSuffix: string,
+): string {
+  if (selectedLabels.length === 0) return `${label}: ${allLabel}`
+  if (selectedLabels.length === 1) return `${label}: ${selectedLabels[0]}`
+  return `${label}: ${selectedLabels.length} ${selectedSuffix}`
+}
+
+const tableStackStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 4,
+  minWidth: 0,
+} as const
+
+const tableFieldStyle = {
+  whiteSpace: 'nowrap',
+  lineHeight: 1.35,
+} as const
+
+const tableSecondaryFieldStyle = {
+  ...tableFieldStyle,
+  fontSize: '0.92em',
+  opacity: 0.68,
+} as const
+
+const tableInlineFieldStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 8,
+  whiteSpace: 'nowrap',
+  lineHeight: 1.35,
+} as const
+
+const tableHeaderStackStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 2,
+  minHeight: 40,
+  justifyContent: 'center',
+} as const
+
+const keysUtilityRowStyle = {
+  display: 'flex',
+  alignItems: 'stretch',
+  justifyContent: 'space-between',
+  gap: 16,
+  flexWrap: 'wrap',
+  marginBottom: 16,
+} as const
+
+const keysFilterClusterStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'wrap',
+  flex: '1 1 360px',
+  minWidth: 260,
+} as const
+
+const keysQuickAddCardStyle = {
+  flex: '0 1 420px',
+  minWidth: 300,
+  width: 'min(420px, 100%)',
+  padding: 0,
+} as const
+
+const keysQuickAddActionsStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'nowrap',
+  width: '100%',
+} as const
 
 function openAdminStory(storyId: string): void {
   addons.getChannel().emit(SELECT_STORY, { storyId })
@@ -166,6 +262,7 @@ const MOCK_KEYS: ApiKeyStats[] = [
     success_count: 19_102,
     error_count: 631,
     quota_exhausted_count: 107,
+    quarantine: null,
   },
   {
     id: 'asR8',
@@ -181,6 +278,7 @@ const MOCK_KEYS: ApiKeyStats[] = [
     success_count: 14_299,
     error_count: 1_142,
     quota_exhausted_count: 672,
+    quarantine: null,
   },
   {
     id: 'U2vK',
@@ -196,6 +294,7 @@ const MOCK_KEYS: ApiKeyStats[] = [
     success_count: 28_211,
     error_count: 541,
     quota_exhausted_count: 149,
+    quarantine: null,
   },
   {
     id: 'c7Pk',
@@ -211,6 +310,7 @@ const MOCK_KEYS: ApiKeyStats[] = [
     success_count: 570,
     error_count: 29,
     quota_exhausted_count: 0,
+    quarantine: null,
   },
   {
     id: 'J1nW',
@@ -226,7 +326,28 @@ const MOCK_KEYS: ApiKeyStats[] = [
     success_count: 8_672,
     error_count: 419,
     quota_exhausted_count: 129,
+    quarantine: null,
   },
+]
+
+const MOCK_KEYS_WITH_QUARANTINE: ApiKeyStats[] = [
+  {
+    ...MOCK_KEYS[0],
+    id: 'Qn8R',
+    status: 'active',
+    group: 'production',
+    quota_limit: 12_000,
+    quota_remaining: 0,
+    quarantine: {
+      source: '/api/tavily/search',
+      reasonSummary: 'Tavily account deactivated (HTTP 401)',
+      reasonDetail:
+        'The account associated with this API key has been deactivated. Please contact Tavily support to restore access.',
+      reasonCode: 'account_deactivated',
+      createdAt: now - 540,
+    },
+  },
+  ...MOCK_KEYS.slice(1),
 ]
 
 const MOCK_REQUESTS: RequestLog[] = [
@@ -1298,9 +1419,62 @@ function TokensPageCanvas(): JSX.Element {
   )
 }
 
-function KeysPageCanvas(): JSX.Element {
+function KeysPageCanvas({
+  keys = MOCK_KEYS,
+  selectedKeyId,
+}: {
+  keys?: ApiKeyStats[]
+  selectedKeyId?: string
+} = {}): JSX.Element {
   const admin = useTranslate().admin
   const keyStrings = admin.keys
+  const keyDetailsStrings = admin.keyDetails
+  const [selectedGroups, setSelectedGroups] = useState<string[]>([])
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([])
+  const groupOptions = Array.from(
+    keys.reduce((map, item) => {
+      const key = (item.group ?? '').trim()
+      map.set(key, {
+        value: key,
+        label: key.length > 0 ? key : keyStrings.groups.ungrouped,
+        count: (map.get(key)?.count ?? 0) + 1,
+      })
+      return map
+    }, new Map<string, { value: string; label: string; count: number }>()),
+  ).map(([, value]) => value)
+  const statusOptions = Array.from(
+    keys.reduce((map, item) => {
+      const value = item.quarantine ? 'quarantined' : item.status
+      map.set(value, {
+        value,
+        label: admin.statuses[value] ?? value,
+        count: (map.get(value)?.count ?? 0) + 1,
+      })
+      return map
+    }, new Map<string, { value: string; label: string; count: number }>()),
+  )
+    .map(([, value]) => value)
+    .sort((left, right) => left.label.localeCompare(right.label))
+  const filteredKeys = keys.filter((item) => {
+    const groupKey = (item.group ?? '').trim()
+    const statusKey = item.quarantine ? 'quarantined' : item.status
+    const groupMatched = selectedGroups.length === 0 || selectedGroups.includes(groupKey)
+    const statusMatched = selectedStatuses.length === 0 || selectedStatuses.includes(statusKey)
+    return groupMatched && statusMatched
+  })
+  const selectedKey = selectedKeyId ? filteredKeys.find((item) => item.id === selectedKeyId) ?? null : null
+  const groupSummary = summarizeFilterSelection(
+    keyStrings.groups.label,
+    groupOptions.filter((option) => selectedGroups.includes(option.value)).map((option) => option.label),
+    keyStrings.groups.all,
+    keyStrings.filters.selectedSuffix,
+  )
+  const statusSummary = summarizeFilterSelection(
+    keyStrings.filters.status,
+    statusOptions.filter((option) => selectedStatuses.includes(option.value)).map((option) => option.label),
+    keyStrings.groups.all,
+    keyStrings.filters.selectedSuffix,
+  )
 
   return (
     <AdminPageFrame activeModule="keys">
@@ -1310,34 +1484,101 @@ function KeysPageCanvas(): JSX.Element {
             <h2>{keyStrings.title}</h2>
             <p className="panel-description">{keyStrings.description}</p>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginLeft: 'auto' }}>
-            <input type="text" className="input input-bordered" readOnly value="tvly-prod-******" aria-label={keyStrings.placeholder} />
-            <button type="button" className="btn btn-primary">
-              {keyStrings.addButton}
-            </button>
-          </div>
         </div>
 
-        <div className="token-groups-container">
-          <div className="token-groups-label">
-            <span>{keyStrings.groups.label}</span>
+        <div style={keysUtilityRowStyle}>
+          <div style={keysFilterClusterStyle}>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="outline" size="sm" aria-label={groupSummary}>
+                  <Icon icon="mdi:filter-variant" width={16} height={16} aria-hidden="true" />
+                  <span style={{ whiteSpace: 'nowrap' }}>{groupSummary}</span>
+                  {selectedGroups.length > 0 ? (
+                    <Badge variant="neutral" className="ml-1 px-1.5 py-0 text-[10px]">
+                      {selectedGroups.length}
+                    </Badge>
+                  ) : null}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuLabel>{keyStrings.groups.label}</DropdownMenuLabel>
+                <DropdownMenuItem
+                  className="cursor-pointer"
+                  disabled={selectedGroups.length === 0}
+                  onSelect={(event) => {
+                    event.preventDefault()
+                    setSelectedGroups([])
+                  }}
+                >
+                  {keyStrings.filters.clearGroups}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {groupOptions.map((option) => (
+                  <DropdownMenuCheckboxItem
+                    key={option.value || '__ungrouped__'}
+                    className="cursor-pointer"
+                    checked={selectedGroups.includes(option.value)}
+                    onSelect={(event) => event.preventDefault()}
+                    onCheckedChange={() => setSelectedGroups((current) => toggleSelection(current, option.value))}
+                  >
+                    <span>{option.label}</span>
+                    <span className="ml-auto text-xs opacity-60">{formatNumber(option.count)}</span>
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="outline" size="sm" aria-label={statusSummary}>
+                  <Icon icon="mdi:filter-outline" width={16} height={16} aria-hidden="true" />
+                  <span style={{ whiteSpace: 'nowrap' }}>{statusSummary}</span>
+                  {selectedStatuses.length > 0 ? (
+                    <Badge variant="neutral" className="ml-1 px-1.5 py-0 text-[10px]">
+                      {selectedStatuses.length}
+                    </Badge>
+                  ) : null}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuLabel>{keyStrings.filters.status}</DropdownMenuLabel>
+                <DropdownMenuItem
+                  className="cursor-pointer"
+                  disabled={selectedStatuses.length === 0}
+                  onSelect={(event) => {
+                    event.preventDefault()
+                    setSelectedStatuses([])
+                  }}
+                >
+                  {keyStrings.filters.clearStatuses}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {statusOptions.map((option) => (
+                  <DropdownMenuCheckboxItem
+                    key={option.value}
+                    className="cursor-pointer"
+                    checked={selectedStatuses.includes(option.value)}
+                    onSelect={(event) => event.preventDefault()}
+                    onCheckedChange={() => setSelectedStatuses((current) => toggleSelection(current, option.value))}
+                  >
+                    <span>{option.label}</span>
+                    <span className="ml-auto text-xs opacity-60">{formatNumber(option.count)}</span>
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <div className="token-groups-row">
-            <div className="token-groups-list token-groups-list-expanded">
-              <button type="button" className="token-group-chip token-group-chip-active">
-                <span className="token-group-name">{keyStrings.groups.all}</span>
-              </button>
-              <button type="button" className="token-group-chip">
-                <span className="token-group-name">production</span>
-                <span className="token-group-count">2</span>
-              </button>
-              <button type="button" className="token-group-chip">
-                <span className="token-group-name">ops</span>
-                <span className="token-group-count">2</span>
-              </button>
-              <button type="button" className="token-group-chip">
-                <span className="token-group-name">batch</span>
-                <span className="token-group-count">1</span>
+          <div style={keysQuickAddCardStyle}>
+            <div style={keysQuickAddActionsStyle}>
+              <input
+                type="text"
+                className="input input-bordered"
+                readOnly
+                value="tvly-prod-******"
+                aria-label={keyStrings.placeholder}
+                style={{ flex: '1 1 260px', minWidth: 260, maxWidth: '100%' }}
+              />
+              <button type="button" className="btn btn-primary btn-sm" style={{ whiteSpace: 'nowrap' }}>
+                {keyStrings.addButton}
               </button>
             </div>
           </div>
@@ -1347,38 +1588,85 @@ function KeysPageCanvas(): JSX.Element {
           <table className="jobs-table">
             <thead>
               <tr>
-                <th>{keyStrings.table.keyId}</th>
-                <th>{keyStrings.table.status}</th>
-                <th>{keyStrings.table.total}</th>
-                <th>{keyStrings.table.success}</th>
-                <th>{keyStrings.table.errors}</th>
-                <th>{keyStrings.table.quotaLeft}</th>
-                <th>{keyStrings.table.lastUsed}</th>
-                <th>{keyStrings.table.statusChanged}</th>
-                <th>{keyStrings.table.actions}</th>
+                <th>
+                  <div style={tableHeaderStackStyle}>
+                    <span style={tableFieldStyle}>{keyStrings.table.keyId}</span>
+                    <span style={tableSecondaryFieldStyle}>{keyStrings.groups.label}</span>
+                  </div>
+                </th>
+                <th>
+                  <div style={tableHeaderStackStyle}>
+                    <span style={tableFieldStyle}>{keyStrings.table.status}</span>
+                    <span style={tableSecondaryFieldStyle} aria-hidden="true">&nbsp;</span>
+                  </div>
+                </th>
+                <th>
+                  <div style={tableHeaderStackStyle}>
+                    <span style={tableFieldStyle}>{keyStrings.table.success}</span>
+                    <span style={tableSecondaryFieldStyle}>{keyStrings.table.errors}</span>
+                  </div>
+                </th>
+                <th>
+                  <div style={tableHeaderStackStyle}>
+                    <span style={tableFieldStyle}>{keyStrings.table.quotaLeft}</span>
+                    <span style={tableSecondaryFieldStyle} aria-hidden="true">&nbsp;</span>
+                  </div>
+                </th>
+                <th>
+                  <div style={tableHeaderStackStyle}>
+                    <span style={tableFieldStyle}>{keyStrings.table.lastUsed}</span>
+                    <span style={tableSecondaryFieldStyle}>{keyStrings.table.statusChanged}</span>
+                  </div>
+                </th>
+                <th>
+                  <div style={tableHeaderStackStyle}>
+                    <span style={tableFieldStyle}>{keyStrings.table.actions}</span>
+                    <span style={tableSecondaryFieldStyle} aria-hidden="true">&nbsp;</span>
+                  </div>
+                </th>
               </tr>
             </thead>
             <tbody>
-              {MOCK_KEYS.map((item) => (
+              {filteredKeys.map((item) => (
                 <tr key={item.id}>
                   <td>
-                    <code>{item.id}</code>
+                    <div style={tableStackStyle}>
+                      <div style={tableInlineFieldStyle}>
+                        <code>{item.id}</code>
+                      </div>
+                      <span style={tableSecondaryFieldStyle}>{formatKeyGroupName(item.group, keyStrings.groups.ungrouped)}</span>
+                    </div>
                   </td>
                   <td>
-                    <StatusBadge tone={keyStatusTone(item.status)}>{admin.statuses[item.status] ?? item.status}</StatusBadge>
+                    <div style={tableStackStyle}>
+                      <span style={tableFieldStyle}>
+                        <StatusBadge tone={keyStatusTone(item.quarantine ? 'quarantined' : item.status)}>
+                          {admin.statuses[item.quarantine ? 'quarantined' : item.status] ?? item.status}
+                        </StatusBadge>
+                      </span>
+                    </div>
                   </td>
-                  <td>{formatNumber(item.total_requests)}</td>
-                  <td>{formatNumber(item.success_count)}</td>
-                  <td>{formatNumber(item.error_count)}</td>
                   <td>
-                    {item.quota_remaining != null && item.quota_limit != null
-                      ? `${formatNumber(item.quota_remaining)} / ${formatNumber(item.quota_limit)}`
-                      : '—'}
+                    <div style={tableStackStyle}>
+                      <span style={tableFieldStyle}>{formatNumber(item.success_count)}</span>
+                      <span style={tableSecondaryFieldStyle}>{formatNumber(item.error_count)}</span>
+                    </div>
                   </td>
-                  <td>{formatTimestamp(item.last_used_at)}</td>
-                  <td>{formatTimestamp(item.status_changed_at)}</td>
                   <td>
-                    <div className="table-actions">
+                    <span style={tableFieldStyle}>
+                      {item.quota_remaining != null && item.quota_limit != null
+                        ? `${formatNumber(item.quota_remaining)} / ${formatNumber(item.quota_limit)}`
+                        : '—'}
+                    </span>
+                  </td>
+                  <td>
+                    <div style={tableStackStyle}>
+                      <span style={tableFieldStyle}>{formatTimestamp(item.last_used_at)}</span>
+                      <span style={tableSecondaryFieldStyle}>{formatTimestamp(item.status_changed_at)}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="table-actions" style={{ flexWrap: 'nowrap' }}>
                       <button type="button" className="btn btn-circle btn-ghost btn-sm" aria-label={keyStrings.actions.disable}>
                         P
                       </button>
@@ -1396,6 +1684,38 @@ function KeysPageCanvas(): JSX.Element {
           </table>
         </div>
       </section>
+
+      {selectedKey?.quarantine ? (
+        <section className="surface panel" style={{ marginTop: 16 }}>
+          <div className="panel-header">
+            <div>
+              <h2>{keyDetailsStrings.quarantine.title}</h2>
+              <p className="panel-description">{keyDetailsStrings.quarantine.description}</p>
+            </div>
+            <Button type="button" variant="warning">
+              {keyDetailsStrings.quarantine.clearAction}
+            </Button>
+          </div>
+          <div className="admin-mobile-kv">
+            <span>{keyDetailsStrings.quarantine.source}</span>
+            <strong>{selectedKey.quarantine.source}</strong>
+          </div>
+          <div className="admin-mobile-kv">
+            <span>{keyDetailsStrings.quarantine.reason}</span>
+            <strong>{selectedKey.quarantine.reasonSummary}</strong>
+          </div>
+          <div className="admin-mobile-kv">
+            <span>{keyDetailsStrings.quarantine.createdAt}</span>
+            <strong>{formatTimestamp(selectedKey.quarantine.createdAt)}</strong>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <div className="panel-description" style={{ marginBottom: 4 }}>
+              {keyDetailsStrings.quarantine.detail}
+            </div>
+            <pre className="log-details-pre">{selectedKey.quarantine.reasonDetail}</pre>
+          </div>
+        </section>
+      ) : null}
     </AdminPageFrame>
   )
 }
@@ -2339,6 +2659,13 @@ export const Tokens: Story = {
 
 export const Keys: Story = {
   render: () => <KeysPageCanvas />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const KeysQuarantined: Story = {
+  render: () => <KeysPageCanvas keys={MOCK_KEYS_WITH_QUARANTINE} selectedKeyId="Qn8R" />,
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
   },

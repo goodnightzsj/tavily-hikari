@@ -4,7 +4,7 @@
 
 - Status: 进行中（快车道）
 - Created: 2026-03-02
-- Last: 2026-03-02
+- Last: 2026-03-13
 
 ## 背景 / 问题陈述
 
@@ -82,3 +82,13 @@
 - [x] M4: Dashboard 聚合增强（趋势/风险/行动）
 - [x] M5: Users/Alerts/Proxy Settings 骨架页接入
 - [x] M6: Vite + Server `/admin/*` 承载支持
+
+## 视觉证据（Visual Evidence）
+
+Admin / API Keys 页面当前成果图：
+
+![Admin API Keys page with grouped rows, dual-line headers, and multi-select filters](./assets/admin-keys-quarantined-layout.png)
+
+## 变更记录（Change log）
+
+- 2026-03-13: 补充 `Admin / API Keys` 页面成果截图到 spec 资产，固定当前双行表头、分组/状态筛选与布局收口效果。

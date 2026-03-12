@@ -1,4 +1,15 @@
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyQuarantineView {
+    source: String,
+    reason_code: String,
+    reason_summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_detail: Option<String>,
+    created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
 struct ApiKeyView {
     id: String,
     status: String,
@@ -13,6 +24,7 @@ struct ApiKeyView {
     success_count: i64,
     error_count: i64,
     quota_exhausted_count: i64,
+    quarantine: Option<ApiKeyQuarantineView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +72,7 @@ struct SummaryView {
     quota_exhausted_count: i64,
     active_keys: i64,
     exhausted_keys: i64,
+    quarantined_keys: i64,
     last_activity: Option<i64>,
     total_quota_limit: i64,
     total_quota_remaining: i64,

@@ -1,11 +1,17 @@
 async fn fetch_summary(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Json<SummaryView>, StatusCode> {
     state
         .proxy
         .summary()
         .await
-        .map(|summary| Json(summary.into()))
+        .map(|mut summary| {
+            if !is_admin_request(state.as_ref(), &headers) {
+                summary.quarantined_keys = 0;
+            }
+            Json(summary.into())
+        })
         .map_err(|err| {
             eprintln!("summary error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -560,7 +566,7 @@ async fn build_snapshot_event(state: &Arc<AppState>) -> Option<Event> {
 
     let payload = DashboardSnapshot {
         summary: summary.into(),
-        keys: keys.into_iter().map(ApiKeyView::from).collect(),
+        keys: keys.into_iter().map(ApiKeyView::from_list).collect(),
         logs: logs.into_iter().map(RequestLogView::from).collect(),
     };
 
@@ -581,10 +587,10 @@ async fn compute_signatures(
         summary.quota_exhausted_count,
         summary.active_keys,
         summary.exhausted_keys,
+        summary.quarantined_keys,
         summary.last_activity,
     ));
     Ok((sig, latest_id))
 }
 
 // ---- Jobs listing ----
-

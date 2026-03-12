@@ -2738,6 +2738,9 @@ mod tests {
         let app = Router::new()
             .route("/api/admin/login", post(post_admin_login))
             .route("/api/admin/logout", post(post_admin_logout))
+            .route("/api/summary", get(fetch_summary))
+            .route("/api/keys", get(list_keys))
+            .route("/api/keys/:id", get(get_api_key_detail))
             .route("/api/keys/batch", post(create_api_keys_batch))
             .with_state(state);
 
@@ -4269,6 +4272,265 @@ mod tests {
             .await
             .expect("admin endpoint after revoke");
         assert_eq!(admin_after_resp.status(), reqwest::StatusCode::OK);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_key_detail_requires_admin_auth() {
+        let db_path = temp_db_path("api-key-detail-auth");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(vec!["tvly-detail-auth".to_string()], DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let key_id = proxy
+            .list_api_key_metrics()
+            .await
+            .expect("list api key metrics")
+            .into_iter()
+            .next()
+            .expect("seeded key")
+            .id;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await
+            .expect("open db pool");
+        sqlx::query(
+            r#"INSERT INTO api_key_quarantines
+               (key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
+        )
+        .bind(&key_id)
+        .bind("/api/tavily/search")
+        .bind("account_deactivated")
+        .bind("Tavily account deactivated (HTTP 401)")
+        .bind("The account associated with this API key has been deactivated.")
+        .bind(Utc::now().timestamp())
+        .execute(&pool)
+        .await
+        .expect("insert quarantine");
+        let admin_password = "detail-auth-password";
+        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build client");
+
+        let unauth_resp = client
+            .get(format!("http://{}/api/keys/{}", admin_addr, key_id))
+            .send()
+            .await
+            .expect("unauth key detail request");
+        assert_eq!(unauth_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let login_resp = client
+            .post(format!("http://{}/api/admin/login", admin_addr))
+            .json(&serde_json::json!({ "password": admin_password }))
+            .send()
+            .await
+            .expect("admin login");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let admin_cookie = find_cookie_pair(login_resp.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+            .expect("admin session cookie");
+
+        let auth_resp = client
+            .get(format!("http://{}/api/keys/{}", admin_addr, key_id))
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
+            .send()
+            .await
+            .expect("authed key detail request");
+        assert_eq!(auth_resp.status(), reqwest::StatusCode::OK);
+        let detail_body: serde_json::Value = auth_resp.json().await.expect("detail json");
+        assert_eq!(
+            detail_body
+                .get("quarantine")
+                .and_then(|value| value.get("reasonDetail"))
+                .and_then(|value| value.as_str()),
+            Some("The account associated with this API key has been deactivated.")
+        );
+
+        let list_resp = client
+            .get(format!("http://{}/api/keys", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .send()
+            .await
+            .expect("authed key list request");
+        assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+        let list_body: serde_json::Value = list_resp.json().await.expect("list json");
+        let listed = list_body
+            .as_array()
+            .expect("key list array")
+            .iter()
+            .find(|value| value.get("id").and_then(|v| v.as_str()) == Some(key_id.as_str()))
+            .expect("key in list");
+        assert_eq!(
+            listed
+                .get("quarantine")
+                .and_then(|value| value.get("reasonDetail")),
+            None
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn public_summary_hides_quarantined_key_count_without_admin_auth() {
+        let db_path = temp_db_path("public-summary-quarantine");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(vec!["tvly-summary-public".to_string()], DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let key_id = proxy
+            .list_api_key_metrics()
+            .await
+            .expect("list api key metrics")
+            .into_iter()
+            .next()
+            .expect("seeded key")
+            .id;
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+        sqlx::query(
+            r#"INSERT INTO api_key_quarantines
+               (key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
+        )
+        .bind(&key_id)
+        .bind("/api/tavily/search")
+        .bind("account_deactivated")
+        .bind("Tavily account deactivated (HTTP 401)")
+        .bind("The account associated with this API key has been deactivated.")
+        .bind(Utc::now().timestamp())
+        .execute(&pool)
+        .await
+        .expect("insert quarantine");
+
+        let admin_password = "summary-admin-password";
+        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build client");
+
+        let public_resp = client
+            .get(format!("http://{}/api/summary", admin_addr))
+            .send()
+            .await
+            .expect("public summary request");
+        assert_eq!(public_resp.status(), reqwest::StatusCode::OK);
+        let public_body: serde_json::Value = public_resp.json().await.expect("public summary json");
+        assert_eq!(
+            public_body.get("quarantined_keys").and_then(|v| v.as_i64()),
+            Some(0)
+        );
+
+        let login_resp = client
+            .post(format!("http://{}/api/admin/login", admin_addr))
+            .json(&serde_json::json!({ "password": admin_password }))
+            .send()
+            .await
+            .expect("admin login");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let admin_cookie = find_cookie_pair(login_resp.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+            .expect("admin session cookie");
+
+        let admin_resp = client
+            .get(format!("http://{}/api/summary", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .send()
+            .await
+            .expect("admin summary request");
+        assert_eq!(admin_resp.status(), reqwest::StatusCode::OK);
+        let admin_body: serde_json::Value = admin_resp.json().await.expect("admin summary json");
+        assert_eq!(
+            admin_body.get("quarantined_keys").and_then(|v| v.as_i64()),
+            Some(1)
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn compute_signatures_tracks_quarantined_key_count() {
+        let db_path = temp_db_path("summary-signatures-quarantine");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-signature-a".to_string(), "tvly-signature-b".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let key_id = proxy
+            .list_api_key_metrics()
+            .await
+            .expect("list api key metrics")
+            .into_iter()
+            .next()
+            .expect("seeded key exists")
+            .id;
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        sqlx::query(
+            r#"INSERT INTO api_key_quarantines
+               (key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
+        )
+            .bind(&key_id)
+            .bind("/api/tavily/search")
+            .bind("account_deactivated")
+            .bind("Tavily account deactivated (HTTP 401)")
+            .bind("The account associated with this API key has been deactivated.")
+            .bind(Utc::now().timestamp())
+            .execute(&pool)
+            .await
+            .expect("quarantine key");
+
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: false,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            dev_open_admin: false,
+            usage_base: "http://127.0.0.1:58088".to_string(),
+        });
+
+        let (sig, latest_id) = compute_signatures(&state).await.expect("compute signatures");
+        let sig = sig.expect("summary signature");
+        assert_eq!(sig.4, 1);
+        assert_eq!(sig.5, 0);
+        assert_eq!(sig.6, 1);
+        assert!(latest_id.is_none());
 
         let _ = std::fs::remove_file(db_path);
     }
