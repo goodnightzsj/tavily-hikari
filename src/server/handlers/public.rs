@@ -581,10 +581,10 @@ async fn compute_signatures(
         summary.quota_exhausted_count,
         summary.active_keys,
         summary.exhausted_keys,
+        summary.quarantined_keys,
         summary.last_activity,
     ));
     Ok((sig, latest_id))
 }
 
 // ---- Jobs listing ----
-

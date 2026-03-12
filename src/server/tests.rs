@@ -4325,6 +4325,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compute_signatures_tracks_quarantined_key_count() {
+        let db_path = temp_db_path("summary-signatures-quarantine");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-signature-a".to_string(), "tvly-signature-b".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let key_id = proxy
+            .list_api_key_metrics()
+            .await
+            .expect("list api key metrics")
+            .into_iter()
+            .next()
+            .expect("seeded key exists")
+            .id;
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        sqlx::query(
+            r#"INSERT INTO api_key_quarantines
+               (key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
+        )
+            .bind(&key_id)
+            .bind("/api/tavily/search")
+            .bind("account_deactivated")
+            .bind("Tavily account deactivated (HTTP 401)")
+            .bind("The account associated with this API key has been deactivated.")
+            .bind(Utc::now().timestamp())
+            .execute(&pool)
+            .await
+            .expect("quarantine key");
+
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: false,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            dev_open_admin: false,
+            usage_base: "http://127.0.0.1:58088".to_string(),
+        });
+
+        let (sig, latest_id) = compute_signatures(&state).await.expect("compute signatures");
+        let sig = sig.expect("summary signature");
+        assert_eq!(sig.4, 1);
+        assert_eq!(sig.5, 0);
+        assert_eq!(sig.6, 1);
+        assert!(latest_id.is_none());
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn admin_user_management_lists_details_and_updates_quota() {
         let db_path = temp_db_path("admin-users");
         let db_str = db_path.to_string_lossy().to_string();
