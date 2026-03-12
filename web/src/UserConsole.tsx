@@ -1452,7 +1452,6 @@ export default function UserConsole(): JSX.Element {
                                 className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
                                 onPointerEnter={() => scheduleWarmTokenSecret(item.tokenId)}
                                 onPointerLeave={() => cancelWarmTokenSecret(item.tokenId)}
-                                onFocus={() => scheduleWarmTokenSecret(item.tokenId)}
                                 onBlur={() => cancelWarmTokenSecret(item.tokenId)}
                                 onPointerDown={() => warmTokenSecret(item.tokenId)}
                                 onKeyDown={(event) => {
@@ -1523,7 +1522,6 @@ export default function UserConsole(): JSX.Element {
                           className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
                           onPointerEnter={() => scheduleWarmTokenSecret(item.tokenId)}
                           onPointerLeave={() => cancelWarmTokenSecret(item.tokenId)}
-                          onFocus={() => scheduleWarmTokenSecret(item.tokenId)}
                           onBlur={() => cancelWarmTokenSecret(item.tokenId)}
                           onPointerDown={() => warmTokenSecret(item.tokenId)}
                           onKeyDown={(event) => {

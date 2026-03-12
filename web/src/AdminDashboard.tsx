@@ -921,6 +921,7 @@ function AdminDashboard(): JSX.Element {
 
   useEffect(() => {
     setManualCopyBubble(null)
+    setManualCopyDialog(null)
   }, [route])
 
   useEffect(() => {
@@ -4882,7 +4883,6 @@ function AdminDashboard(): JSX.Element {
   aria-label={tokenStrings.actions.copy}
   onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
-  onFocus={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onBlur={() => cancelSecretWarm(`token:${t.id}`)}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
@@ -4900,7 +4900,6 @@ function AdminDashboard(): JSX.Element {
   aria-label={tokenStrings.actions.share}
   onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
-  onFocus={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onBlur={() => cancelSecretWarm(`token:${t.id}`)}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
@@ -5024,7 +5023,6 @@ function AdminDashboard(): JSX.Element {
   size="sm"
   onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
-  onFocus={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onBlur={() => cancelSecretWarm(`token:${t.id}`)}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
@@ -5039,7 +5037,6 @@ function AdminDashboard(): JSX.Element {
   size="sm"
   onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
-  onFocus={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
   onBlur={() => cancelSecretWarm(`token:${t.id}`)}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
@@ -5291,7 +5288,6 @@ function AdminDashboard(): JSX.Element {
   aria-label={keyStrings.actions.copy}
   onPointerEnter={() => scheduleSecretWarm(`key:${item.id}`, () => warmApiKeySecret(item.id))}
   onPointerLeave={() => cancelSecretWarm(`key:${item.id}`)}
-  onFocus={() => scheduleSecretWarm(`key:${item.id}`, () => warmApiKeySecret(item.id))}
   onBlur={() => cancelSecretWarm(`key:${item.id}`)}
   onPointerDown={() => warmApiKeySecret(item.id)}
   onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmApiKeySecret(item.id) }}
@@ -5446,7 +5442,6 @@ function AdminDashboard(): JSX.Element {
   size="sm"
   onPointerEnter={() => scheduleSecretWarm(`key:${item.id}`, () => warmApiKeySecret(item.id))}
   onPointerLeave={() => cancelSecretWarm(`key:${item.id}`)}
-  onFocus={() => scheduleSecretWarm(`key:${item.id}`, () => warmApiKeySecret(item.id))}
   onBlur={() => cancelSecretWarm(`key:${item.id}`)}
   onPointerDown={() => warmApiKeySecret(item.id)}
   onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmApiKeySecret(item.id) }}

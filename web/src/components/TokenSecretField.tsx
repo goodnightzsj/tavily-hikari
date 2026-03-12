@@ -134,7 +134,6 @@ export default function TokenSecretField({
           className={cn('token-copy-button', copyStateClassName, copyButtonClassName)}
           onPointerEnter={() => void onCopyIntent?.()}
           onPointerLeave={() => onCopyIntentCancel?.()}
-          onFocus={() => void onCopyIntent?.()}
           onBlur={() => onCopyIntentCancel?.()}
           onPointerDown={() => void onCopyIntent?.()}
           onKeyDown={handleCopyIntentKeyDown}
