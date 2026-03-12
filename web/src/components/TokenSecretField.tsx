@@ -76,7 +76,6 @@ export default function TokenSecretField({
         ? 'mdi:alert-circle-outline'
         : 'mdi:content-copy'
   const copyText = copyState === 'copied' ? copiedLabel : copyState === 'error' ? copyErrorLabel : copyLabel
-  const visibilityIcon = visibilityBusy ? 'mdi:loading' : visible ? 'mdi:eye-off-outline' : 'mdi:eye-outline'
   const shouldMaskValue = !visible && hiddenDisplayValue == null
 
   return (
@@ -105,11 +104,15 @@ export default function TokenSecretField({
             aria-busy={visibilityBusy ? 'true' : undefined}
             disabled={visibilityBusy}
           >
-            <Icon
-              icon={visibilityIcon}
-              aria-hidden="true"
-              className={cn('token-visibility-icon', visibilityBusy && 'is-spinning')}
-            />
+            {visibilityBusy ? (
+              <span aria-hidden="true" className="token-visibility-spinner" />
+            ) : (
+              <Icon
+                icon={visible ? 'mdi:eye-off-outline' : 'mdi:eye-outline'}
+                aria-hidden="true"
+                className="token-visibility-icon"
+              />
+            )}
             <span className="sr-only">{visibilityIconAlt}</span>
           </Button>
         </div>
