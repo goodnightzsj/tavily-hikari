@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 进行中（快车道）
+- Status: 已完成（快车道）
 - Created: 2026-03-02
 - Last: 2026-03-13
 
@@ -67,6 +67,7 @@
 - `/admin` 可稳定进入 dashboard。
 - Dashboard 首页至少覆盖全局指标、趋势、风险、近期动作四层信息。
 - Tokens/API Keys/Requests/Jobs 核心交互行为与重构前保持一致。
+- API Keys 详情页的 quarantine 原始详情默认折叠；展开后长文本仅在详情块内部换行/滚动，不得把页面整体撑宽。
 
 ## 非功能性验收 / 质量门槛
 
@@ -83,12 +84,22 @@
 - [x] M5: Users/Alerts/Proxy Settings 骨架页接入
 - [x] M6: Vite + Server `/admin/*` 承载支持
 
-## 视觉证据（Visual Evidence）
+## Visual Evidence (PR)
 
 Admin / API Keys 页面当前成果图：
 
 ![Admin API Keys page with grouped rows, dual-line headers, and multi-select filters](./assets/admin-keys-quarantined-layout.png)
 
+真实 `/admin/keys/:id` 页面：API Key quarantine 原始详情默认折叠：
+
+![Real admin API key detail page with quarantine raw detail collapsed and no horizontal overflow](./assets/quarantine-detail-collapsed.png)
+
+真实 `/admin/keys/:id` 页面：API Key quarantine 原始详情展开后仍在详情块内收口：
+
+![Real admin API key detail page with quarantine raw detail expanded and no page overflow](./assets/quarantine-detail-expanded.png)
+
 ## 变更记录（Change log）
 
+- 2026-03-13: 将 quarantine 原始详情证据替换为真实 `/admin/keys/:id` 页面截图，确认默认折叠且展开后长文本也不会撑宽整页。
+- 2026-03-13: 补充 API Keys 详情页 quarantine 原始详情的收口约束：默认折叠，展开后也不得因长文本导致页面横向溢出。
 - 2026-03-13: 补充 `Admin / API Keys` 页面成果截图到 spec 资产，固定当前双行表头、分组/状态筛选与布局收口效果。

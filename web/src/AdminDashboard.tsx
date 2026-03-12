@@ -7002,11 +7002,13 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
   const [error, setError] = useState<string | null>(null)
   const [syncState, setSyncState] = useState<'idle' | 'syncing' | 'success'>('idle')
   const [quarantineState, setQuarantineState] = useState<'idle' | 'clearing'>('idle')
+  const [quarantineDetailExpanded, setQuarantineDetailExpanded] = useState(false)
   const syncInFlightRef = useRef(false)
   const syncFeedbackTimerRef = useRef<number | null>(null)
   const loadAbortRef = useRef<AbortController | null>(null)
   const queryKeyRef = useRef<string | null>(null)
   const queryKey = `${id}:${period}:${startDate}`
+  const quarantineDetailId = `key-quarantine-detail-${id}`
 
   const computeSince = useCallback((): number => {
     const base = new Date(startDate + 'T00:00:00Z')
@@ -7074,6 +7076,10 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
     }
   }, [])
 
+  useEffect(() => {
+    setQuarantineDetailExpanded(false)
+  }, [id])
+
   const syncUsage = useCallback(async () => {
     if (syncInFlightRef.current) return
     syncInFlightRef.current = true
@@ -7130,6 +7136,8 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
   const detailBlocking = isBlockingLoadState(detailLoadState)
   const detailRefreshing = isRefreshingLoadState(detailLoadState)
   const detailLoadingLabel = detailRefreshing ? loadingStateStrings.refreshing : loadingStateStrings.switching
+  const quarantineRawDetail = detail?.quarantine?.reasonDetail?.trim() ?? ''
+  const hasQuarantineRawDetail = quarantineRawDetail.length > 0
 
   return (
     <div className="admin-detail-stack">
@@ -7213,12 +7221,40 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
             <span>{keyDetailsStrings.quarantine.createdAt}</span>
             <strong>{formatTimestamp(detail.quarantine.createdAt)}</strong>
           </div>
-          <div style={{ marginTop: 12 }}>
-            <div className="panel-description" style={{ marginBottom: 4 }}>{keyDetailsStrings.quarantine.detail}</div>
-            <pre className="log-details-pre">
-              {detail.quarantine.reasonDetail || detail.quarantine.reasonSummary || keyStrings.quarantine.noReason}
-            </pre>
-          </div>
+          {hasQuarantineRawDetail && (
+            <div className="quarantine-detail-block">
+              <div className="quarantine-detail-header">
+                <div className="panel-description">{keyDetailsStrings.quarantine.detail}</div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="quarantine-detail-toggle"
+                  aria-expanded={quarantineDetailExpanded}
+                  aria-controls={quarantineDetailId}
+                  onClick={() => setQuarantineDetailExpanded((current) => !current)}
+                >
+                  <Icon
+                    icon={quarantineDetailExpanded ? 'mdi:chevron-up' : 'mdi:chevron-down'}
+                    width={18}
+                    height={18}
+                    aria-hidden="true"
+                  />
+                  {quarantineDetailExpanded
+                    ? keyDetailsStrings.quarantine.hideDetail
+                    : keyDetailsStrings.quarantine.showDetail}
+                </Button>
+              </div>
+              <pre
+                id={quarantineDetailId}
+                className="log-details-pre"
+                hidden={!quarantineDetailExpanded}
+                aria-hidden={!quarantineDetailExpanded}
+              >
+                {quarantineRawDetail}
+              </pre>
+            </div>
+          )}
         </section>
       )}
 
