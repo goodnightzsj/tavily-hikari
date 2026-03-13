@@ -7183,21 +7183,24 @@ tbody .log-details-row:hover {
   gap: 0.75rem;
 }
 
+.forward-proxy-summary-panel {
+  position: relative;
+}
+
 .forward-proxy-summary-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  column-gap: 1.5rem;
-  row-gap: 0.75rem;
+  display: block;
+  min-height: 8.25rem;
 }
 
 .forward-proxy-summary-panel .forward-proxy-panel-heading {
-  max-width: 44rem;
+  max-width: min(44rem, calc(100% - 23rem));
 }
 
 .forward-proxy-summary-panel .forward-proxy-panel-meta {
-  justify-self: end;
-  align-self: start;
+  position: absolute;
+  top: 1.5rem;
+  right: 1.5rem;
+  align-items: flex-end;
 }
 
 .forward-proxy-summary-content {
@@ -7553,12 +7556,17 @@ tbody .log-details-row:hover {
   }
 
   .forward-proxy-summary-header {
-    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .forward-proxy-summary-panel .forward-proxy-panel-heading {
+    max-width: none;
   }
 
   .forward-proxy-summary-panel .forward-proxy-panel-meta {
-    justify-self: stretch;
-    align-self: stretch;
+    position: static;
+    margin-top: 1rem;
+    align-items: flex-start;
   }
 
   .forward-proxy-range-row {
