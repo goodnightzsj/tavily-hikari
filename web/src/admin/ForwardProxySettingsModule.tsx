@@ -939,16 +939,16 @@ export default function ForwardProxySettingsModule({
                             <CardTitle className="text-base">{node.displayName}</CardTitle>
                           </div>
                           <div className="forward-proxy-node-chip-row">
-                            <Badge variant={node.source === 'subscription' ? 'info' : node.source === 'manual' ? 'outline' : 'neutral'}>
-                              {getSourceLabel(strings, node.source)}
-                            </Badge>
-                            <Badge variant={stateBadge.variant}>{stateBadge.label}</Badge>
                             <span className="forward-proxy-node-chip-text">
                               {strings.nodes.primary}: <strong>{formatNumber(node.primaryAssignmentCount)}</strong>
                             </span>
                             <span className="forward-proxy-node-chip-text">
                               {strings.nodes.secondary}: <strong>{formatNumber(node.secondaryAssignmentCount)}</strong>
                             </span>
+                            <Badge variant={node.source === 'subscription' ? 'info' : node.source === 'manual' ? 'outline' : 'neutral'}>
+                              {getSourceLabel(strings, node.source)}
+                            </Badge>
+                            <Badge variant={stateBadge.variant}>{stateBadge.label}</Badge>
                           </div>
                         </CardHeader>
                         <CardContent className="forward-proxy-node-mobile-content">
@@ -1028,16 +1028,16 @@ export default function ForwardProxySettingsModule({
                                   <strong className="truncate text-sm">{node.displayName}</strong>
                                 </div>
                                 <div className="forward-proxy-node-chip-row">
-                                  <Badge variant={node.source === 'subscription' ? 'info' : node.source === 'manual' ? 'outline' : 'neutral'}>
-                                    {getSourceLabel(strings, node.source)}
-                                  </Badge>
-                                  <Badge variant={stateBadge.variant}>{stateBadge.label}</Badge>
                                   <span className="forward-proxy-node-chip-text">
                                     {strings.nodes.primary}: <strong>{formatNumber(node.primaryAssignmentCount)}</strong>
                                   </span>
                                   <span className="forward-proxy-node-chip-text">
                                     {strings.nodes.secondary}: <strong>{formatNumber(node.secondaryAssignmentCount)}</strong>
                                   </span>
+                                  <Badge variant={node.source === 'subscription' ? 'info' : node.source === 'manual' ? 'outline' : 'neutral'}>
+                                    {getSourceLabel(strings, node.source)}
+                                  </Badge>
+                                  <Badge variant={stateBadge.variant}>{stateBadge.label}</Badge>
                                 </div>
                               </div>
                             </TableCell>
