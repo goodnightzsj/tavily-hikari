@@ -605,60 +605,29 @@ function mapValidationErrorLabel(
   }
 }
 
-function mapNodeErrorDetail(
-  strings: AdminTranslations['proxySettings'],
-  errorCode: string | null | undefined,
-): string | null {
-  switch (errorCode) {
-    case 'proxy_timeout':
-      return strings.states.timeoutHint
-    case 'proxy_unreachable':
-      return strings.states.unreachableHint
-    case 'xray_missing':
-      return strings.states.xrayMissingHint
-    case 'subscription_unreachable':
-    case 'validation_failed':
-      return strings.states.unavailableHint
-    default:
-      return null
-  }
-}
-
 function getNodeStateBadge(
   strings: AdminTranslations['proxySettings'],
   node: ForwardProxyStatsNode,
-): { label: string; variant: StatusBadgeVariant; detail: string | null } {
+): { label: string; variant: StatusBadgeVariant } {
   if (node.source === 'direct') {
-    return { label: strings.states.direct, variant: 'info', detail: null }
+    return { label: strings.states.direct, variant: 'info' }
   }
   if (node.penalized) {
-    return { label: strings.states.penalized, variant: 'warning', detail: strings.states.penalizedHint }
+    return { label: strings.states.penalized, variant: 'warning' }
   }
   if (!node.available) {
     switch (node.lastError) {
       case 'proxy_timeout':
-        return { label: strings.states.timeout, variant: 'destructive', detail: strings.states.timeoutHint }
+        return { label: strings.states.timeout, variant: 'destructive' }
       case 'proxy_unreachable':
-        return {
-          label: strings.states.unreachable,
-          variant: 'destructive',
-          detail: strings.states.unreachableHint,
-        }
+        return { label: strings.states.unreachable, variant: 'destructive' }
       case 'xray_missing':
-        return {
-          label: strings.states.xrayMissing,
-          variant: 'warning',
-          detail: strings.states.xrayMissingHint,
-        }
+        return { label: strings.states.xrayMissing, variant: 'warning' }
       default:
-        return {
-          label: strings.states.unavailable,
-          variant: 'neutral',
-          detail: mapNodeErrorDetail(strings, node.lastError),
-        }
+        return { label: strings.states.unavailable, variant: 'neutral' }
     }
   }
-  return { label: strings.states.ready, variant: 'success', detail: strings.states.readyHint }
+  return { label: strings.states.ready, variant: 'success' }
 }
 
 export default function ForwardProxySettingsModule({
@@ -975,9 +944,6 @@ export default function ForwardProxySettingsModule({
                           </div>
                         </CardHeader>
                         <CardContent className="forward-proxy-node-mobile-content">
-                          {stateBadge.detail && (
-                            <p className="forward-proxy-node-status-detail">{stateBadge.detail}</p>
-                          )}
                           <div className="forward-proxy-node-mobile-grid">
                             <div className="forward-proxy-node-mobile-block">
                               <span className="forward-proxy-node-metric-label">{strings.nodes.table.assignments}</span>
@@ -1067,9 +1033,6 @@ export default function ForwardProxySettingsModule({
                                     {strings.nodes.secondary}: <strong>{formatNumber(node.secondaryAssignmentCount)}</strong>
                                   </span>
                                 </div>
-                                {stateBadge.detail && (
-                                  <div className="forward-proxy-node-status-detail">{stateBadge.detail}</div>
-                                )}
                               </div>
                             </TableCell>
                             {WINDOW_KEYS.map((windowDefinition, index) => {
