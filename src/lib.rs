@@ -157,6 +157,7 @@ const META_KEY_API_KEY_USAGE_BUCKETS_V1_DONE: &str = "api_key_usage_buckets_v1_d
 const META_KEY_ACCOUNT_QUOTA_BACKFILL_V1: &str = "account_quota_backfill_v1";
 const META_KEY_ACCOUNT_QUOTA_INHERITS_DEFAULTS_BACKFILL_V1: &str =
     "account_quota_inherits_defaults_backfill_v1";
+const META_KEY_ACCOUNT_QUOTA_ZERO_BASE_CUTOVER_V1: &str = "account_quota_zero_base_cutover_v1";
 const META_KEY_FORCE_USER_RELOGIN_V1: &str = "force_user_relogin_v1";
 const META_KEY_ALLOW_REGISTRATION_V1: &str = "allow_registration_v1";
 const META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1: &str = "linuxdo_system_tag_defaults_v1";
@@ -472,7 +473,17 @@ struct AccountQuotaLimits {
 }
 
 impl AccountQuotaLimits {
-    fn defaults() -> Self {
+    fn zero_base() -> Self {
+        Self {
+            hourly_any_limit: 0,
+            hourly_limit: 0,
+            daily_limit: 0,
+            monthly_limit: 0,
+            inherits_defaults: false,
+        }
+    }
+
+    fn legacy_defaults() -> Self {
         Self {
             hourly_any_limit: effective_token_hourly_request_limit(),
             hourly_limit: effective_token_hourly_limit(),
@@ -497,6 +508,33 @@ impl AccountQuotaLimits {
             && self.hourly_limit == other.hourly_limit
             && self.daily_limit == other.daily_limit
             && self.monthly_limit == other.monthly_limit
+    }
+}
+
+fn account_quota_limits_from_row(
+    hourly_any_limit: i64,
+    hourly_limit: i64,
+    daily_limit: i64,
+    monthly_limit: i64,
+    inherits_defaults: i64,
+) -> AccountQuotaLimits {
+    AccountQuotaLimits {
+        hourly_any_limit,
+        hourly_limit,
+        daily_limit,
+        monthly_limit,
+        inherits_defaults: inherits_defaults == 1,
+    }
+}
+
+fn default_account_quota_limits_for_created_at(
+    user_created_at: i64,
+    zero_base_cutover_at: i64,
+) -> AccountQuotaLimits {
+    if user_created_at >= zero_base_cutover_at {
+        AccountQuotaLimits::zero_base()
+    } else {
+        AccountQuotaLimits::legacy_defaults()
     }
 }
 
@@ -2327,13 +2365,13 @@ impl TavilyProxy {
             .await?
             .unwrap_or(AccountQuotaSnapshot {
                 hourly_any_used: 0,
-                hourly_any_limit: effective_token_hourly_request_limit(),
+                hourly_any_limit: 0,
                 hourly_used: 0,
-                hourly_limit: effective_token_hourly_limit(),
+                hourly_limit: 0,
                 daily_used: 0,
-                daily_limit: effective_token_daily_limit(),
+                daily_limit: 0,
                 monthly_used: 0,
-                monthly_limit: effective_token_monthly_limit(),
+                monthly_limit: 0,
             });
         let (monthly_success, daily_success, daily_failure) =
             self.key_store.fetch_user_success_failure(user_id).await?;
@@ -3445,7 +3483,7 @@ impl TokenQuota {
                 .store
                 .fetch_account_monthly_counts(&account_user_ids, month_start)
                 .await?;
-            let default_limits = AccountQuotaLimits::defaults();
+            let default_limits = AccountQuotaLimits::zero_base();
 
             for (token_id, user_id) in account_subjects {
                 let limits = account_limits
@@ -3625,7 +3663,7 @@ impl TokenRequestLimit {
                     hour_window_start,
                 )
                 .await?;
-            let default_hourly_any_limit = AccountQuotaLimits::defaults().hourly_any_limit;
+            let default_hourly_any_limit = AccountQuotaLimits::zero_base().hourly_any_limit;
             for (token_id, user_id) in account_subjects {
                 let used = account_totals.get(&user_id).copied().unwrap_or(0);
                 let limit = account_limits
@@ -4689,6 +4727,17 @@ impl KeyStore {
             self.backfill_account_quota_inherits_defaults_v1().await?;
             self.set_meta_i64(
                 META_KEY_ACCOUNT_QUOTA_INHERITS_DEFAULTS_BACKFILL_V1,
+                Utc::now().timestamp(),
+            )
+            .await?;
+        }
+        if self
+            .get_meta_i64(META_KEY_ACCOUNT_QUOTA_ZERO_BASE_CUTOVER_V1)
+            .await?
+            .is_none()
+        {
+            self.set_meta_i64(
+                META_KEY_ACCOUNT_QUOTA_ZERO_BASE_CUTOVER_V1,
                 Utc::now().timestamp(),
             )
             .await?;
@@ -7828,7 +7877,8 @@ impl KeyStore {
             return Ok(false);
         }
 
-        let defaults = AccountQuotaLimits::defaults();
+        let defaults = AccountQuotaLimits::legacy_defaults();
+        let current = self.ensure_account_quota_limits(user_id).await?;
         let requested = AccountQuotaLimits {
             hourly_any_limit,
             hourly_limit,
@@ -7836,7 +7886,8 @@ impl KeyStore {
             monthly_limit,
             inherits_defaults: false,
         };
-        let inherits_defaults = if requested.same_limits_as(&defaults) {
+        let inherits_defaults = if current.inherits_defaults && requested.same_limits_as(&defaults)
+        {
             1
         } else {
             0
@@ -7878,7 +7929,7 @@ impl KeyStore {
     }
 
     async fn backfill_account_quota_inherits_defaults_v1(&self) -> Result<(), ProxyError> {
-        let defaults = AccountQuotaLimits::defaults();
+        let defaults = AccountQuotaLimits::legacy_defaults();
         // Legacy rows do not record whether they were following defaults or manually customized.
         // Only rows that already match the current env tuple are safe to keep on the default-track;
         // every other tuple is conservatively treated as a custom baseline so upgrades never clobber
@@ -7905,7 +7956,7 @@ impl KeyStore {
 
     async fn sync_account_quota_limits_with_defaults(&self) -> Result<(), ProxyError> {
         let now = Utc::now().timestamp();
-        let defaults = AccountQuotaLimits::defaults();
+        let defaults = AccountQuotaLimits::legacy_defaults();
         sqlx::query(
             r#"UPDATE account_quota_limits
                SET hourly_any_limit = ?,
@@ -7926,12 +7977,73 @@ impl KeyStore {
         Ok(())
     }
 
+    async fn account_quota_zero_base_cutover_at(&self) -> Result<i64, ProxyError> {
+        Ok(self
+            .get_meta_i64(META_KEY_ACCOUNT_QUOTA_ZERO_BASE_CUTOVER_V1)
+            .await?
+            .unwrap_or(i64::MAX))
+    }
+
+    async fn default_account_quota_limits_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AccountQuotaLimits, ProxyError> {
+        let user_created_at =
+            sqlx::query_scalar::<_, i64>("SELECT created_at FROM users WHERE id = ? LIMIT 1")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let cutover_at = self.account_quota_zero_base_cutover_at().await?;
+        Ok(default_account_quota_limits_for_created_at(
+            user_created_at,
+            cutover_at,
+        ))
+    }
+
+    async fn default_account_quota_limits_for_users(
+        &self,
+        user_ids: &[String],
+    ) -> Result<HashMap<String, AccountQuotaLimits>, ProxyError> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let cutover_at = self.account_quota_zero_base_cutover_at().await?;
+        let mut builder = QueryBuilder::new("SELECT id, created_at FROM users WHERE id IN (");
+        {
+            let mut separated = builder.separated(", ");
+            for user_id in user_ids {
+                separated.push_bind(user_id);
+            }
+        }
+        builder.push(")");
+
+        let rows = builder
+            .build_query_as::<(String, i64)>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(user_id, created_at)| {
+                (
+                    user_id,
+                    default_account_quota_limits_for_created_at(created_at, cutover_at),
+                )
+            })
+            .collect())
+    }
+
     async fn ensure_account_quota_limits(
         &self,
         user_id: &str,
     ) -> Result<AccountQuotaLimits, ProxyError> {
+        if let Some(existing) = self.fetch_account_quota_limits(user_id).await? {
+            return Ok(existing);
+        }
+
         let now = Utc::now().timestamp();
-        let defaults = AccountQuotaLimits::defaults();
+        let defaults = self.default_account_quota_limits_for_user(user_id).await?;
         sqlx::query(
             r#"INSERT INTO account_quota_limits (
                     user_id,
@@ -7951,30 +8063,19 @@ impl KeyStore {
         .bind(defaults.hourly_limit)
         .bind(defaults.daily_limit)
         .bind(defaults.monthly_limit)
-        .bind(1)
+        .bind(if defaults.inherits_defaults { 1 } else { 0 })
         .bind(now)
         .bind(now)
         .execute(&self.pool)
         .await?;
 
-        let (hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults) =
-            sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-                r#"SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit,
-                          COALESCE(inherits_defaults, 1)
-                   FROM account_quota_limits
-                   WHERE user_id = ?
-                   LIMIT 1"#,
-            )
-            .bind(user_id)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(AccountQuotaLimits {
-            hourly_any_limit,
-            hourly_limit,
-            daily_limit,
-            monthly_limit,
-            inherits_defaults: inherits_defaults == 1,
-        })
+        self.fetch_account_quota_limits(user_id)
+            .await?
+            .ok_or_else(|| {
+                ProxyError::Other(format!(
+                    "account quota limits missing after ensure for user {user_id}"
+                ))
+            })
     }
 
     async fn ensure_account_quota_limits_for_users(
@@ -7985,25 +8086,68 @@ impl KeyStore {
             return Ok(());
         }
 
+        let existing = self.fetch_account_quota_limits_bulk(user_ids).await?;
+        let missing_user_ids: Vec<String> = user_ids
+            .iter()
+            .filter(|user_id| !existing.contains_key(*user_id))
+            .cloned()
+            .collect();
+        if missing_user_ids.is_empty() {
+            return Ok(());
+        }
+
         let now = Utc::now().timestamp();
-        let defaults = AccountQuotaLimits::defaults();
+        let defaults_by_user = self
+            .default_account_quota_limits_for_users(&missing_user_ids)
+            .await?;
 
         let mut builder = QueryBuilder::new(
             "INSERT INTO account_quota_limits (user_id, hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults, created_at, updated_at) ",
         );
-        builder.push_values(user_ids, |mut b, user_id| {
+        builder.push_values(&missing_user_ids, |mut b, user_id| {
+            let defaults = defaults_by_user
+                .get(user_id)
+                .cloned()
+                .unwrap_or_else(AccountQuotaLimits::zero_base);
             b.push_bind(user_id)
                 .push_bind(defaults.hourly_any_limit)
                 .push_bind(defaults.hourly_limit)
                 .push_bind(defaults.daily_limit)
                 .push_bind(defaults.monthly_limit)
-                .push_bind(1)
+                .push_bind(if defaults.inherits_defaults { 1 } else { 0 })
                 .push_bind(now)
                 .push_bind(now);
         });
         builder.push(" ON CONFLICT(user_id) DO NOTHING");
         builder.build().execute(&self.pool).await?;
         Ok(())
+    }
+
+    async fn fetch_account_quota_limits(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<AccountQuotaLimits>, ProxyError> {
+        let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+            r#"SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit,
+                      COALESCE(inherits_defaults, 1)
+               FROM account_quota_limits
+               WHERE user_id = ?
+               LIMIT 1"#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults)| {
+                account_quota_limits_from_row(
+                    hourly_any_limit,
+                    hourly_limit,
+                    daily_limit,
+                    monthly_limit,
+                    inherits_defaults,
+                )
+            },
+        ))
     }
 
     async fn fetch_account_quota_limits_bulk(
@@ -8040,13 +8184,13 @@ impl KeyStore {
         {
             map.insert(
                 user_id,
-                AccountQuotaLimits {
+                account_quota_limits_from_row(
                     hourly_any_limit,
                     hourly_limit,
                     daily_limit,
                     monthly_limit,
-                    inherits_defaults: inherits_defaults == 1,
-                },
+                    inherits_defaults,
+                ),
             );
         }
         Ok(map)
@@ -8252,6 +8396,20 @@ impl KeyStore {
         user_id: &str,
         trust_level: Option<i64>,
     ) -> Result<(), ProxyError> {
+        let mut tx = self.pool.begin().await?;
+        self.sync_linuxdo_system_tag_binding_in_tx(&mut tx, user_id, trust_level)
+            .await?;
+        tx.commit().await?;
+        self.invalidate_account_quota_resolution(user_id).await;
+        Ok(())
+    }
+
+    async fn sync_linuxdo_system_tag_binding_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        trust_level: Option<i64>,
+    ) -> Result<(), ProxyError> {
         let Some(level) = normalize_linuxdo_trust_level(trust_level) else {
             return Ok(());
         };
@@ -8259,16 +8417,17 @@ impl KeyStore {
         let Some((tag_id,)) =
             sqlx::query_as::<_, (String,)>("SELECT id FROM user_tags WHERE system_key = ? LIMIT 1")
                 .bind(&desired_key)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut **tx)
                 .await?
         else {
-            return Err(ProxyError::Other(format!(
-                "missing system tag for LinuxDo trust level {level}"
-            )));
+            eprintln!(
+                "linuxdo system tag sync skipped for user {} trust_level {:?}: missing system tag for LinuxDo trust level {}",
+                user_id, trust_level, level
+            );
+            return Ok(());
         };
 
         let now = Utc::now().timestamp();
-        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"DELETE FROM user_tag_bindings
                WHERE user_id = ?
@@ -8279,7 +8438,7 @@ impl KeyStore {
         )
         .bind(user_id)
         .bind(&tag_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             r#"INSERT INTO user_tag_bindings (user_id, tag_id, source, created_at, updated_at)
@@ -8293,10 +8452,8 @@ impl KeyStore {
         .bind(USER_TAG_SOURCE_SYSTEM_LINUXDO)
         .bind(now)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
-        self.invalidate_account_quota_resolution(user_id).await;
         Ok(())
     }
 
@@ -8827,7 +8984,7 @@ impl KeyStore {
         self.ensure_account_quota_limits_for_users(user_ids).await?;
         let base_limits = self.fetch_account_quota_limits_bulk(user_ids).await?;
         let tag_bindings = self.list_user_tag_bindings_for_users(user_ids).await?;
-        let defaults = AccountQuotaLimits::defaults();
+        let defaults = AccountQuotaLimits::zero_base();
         let mut map = HashMap::new();
         for user_id in user_ids {
             let base = base_limits
@@ -9128,6 +9285,31 @@ impl KeyStore {
                         "failed to allocate unique local user id".to_string(),
                     ));
                 };
+
+                let zero_base = AccountQuotaLimits::zero_base();
+                sqlx::query(
+                    r#"INSERT INTO account_quota_limits (
+                           user_id,
+                           hourly_any_limit,
+                           hourly_limit,
+                           daily_limit,
+                           monthly_limit,
+                           inherits_defaults,
+                           created_at,
+                           updated_at
+                       )
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+                )
+                .bind(&user_id)
+                .bind(zero_base.hourly_any_limit)
+                .bind(zero_base.hourly_limit)
+                .bind(zero_base.daily_limit)
+                .bind(zero_base.monthly_limit)
+                .bind(0)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
 
                 let inserted_account = sqlx::query(
                     r#"INSERT INTO oauth_accounts
@@ -18432,14 +18614,28 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             .await
             .expect("seed account quota row");
 
-        let first_limits: (i64, i64, i64, i64) = sqlx::query_as(
+        let seeded_limits: (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit FROM account_quota_limits WHERE user_id = ?",
         )
         .bind(&user.user_id)
         .fetch_one(&proxy.key_store.pool)
         .await
-        .expect("read first limits");
-        assert_eq!(first_limits, (11, 12, 13, 14));
+        .expect("read seeded limits");
+        assert_eq!(seeded_limits, (0, 0, 0, 0));
+
+        sqlx::query(
+            r#"UPDATE account_quota_limits
+               SET hourly_any_limit = 11,
+                   hourly_limit = 12,
+                   daily_limit = 13,
+                   monthly_limit = 14,
+                   inherits_defaults = 1
+               WHERE user_id = ?"#,
+        )
+        .bind(&user.user_id)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed legacy default-following row");
 
         drop(proxy);
 
@@ -18518,6 +18714,19 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             .user_dashboard_summary(&user.user_id)
             .await
             .expect("seed account quota row");
+        sqlx::query(
+            r#"UPDATE account_quota_limits
+               SET hourly_any_limit = 11,
+                   hourly_limit = 12,
+                   daily_limit = 13,
+                   monthly_limit = 14,
+                   inherits_defaults = 1
+               WHERE user_id = ?"#,
+        )
+        .bind(&user.user_id)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed legacy current default row");
         sqlx::query("DELETE FROM meta WHERE key = ?")
             .bind(META_KEY_ACCOUNT_QUOTA_INHERITS_DEFAULTS_BACKFILL_V1)
             .execute(&proxy.key_store.pool)
@@ -18648,7 +18857,12 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         }
         sqlx::query(
             r#"UPDATE account_quota_limits
-               SET updated_at = created_at + 5
+               SET hourly_any_limit = 11,
+                   hourly_limit = 12,
+                   daily_limit = 13,
+                   monthly_limit = 14,
+                   inherits_defaults = 1,
+                   updated_at = created_at + 5
                WHERE user_id IN (?, ?)"#,
         )
         .bind(&alpha.user_id)
@@ -18768,6 +18982,332 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
     }
 
     #[tokio::test]
+    async fn new_account_without_tags_defaults_to_zero_base_and_effective_quota() {
+        let db_path = temp_db_path("new-account-zero-base");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "github".to_string(),
+                provider_user_id: "new-zero-base-user".to_string(),
+                username: Some("new_zero_base_user".to_string()),
+                name: Some("New Zero Base User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: None,
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+
+        let resolution = proxy
+            .key_store
+            .resolve_account_quota_resolution(&user.user_id)
+            .await
+            .expect("resolve account quota");
+
+        assert_eq!(resolution.base.hourly_any_limit, 0);
+        assert_eq!(resolution.base.hourly_limit, 0);
+        assert_eq!(resolution.base.daily_limit, 0);
+        assert_eq!(resolution.base.monthly_limit, 0);
+        assert!(!resolution.base.inherits_defaults);
+        assert_eq!(resolution.effective.hourly_any_limit, 0);
+        assert_eq!(resolution.effective.hourly_limit, 0);
+        assert_eq!(resolution.effective.daily_limit, 0);
+        assert_eq!(resolution.effective.monthly_limit, 0);
+
+        let persisted: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read persisted zero base");
+        assert_eq!(persisted, (0, 0, 0, 0, 0));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn new_linuxdo_account_effective_quota_comes_only_from_tags() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("new-linuxdo-tag-only-quota");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "new-linuxdo-tag-only-user".to_string(),
+                username: Some("new_linuxdo_tag_only_user".to_string()),
+                name: Some("New LinuxDo Tag Only User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+
+        let resolution = proxy
+            .key_store
+            .resolve_account_quota_resolution(&user.user_id)
+            .await
+            .expect("resolve account quota");
+        let tag_only_limits = AccountQuotaLimits::legacy_defaults();
+
+        assert_eq!(resolution.base.hourly_any_limit, 0);
+        assert_eq!(resolution.base.hourly_limit, 0);
+        assert_eq!(resolution.base.daily_limit, 0);
+        assert_eq!(resolution.base.monthly_limit, 0);
+        assert_eq!(
+            resolution.effective.hourly_any_limit,
+            tag_only_limits.hourly_any_limit
+        );
+        assert_eq!(
+            resolution.effective.hourly_limit,
+            tag_only_limits.hourly_limit
+        );
+        assert_eq!(
+            resolution.effective.daily_limit,
+            tag_only_limits.daily_limit
+        );
+        assert_eq!(
+            resolution.effective.monthly_limit,
+            tag_only_limits.monthly_limit
+        );
+        assert!(
+            resolution
+                .tags
+                .iter()
+                .any(|binding| { binding.tag.system_key.as_deref() == Some("linuxdo_l2") })
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn historical_account_without_quota_row_keeps_legacy_defaults_on_first_resolution() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("historical-account-missing-quota-row");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "11");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "12");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "13");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "14");
+        }
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "github".to_string(),
+                provider_user_id: "historical-missing-quota-row".to_string(),
+                username: Some("historical_missing_quota_row".to_string()),
+                name: Some("Historical Missing Quota Row".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: None,
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+
+        sqlx::query("DELETE FROM account_quota_limits WHERE user_id = ?")
+            .bind(&user.user_id)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("delete quota row");
+        sqlx::query("UPDATE users SET created_at = ?, updated_at = ? WHERE id = ?")
+            .bind(100_i64)
+            .bind(100_i64)
+            .bind(&user.user_id)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("mark user historical");
+        proxy
+            .key_store
+            .set_meta_i64(META_KEY_ACCOUNT_QUOTA_ZERO_BASE_CUTOVER_V1, 200)
+            .await
+            .expect("set zero-base cutover after user creation");
+
+        let resolution = proxy
+            .key_store
+            .resolve_account_quota_resolution(&user.user_id)
+            .await
+            .expect("resolve historical account quota");
+        let expected = AccountQuotaLimits::legacy_defaults();
+
+        assert_eq!(resolution.base.hourly_any_limit, expected.hourly_any_limit);
+        assert_eq!(resolution.base.hourly_limit, expected.hourly_limit);
+        assert_eq!(resolution.base.daily_limit, expected.daily_limit);
+        assert_eq!(resolution.base.monthly_limit, expected.monthly_limit);
+        assert!(resolution.base.inherits_defaults);
+
+        unsafe {
+            std::env::remove_var("TOKEN_HOURLY_REQUEST_LIMIT");
+            std::env::remove_var("TOKEN_HOURLY_LIMIT");
+            std::env::remove_var("TOKEN_DAILY_LIMIT");
+            std::env::remove_var("TOKEN_MONTHLY_LIMIT");
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn manual_account_quota_matching_legacy_defaults_stays_custom_on_restart() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("manual-account-quota-matching-legacy-defaults");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "11");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "12");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "13");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "14");
+        }
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "github".to_string(),
+                provider_user_id: "manual-legacy-default-tuple".to_string(),
+                username: Some("manual_legacy_default_tuple".to_string()),
+                name: Some("Manual Legacy Default Tuple".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: None,
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+
+        let updated = proxy
+            .key_store
+            .update_account_quota_limits(&user.user_id, 11, 12, 13, 14)
+            .await
+            .expect("update account quota");
+        assert!(updated);
+
+        let first_row: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read first row");
+        assert_eq!(first_row, (11, 12, 13, 14, 0));
+
+        drop(proxy);
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "21");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "22");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "23");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "24");
+        }
+
+        let proxy_after =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy reopened");
+        let second_row: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read second row");
+        assert_eq!(second_row, (11, 12, 13, 14, 0));
+
+        unsafe {
+            std::env::remove_var("TOKEN_HOURLY_REQUEST_LIMIT");
+            std::env::remove_var("TOKEN_HOURLY_LIMIT");
+            std::env::remove_var("TOKEN_DAILY_LIMIT");
+            std::env::remove_var("TOKEN_MONTHLY_LIMIT");
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_default_following_account_keeps_inherits_defaults_on_noop_save() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("legacy-default-following-noop-save");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "11");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "12");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "13");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "14");
+        }
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "github".to_string(),
+                provider_user_id: "legacy-default-following-noop-save".to_string(),
+                username: Some("legacy_default_following_noop_save".to_string()),
+                name: Some("Legacy Default Following Noop Save".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: None,
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+
+        sqlx::query(
+            r#"UPDATE account_quota_limits
+               SET hourly_any_limit = 11,
+                   hourly_limit = 12,
+                   daily_limit = 13,
+                   monthly_limit = 14,
+                   inherits_defaults = 1
+               WHERE user_id = ?"#,
+        )
+        .bind(&user.user_id)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed legacy default-following row");
+
+        let updated = proxy
+            .key_store
+            .update_account_quota_limits(&user.user_id, 11, 12, 13, 14)
+            .await
+            .expect("update account quota");
+        assert!(updated);
+
+        let row: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read row after noop save");
+        assert_eq!(row, (11, 12, 13, 14, 1));
+
+        unsafe {
+            std::env::remove_var("TOKEN_HOURLY_REQUEST_LIMIT");
+            std::env::remove_var("TOKEN_HOURLY_LIMIT");
+            std::env::remove_var("TOKEN_DAILY_LIMIT");
+            std::env::remove_var("TOKEN_MONTHLY_LIMIT");
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn account_quota_resolution_cache_invalidates_on_binding_and_tag_updates() {
         let db_path = temp_db_path("account-quota-resolution-cache");
         let db_str = db_path.to_string_lossy().to_string();
@@ -18788,7 +19328,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             })
             .await
             .expect("upsert user");
-        let defaults = AccountQuotaLimits::defaults();
+        let defaults = AccountQuotaLimits::zero_base();
 
         let initial = proxy
             .key_store
@@ -19276,7 +19816,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
     }
 
     #[tokio::test]
-    async fn linuxdo_oauth_upsert_survives_tag_sync_failures_and_backfill_repairs_binding() {
+    async fn linuxdo_oauth_upsert_skips_missing_tags_for_new_accounts_and_recovers_after_reseed() {
         let _guard = env_lock().lock_owned().await;
         let db_path = temp_db_path("linuxdo-sync-best-effort");
         let db_str = db_path.to_string_lossy().to_string();
@@ -19302,7 +19842,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 raw_payload_json: None,
             })
             .await
-            .expect("oauth upsert should succeed even when tag sync fails");
+            .expect("new linuxdo account should still succeed without system tags");
 
         let oauth_row_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM oauth_accounts WHERE provider = 'linuxdo' AND provider_user_id = ?",
@@ -19312,6 +19852,13 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         .await
         .expect("count oauth rows");
         assert_eq!(oauth_row_count, 1);
+        let user_row_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username = ?")
+                .bind("linuxdo_best_effort_user")
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("count user rows");
+        assert_eq!(user_row_count, 1);
 
         let binding_count: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*)
@@ -19322,7 +19869,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         .bind(&user.user_id)
         .fetch_one(&proxy.key_store.pool)
         .await
-        .expect("count linuxdo bindings after failed sync");
+        .expect("count linuxdo bindings after skipped sync");
         assert_eq!(binding_count, 0);
 
         proxy
@@ -19330,11 +19877,19 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             .seed_linuxdo_system_tags()
             .await
             .expect("reseed linuxdo system tags");
-        proxy
-            .key_store
-            .backfill_linuxdo_user_tag_bindings()
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-best-effort-user".to_string(),
+                username: Some("linuxdo_best_effort_user".to_string()),
+                name: Some("LinuxDo Best Effort User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
             .await
-            .expect("repair linuxdo bindings");
+            .expect("oauth upsert should attach system tag after reseeding tags");
 
         let restored_key: String = sqlx::query_scalar(
             r#"SELECT t.system_key
