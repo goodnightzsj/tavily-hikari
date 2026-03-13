@@ -1092,7 +1092,7 @@ impl XraySupervisor {
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| {
                 ProxyError::Other(format!(
@@ -1109,8 +1109,30 @@ impl XraySupervisor {
         .await
         {
             let _ = terminate_child_process(&mut child, Duration::from_secs(2)).await;
+            let stderr_tail = child.wait_with_output().await.ok().and_then(|output| {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    None
+                } else {
+                    Some(
+                        stderr
+                            .lines()
+                            .rev()
+                            .take(3)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                    )
+                }
+            });
             let _ = fs::remove_file(&config_path);
-            return Err(err);
+            return Err(if let Some(stderr_tail) = stderr_tail {
+                ProxyError::Other(format!("{err} ({stderr_tail})"))
+            } else {
+                err
+            });
         }
 
         let local_proxy_url =
@@ -3070,6 +3092,56 @@ fn build_stream_settings_from_url(url: &Url, default_security: Option<&str>) -> 
             stream.insert("tlsSettings".to_string(), Value::Object(tls_settings));
             has_non_default_options = true;
         }
+    } else if security == "reality" {
+        let mut reality_settings = serde_json::Map::new();
+        if let Some(server_name) = query
+            .get("sni")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| host.clone())
+            .or_else(|| url.host_str().map(str::to_string))
+        {
+            reality_settings.insert("serverName".to_string(), Value::String(server_name));
+        }
+        if let Some(fingerprint) = query
+            .get("fp")
+            .or_else(|| query.get("fingerprint"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            reality_settings.insert("fingerprint".to_string(), Value::String(fingerprint));
+        }
+        if let Some(public_key) = query
+            .get("pbk")
+            .or_else(|| query.get("publicKey"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            reality_settings.insert("publicKey".to_string(), Value::String(public_key));
+        }
+        if let Some(short_id) = query
+            .get("sid")
+            .or_else(|| query.get("shortId"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            reality_settings.insert("shortId".to_string(), Value::String(short_id));
+        }
+        if let Some(spider_x) = query
+            .get("spx")
+            .or_else(|| query.get("spiderX"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            reality_settings.insert("spiderX".to_string(), Value::String(spider_x));
+        }
+        if !reality_settings.is_empty() {
+            stream.insert(
+                "realitySettings".to_string(),
+                Value::Object(reality_settings),
+            );
+            has_non_default_options = true;
+        }
     }
     if has_non_default_options {
         Some(Value::Object(stream))
@@ -3085,4 +3157,43 @@ fn query_flag_true(query: &HashMap<String, String>, key: &str) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_vless_xray_outbound_preserves_reality_settings() {
+        let outbound = build_vless_xray_outbound("vless://0688fa59-e971-4278-8c03-4b35821a71dc@hklb-ep.707979.xyz:53842?encryption=none&security=reality&type=tcp&sni=public.sn.files.1drv.com&fp=chrome&pbk=6cJN5zHglyIywI_ZnsC7xW6lD1IO9gkHSvw6uvULCWQ&sid=61446ca92a46cdc7&flow=xtls-rprx-vision#Ivan-hkl-vless-vision").expect("build outbound");
+        let stream = outbound
+            .get("streamSettings")
+            .and_then(Value::as_object)
+            .expect("stream settings");
+        assert_eq!(
+            stream.get("security").and_then(Value::as_str),
+            Some("reality")
+        );
+
+        let reality = stream
+            .get("realitySettings")
+            .and_then(Value::as_object)
+            .expect("reality settings");
+        assert_eq!(
+            reality.get("serverName").and_then(Value::as_str),
+            Some("public.sn.files.1drv.com")
+        );
+        assert_eq!(
+            reality.get("fingerprint").and_then(Value::as_str),
+            Some("chrome")
+        );
+        assert_eq!(
+            reality.get("publicKey").and_then(Value::as_str),
+            Some("6cJN5zHglyIywI_ZnsC7xW6lD1IO9gkHSvw6uvULCWQ")
+        );
+        assert_eq!(
+            reality.get("shortId").and_then(Value::as_str),
+            Some("61446ca92a46cdc7")
+        );
+    }
 }
