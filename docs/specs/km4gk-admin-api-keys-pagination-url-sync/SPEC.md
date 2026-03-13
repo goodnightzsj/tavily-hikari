@@ -136,6 +136,13 @@
 - `2026-03-13`：浏览器验证 `/admin/keys` 的分页、`perPage` URL 同步、刷新恢复、详情返回上下文通过。
 - `2026-03-13`：PR `#126` 已创建；review-loop 修复 facet 计数、keys 手动刷新与 dashboard exhausted keys fallback。
 
+## 视觉证据
+
+![Admin API Keys paginated list](./assets/admin-keys-page.png)
+
+- 证据类型：真实开发环境 `/admin/keys?page=2&perPage=10&group=page-test` 页面截图。
+- 证据覆盖：分页条、每页条数控件、分组筛选 URL 恢复，以及当前页仅渲染分页结果。
+
 ## 里程碑
 
 - [x] M1: 规格冻结与 `/api/keys` 分页合同落盘
