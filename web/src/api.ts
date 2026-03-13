@@ -223,8 +223,12 @@ export async function fetchPublicLogs(token: string, limit = 20, signal?: AbortS
   }))
 }
 
-export function fetchApiKeys(signal?: AbortSignal): Promise<ApiKeyStats[]> {
-  return requestJson('/api/keys', { signal })
+export async function fetchApiKeys(signal?: AbortSignal): Promise<ApiKeyStats[]> {
+  const response = await requestJson<ApiKeyStats[] | { items?: ApiKeyStats[] }>('/api/keys', { signal })
+  if (Array.isArray(response)) {
+    return response
+  }
+  return Array.isArray(response.items) ? response.items : []
 }
 
 export function fetchApiKeyDetail(id: string, signal?: AbortSignal): Promise<ApiKeyStats> {
