@@ -1,5 +1,6 @@
 import React from "react";
 import { Icon } from "@iconify/react";
+import { createPortal } from "react-dom";
 
 import { useTranslate } from "../i18n";
 import { useViewportMode } from "../lib/responsive";
@@ -67,8 +68,19 @@ export type KeysValidationCounts = {
 };
 
 type ValidationFilterKey = "pending" | "ok" | "exhausted" | "invalid" | "error" | "duplicate";
+type BubblePlacement = "top" | "bottom";
+
+type BubblePosition = {
+  top: number;
+  left: number;
+  placement: BubblePlacement;
+  arrowLeft: number;
+};
 
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+const BUBBLE_VIEWPORT_MARGIN = 12;
+const BUBBLE_ANCHOR_GAP = 10;
+const BUBBLE_ARROW_MARGIN = 18;
 
 function formatNumber(value: number | null | undefined): string {
   if (value == null) return "—";
@@ -169,9 +181,88 @@ function filterKeyForStatus(status: KeyValidationStatus): ValidationFilterKey {
 }
 
 function RegistrationIpIndicator(props: { label: string; tooltip: string }): JSX.Element {
+  const triggerRef = React.useRef<HTMLSpanElement | null>(null);
+  const bubbleRef = React.useRef<HTMLSpanElement | null>(null);
+  const [open, setOpen] = React.useState(false);
+  const [position, setPosition] = React.useState<BubblePosition | null>(null);
+
+  React.useLayoutEffect(() => {
+    if (!open || !triggerRef.current || typeof window === "undefined") {
+      setPosition(null);
+      return;
+    }
+
+    const anchorEl = triggerRef.current;
+
+    const updatePosition = () => {
+      const bubbleEl = bubbleRef.current;
+      if (!bubbleEl || !anchorEl.isConnected) {
+        setPosition(null);
+        return;
+      }
+
+      const anchorRect = anchorEl.getBoundingClientRect();
+      const bubbleRect = bubbleEl.getBoundingClientRect();
+
+      let top = anchorRect.bottom + BUBBLE_ANCHOR_GAP;
+      let placement: BubblePlacement = "bottom";
+
+      if (top + bubbleRect.height > window.innerHeight - BUBBLE_VIEWPORT_MARGIN) {
+        const nextTop = anchorRect.top - bubbleRect.height - BUBBLE_ANCHOR_GAP;
+        if (nextTop >= BUBBLE_VIEWPORT_MARGIN) {
+          top = nextTop;
+          placement = "top";
+        }
+      }
+
+      top = Math.max(
+        BUBBLE_VIEWPORT_MARGIN,
+        Math.min(top, window.innerHeight - bubbleRect.height - BUBBLE_VIEWPORT_MARGIN),
+      );
+
+      let left = anchorRect.left + anchorRect.width / 2 - bubbleRect.width / 2;
+      left = Math.max(
+        BUBBLE_VIEWPORT_MARGIN,
+        Math.min(left, window.innerWidth - bubbleRect.width - BUBBLE_VIEWPORT_MARGIN),
+      );
+
+      const arrowLeft = Math.max(
+        BUBBLE_ARROW_MARGIN,
+        Math.min(anchorRect.left + anchorRect.width / 2 - left, bubbleRect.width - BUBBLE_ARROW_MARGIN),
+      );
+
+      setPosition({ top, left, placement, arrowLeft });
+    };
+
+    updatePosition();
+
+    const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updatePosition) : null;
+    resizeObserver?.observe(anchorEl);
+    if (bubbleRef.current) resizeObserver?.observe(bubbleRef.current);
+
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open]);
+
   return (
     <span className="key-validation-detail">
-      <span className="key-validation-detail-trigger inline-flex" tabIndex={0} aria-label={props.tooltip}>
+      <span
+        ref={triggerRef}
+        className="key-validation-detail-trigger inline-flex"
+        tabIndex={0}
+        aria-label={props.tooltip}
+        data-registration-ip-trigger="true"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >
         <Badge
           variant="success"
           className="gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]"
@@ -180,9 +271,26 @@ function RegistrationIpIndicator(props: { label: string; tooltip: string }): JSX
           <span>{props.label}</span>
         </Badge>
       </span>
-      <span className="key-validation-bubble" role="tooltip">
-        {props.tooltip}
-      </span>
+      {open && typeof document !== "undefined"
+        ? createPortal(
+            <span
+              ref={bubbleRef}
+              className="key-validation-bubble"
+              role="tooltip"
+              data-placement={position?.placement ?? "bottom"}
+              style={{
+                top: `${position?.top ?? 0}px`,
+                left: `${position?.left ?? 0}px`,
+                visibility: position ? "visible" : "hidden",
+                pointerEvents: "none",
+                ["--key-validation-bubble-arrow-left" as string]: `${position?.arrowLeft ?? 40}px`,
+              }}
+            >
+              {props.tooltip}
+            </span>,
+            document.body,
+          )
+        : null}
     </span>
   );
 }
