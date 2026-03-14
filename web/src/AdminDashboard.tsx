@@ -291,6 +291,8 @@ const adminTableInlineFieldStyle = {
   gap: 8,
   whiteSpace: 'nowrap',
   lineHeight: 1.35,
+  position: 'relative',
+  paddingRight: 40,
 } as const
 
 const adminTableHeaderStackStyle = {
@@ -6565,6 +6567,7 @@ function AdminDashboard(): JSX.Element {
   variant={state === 'copied' ? 'success' : 'ghost'}
   size="icon"
   className="h-8 w-8 rounded-full p-0 shadow-none"
+  style={{ position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)' }}
   title={keyStrings.actions.copy}
   aria-label={keyStrings.actions.copy}
   onPointerEnter={() => scheduleSecretWarm(`key:${item.id}`, () => warmApiKeySecret(item.id))}

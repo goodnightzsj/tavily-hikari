@@ -111,6 +111,8 @@ const tableInlineFieldStyle = {
   gap: 8,
   whiteSpace: 'nowrap',
   lineHeight: 1.35,
+  position: 'relative',
+  paddingRight: 40,
 } as const
 
 const tableHeaderStackStyle = {
@@ -1832,6 +1834,24 @@ function KeysPageCanvas({
                     <div style={tableStackStyle}>
                       <div style={tableInlineFieldStyle}>
                         <code>{item.id}</code>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-xs btn-circle"
+                          aria-label={keyStrings.actions.copy}
+                          title={keyStrings.actions.copy}
+                          style={{
+                            position: 'absolute',
+                            right: 0,
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            width: 32,
+                            height: 32,
+                            minHeight: 32,
+                            padding: 0,
+                          }}
+                        >
+                          <Icon icon="mdi:content-copy" width={18} height={18} aria-hidden="true" />
+                        </button>
                       </div>
                       <span style={tableSecondaryFieldStyle}>{formatKeyGroupName(item.group, keyStrings.groups.ungrouped)}</span>
                     </div>
