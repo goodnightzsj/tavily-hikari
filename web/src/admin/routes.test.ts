@@ -60,10 +60,10 @@ describe('admin user tag routes', () => {
         groups: ['ops', '', 'ops'],
         statuses: ['active', 'Quarantined', 'active'],
         registrationIp: '8.8.8.8',
-        regions: ['US California', 'US California', 'JP Tokyo'],
+        regions: ['US', 'US', 'US Westfield (MA)'],
       }),
     ).toBe(
-      '/admin/keys?page=2&perPage=50&group=ops&group=&status=active&status=quarantined&registrationIp=8.8.8.8&region=US+California&region=JP+Tokyo',
+      '/admin/keys?page=2&perPage=50&group=ops&group=&status=active&status=quarantined&registrationIp=8.8.8.8&region=US&region=US+Westfield+%28MA%29',
     )
     expect(
       keyDetailPath('key 42', {
@@ -71,10 +71,12 @@ describe('admin user tag routes', () => {
         perPage: 100,
         groups: ['ops'],
         statuses: ['disabled'],
-        registrationIp: '1.1.1.1',
-        regions: ['AU Sydney'],
+        registrationIp: '8.8.4.4',
+        regions: ['US Westfield (MA)'],
       }),
-    ).toBe('/admin/keys/key%2042?page=3&perPage=100&group=ops&status=disabled&registrationIp=1.1.1.1&region=AU+Sydney')
+    ).toBe(
+      '/admin/keys/key%2042?page=3&perPage=100&group=ops&status=disabled&registrationIp=8.8.4.4&region=US+Westfield+%28MA%29',
+    )
   })
 
   it('compares user tag editor routes by mode and id', () => {

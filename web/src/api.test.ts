@@ -104,7 +104,7 @@ describe('admin user tag api helpers', () => {
             facets: {
               groups: [{ value: 'ops', count: 3 }],
               statuses: [{ value: 'quarantined', count: 2 }],
-              regions: [{ value: 'US California', count: 1 }],
+              regions: [{ value: 'US', count: 1 }],
             },
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -117,18 +117,18 @@ describe('admin user tag api helpers', () => {
       groups: ['ops', ''],
       statuses: ['Quarantined', 'disabled'],
       registrationIp: '8.8.8.8',
-      regions: ['US California', 'JP Tokyo'],
+      regions: ['US', 'US Westfield (MA)'],
     })
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [input] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(input).toBe(
-      '/api/keys?page=2&per_page=50&group=ops&group=&status=quarantined&status=disabled&registration_ip=8.8.8.8&region=US+California&region=JP+Tokyo',
+      '/api/keys?page=2&per_page=50&group=ops&group=&status=quarantined&status=disabled&registration_ip=8.8.8.8&region=US&region=US+Westfield+%28MA%29',
     )
     expect(result.page).toBe(2)
     expect(result.perPage).toBe(50)
     expect(result.facets.groups[0]).toEqual({ value: 'ops', count: 3 })
-    expect(result.facets.regions[0]).toEqual({ value: 'US California', count: 1 })
+    expect(result.facets.regions[0]).toEqual({ value: 'US', count: 1 })
   })
 
   it('patches base quota through the existing user quota endpoint', async () => {

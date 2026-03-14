@@ -2801,15 +2801,15 @@ mod tests {
                     .map(|ip| match ip.as_str() {
                         "8.8.8.8" => serde_json::json!({
                             "ip": ip,
-                            "country": "United States",
-                            "city": "Mountain View",
-                            "subdivision": "CA",
+                            "country": "US",
+                            "city": null,
+                            "subdivision": null,
                         }),
                         "1.1.1.1" => serde_json::json!({
                             "ip": ip,
-                            "country": "Australia",
-                            "city": "Sydney",
-                            "subdivision": "NSW",
+                            "country": "US",
+                            "city": "Westfield",
+                            "subdivision": "MA",
                         }),
                         _ => serde_json::json!({
                             "ip": ip,
@@ -3851,7 +3851,7 @@ mod tests {
         .await
         .expect("first key metadata");
         assert_eq!(first_row.0.as_deref(), Some("8.8.8.8"));
-        assert_eq!(first_row.1.as_deref(), Some("United States Mountain View (CA)"));
+        assert_eq!(first_row.1.as_deref(), Some("US"));
 
         let private_row: (Option<String>, Option<String>) = sqlx::query_as(
             "SELECT registration_ip, registration_region FROM api_keys WHERE api_key = ?",
@@ -5232,10 +5232,10 @@ mod tests {
         }
 
         for (key_id, registration_ip, registration_region) in [
-            (&alpha_active_id, Some("8.8.8.8"), Some("United States Mountain View (CA)")),
-            (&alpha_quarantined_id, Some("1.1.1.1"), Some("Australia Sydney NSW")),
-            (&beta_active_id, Some("8.8.8.8"), Some("United States Mountain View (CA)")),
-            (&beta_disabled_id, Some("9.9.9.9"), Some("United States")),
+            (&alpha_active_id, Some("8.8.8.8"), Some("US")),
+            (&alpha_quarantined_id, Some("8.8.4.4"), Some("US Westfield (MA)")),
+            (&beta_active_id, Some("8.8.8.8"), Some("US")),
+            (&beta_disabled_id, Some("9.9.9.9"), None),
             (&ungrouped_exhausted_id, None, None),
         ] {
             sqlx::query(
@@ -5388,12 +5388,9 @@ mod tests {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(
-            region_counts.get("United States Mountain View (CA)").copied(),
-            Some(2)
-        );
-        assert_eq!(region_counts.get("Australia Sydney NSW").copied(), Some(1));
-        assert_eq!(region_counts.get("United States").copied(), Some(1));
+        assert_eq!(region_counts.len(), 2);
+        assert_eq!(region_counts.get("US Westfield (MA)").copied(), Some(1));
+        assert_eq!(region_counts.get("US").copied(), Some(2));
 
         let filtered_resp = client
             .get(format!(
@@ -5473,7 +5470,7 @@ mod tests {
 
         let registration_filtered_resp = client
             .get(format!(
-                "http://{}/api/keys?page=1&per_page=10&registration_ip=8.8.8.8&region=United%20States%20Mountain%20View%20(CA)",
+                "http://{}/api/keys?page=1&per_page=10&registration_ip=8.8.8.8&region=US",
                 admin_addr
             ))
             .header(reqwest::header::COOKIE, admin_cookie.clone())
@@ -5506,7 +5503,7 @@ mod tests {
             registration_filtered_items[0]
                 .get("registration_region")
                 .and_then(|value| value.as_str()),
-            Some("United States Mountain View (CA)")
+            Some("US")
         );
 
         let detail_resp = client
@@ -5527,7 +5524,7 @@ mod tests {
             detail_body
                 .get("registration_region")
                 .and_then(|value| value.as_str()),
-            Some("United States Mountain View (CA)")
+            Some("US")
         );
 
         let ungrouped_resp = client

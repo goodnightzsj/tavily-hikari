@@ -117,7 +117,7 @@
   When 导入
   Then key 导入不失败；region 为空；同一批次不会对同一 IP 无限制重试。
 
-- Given `GET /api/keys?registration_ip=8.8.8.8&region=US California`
+- Given `GET /api/keys?registration_ip=8.8.8.8&region=US`
   When 打开列表
   Then 只返回完全匹配该 IP 且地区属于所选 region facets 的 key，并返回全量 region facets 计数。
 
