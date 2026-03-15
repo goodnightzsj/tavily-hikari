@@ -387,11 +387,13 @@ const META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1: &str = "linuxdo_system_tag_defaul
 const META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_TUPLE_V1: &str = "linuxdo_system_tag_defaults_tuple_v1";
 const META_KEY_AUTH_TOKEN_LOG_REQUEST_KIND_BACKFILL_V1: &str =
     "auth_token_log_request_kind_backfill_v1";
+const META_KEY_API_KEY_CREATED_AT_BACKFILL_V1: &str = "api_key_created_at_backfill_v1";
 // Cutover marker for switching business quota counters from "requests" to "credits".
 // We cannot retroactively convert legacy request counts into credits, so we reset the
 // lightweight counters once and start charging by upstream credits going forward.
 const META_KEY_BUSINESS_QUOTA_CREDITS_CUTOVER_V1: &str = "business_quota_credits_cutover_v1";
 const API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS: [u64; 2] = [20, 50];
+const TOKEN_USAGE_ROLLUP_TRANSIENT_RETRY_BACKOFF_MS: [u64; 3] = [20, 50, 100];
 
 fn token_limit_from_env(var: &str, default: i64) -> i64 {
     match std::env::var(var) {
@@ -1622,6 +1624,20 @@ impl TavilyProxy {
     ) -> Result<ForwardProxyLiveStatsResponse, ProxyError> {
         let manager = self.forward_proxy.lock().await;
         forward_proxy::build_forward_proxy_live_stats_response(&self.key_store.pool, &manager).await
+    }
+
+    pub async fn get_forward_proxy_dashboard_summary(
+        &self,
+    ) -> Result<ForwardProxyDashboardSummary, ProxyError> {
+        let manager = self.forward_proxy.lock().await;
+        let runtime_rows = manager.snapshot_runtime();
+        Ok(ForwardProxyDashboardSummary {
+            available_nodes: runtime_rows
+                .iter()
+                .filter(|node| node.available && !node.is_penalized())
+                .count() as i64,
+            total_nodes: runtime_rows.len() as i64,
+        })
     }
 
     pub async fn update_forward_proxy_settings(
@@ -6406,7 +6422,25 @@ impl TavilyProxy {
     /// Aggregate per-token usage logs into token_usage_stats for UI metrics.
     /// Used by background schedulers to keep usage charts up to date.
     pub async fn rollup_token_usage_stats(&self) -> Result<(i64, Option<i64>), ProxyError> {
-        self.key_store.rollup_token_usage_stats().await
+        let mut retry_idx = 0usize;
+        loop {
+            match self.key_store.rollup_token_usage_stats().await {
+                Ok(result) => return Ok(result),
+                Err(err)
+                    if is_transient_sqlite_write_error(&err)
+                        && retry_idx < TOKEN_USAGE_ROLLUP_TRANSIENT_RETRY_BACKOFF_MS.len() =>
+                {
+                    let backoff_ms = TOKEN_USAGE_ROLLUP_TRANSIENT_RETRY_BACKOFF_MS[retry_idx];
+                    retry_idx += 1;
+                    eprintln!(
+                        "token usage rollup transient sqlite error (attempt={}, backoff={}ms): {}",
+                        retry_idx, backoff_ms, err
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// Time-based garbage collection for per-token access logs.
@@ -6538,6 +6572,7 @@ impl KeyStore {
                 registration_ip TEXT,
                 registration_region TEXT,
                 status TEXT NOT NULL DEFAULT 'active',
+                created_at INTEGER NOT NULL DEFAULT 0,
                 status_changed_at INTEGER,
                 last_used_at INTEGER NOT NULL DEFAULT 0,
                 quota_limit INTEGER,
@@ -6589,6 +6624,12 @@ impl KeyStore {
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS idx_request_logs_time
                ON request_logs(created_at DESC, id DESC)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_request_logs_key_time
+               ON request_logs(api_key_id, created_at DESC)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -7171,6 +7212,19 @@ impl KeyStore {
         )
         .execute(&self.pool)
         .await?;
+
+        if self
+            .get_meta_i64(META_KEY_API_KEY_CREATED_AT_BACKFILL_V1)
+            .await?
+            .is_none()
+        {
+            self.backfill_api_key_created_at().await?;
+            self.set_meta_i64(
+                META_KEY_API_KEY_CREATED_AT_BACKFILL_V1,
+                Utc::now().timestamp(),
+            )
+            .await?;
+        }
 
         if request_kind_schema_changed
             || self
@@ -8617,6 +8671,12 @@ impl KeyStore {
                 .await?;
         }
 
+        if !self.api_keys_column_exists("created_at").await? {
+            sqlx::query("ALTER TABLE api_keys ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await?;
+        }
+
         // Add deleted_at for soft delete marker (timestamp)
         if !self.api_keys_column_exists("deleted_at").await? {
             sqlx::query("ALTER TABLE api_keys ADD COLUMN deleted_at INTEGER")
@@ -8696,6 +8756,42 @@ impl KeyStore {
         self.ensure_api_key_ids().await?;
         self.ensure_api_keys_primary_key().await?;
 
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_api_keys_created_at ON api_keys(created_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn backfill_api_key_created_at(&self) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            UPDATE api_keys
+            SET created_at = COALESCE(
+                (
+                    SELECT MIN(candidate_ts)
+                    FROM (
+                        SELECT MIN(r.created_at) AS candidate_ts
+                        FROM request_logs r
+                        WHERE r.api_key_id = api_keys.id
+                        UNION ALL
+                        SELECT MIN(q.created_at) AS candidate_ts
+                        FROM api_key_quarantines q
+                        WHERE q.key_id = api_keys.id
+                    ) candidates
+                    WHERE candidate_ts IS NOT NULL
+                      AND candidate_ts > 0
+                ),
+                0
+            )
+            WHERE created_at IS NULL OR created_at <= 0
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -8726,6 +8822,12 @@ impl KeyStore {
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_api_key_quarantines_key_created ON api_key_quarantines(key_id, created_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_api_key_quarantines_created_at ON api_key_quarantines(created_at DESC, key_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -8781,6 +8883,7 @@ impl KeyStore {
                 registration_ip TEXT,
                 registration_region TEXT,
                 status TEXT NOT NULL DEFAULT 'active',
+                created_at INTEGER NOT NULL DEFAULT 0,
                 status_changed_at INTEGER,
                 last_used_at INTEGER NOT NULL DEFAULT 0,
                 quota_limit INTEGER,
@@ -8802,6 +8905,7 @@ impl KeyStore {
                 registration_ip,
                 registration_region,
                 status,
+                created_at,
                 status_changed_at,
                 last_used_at,
                 quota_limit,
@@ -8816,6 +8920,7 @@ impl KeyStore {
                 registration_ip,
                 registration_region,
                 status,
+                created_at,
                 status_changed_at,
                 last_used_at,
                 quota_limit,
@@ -9265,13 +9370,14 @@ impl KeyStore {
             let id = Self::generate_unique_key_id(&mut tx).await?;
             sqlx::query(
                 r#"
-                INSERT INTO api_keys (id, api_key, status, status_changed_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO api_keys (id, api_key, status, created_at, status_changed_at)
+                VALUES (?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&id)
             .bind(key)
             .bind(STATUS_ACTIVE)
+            .bind(now)
             .bind(now)
             .execute(&mut *tx)
             .await?;
@@ -13795,9 +13901,10 @@ impl KeyStore {
                     registration_ip,
                     registration_region,
                     status,
+                    created_at,
                     status_changed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&id)
@@ -13806,6 +13913,7 @@ impl KeyStore {
             .bind(registration_ip)
             .bind(registration_region)
             .bind(STATUS_ACTIVE)
+            .bind(now)
             .bind(now)
             .execute(&mut *tx)
             .await?;
@@ -15084,6 +15192,26 @@ impl KeyStore {
         .fetch_one(&mut *tx)
         .await?;
 
+        let month_lifecycle_row = sqlx::query(
+            r#"
+            SELECT
+                (
+                    SELECT COALESCE(COUNT(*), 0)
+                    FROM api_keys
+                    WHERE created_at >= ?
+                ) AS month_new_keys,
+                (
+                    SELECT COALESCE(COUNT(*), 0)
+                    FROM api_key_quarantines
+                    WHERE created_at >= ?
+                ) AS month_new_quarantines
+            "#,
+        )
+        .bind(month_start)
+        .bind(month_start)
+        .fetch_one(&mut *tx)
+        .await?;
+
         tx.commit().await?;
 
         Ok(SummaryWindows {
@@ -15092,18 +15220,24 @@ impl KeyStore {
                 success_count: window_row.try_get("today_success_count")?,
                 error_count: window_row.try_get("today_error_count")?,
                 quota_exhausted_count: window_row.try_get("today_quota_exhausted_count")?,
+                new_keys: 0,
+                new_quarantines: 0,
             },
             yesterday: SummaryWindowMetrics {
                 total_requests: window_row.try_get("yesterday_total_requests")?,
                 success_count: window_row.try_get("yesterday_success_count")?,
                 error_count: window_row.try_get("yesterday_error_count")?,
                 quota_exhausted_count: window_row.try_get("yesterday_quota_exhausted_count")?,
+                new_keys: 0,
+                new_quarantines: 0,
             },
             month: SummaryWindowMetrics {
                 total_requests: month_row.try_get("month_total_requests")?,
                 success_count: month_row.try_get("month_success_count")?,
                 error_count: month_row.try_get("month_error_count")?,
                 quota_exhausted_count: month_row.try_get("month_quota_exhausted_count")?,
+                new_keys: month_lifecycle_row.try_get("month_new_keys")?,
+                new_quarantines: month_lifecycle_row.try_get("month_new_quarantines")?,
             },
         })
     }
@@ -15449,6 +15583,8 @@ pub struct SummaryWindowMetrics {
     pub success_count: i64,
     pub error_count: i64,
     pub quota_exhausted_count: i64,
+    pub new_keys: i64,
+    pub new_quarantines: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -15456,6 +15592,12 @@ pub struct SummaryWindows {
     pub today: SummaryWindowMetrics,
     pub yesterday: SummaryWindowMetrics,
     pub month: SummaryWindowMetrics,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForwardProxyDashboardSummary {
+    pub available_nodes: i64,
+    pub total_nodes: i64,
 }
 
 /// Successful request counters for public metrics.
@@ -19189,6 +19331,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             success_count: 9,
             error_count: 2,
             quota_exhausted_count: 1,
+            new_keys: 1,
+            new_quarantines: 0,
         };
         if yesterday_start >= month_start {
             expected_month.total_requests += 10;
@@ -19216,6 +19360,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 success_count: 9,
                 error_count: 2,
                 quota_exhausted_count: 1,
+                ..SummaryWindowMetrics::default()
             }
         );
         assert_eq!(
@@ -19225,6 +19370,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 success_count: 5,
                 error_count: 1,
                 quota_exhausted_count: 1,
+                ..SummaryWindowMetrics::default()
             }
         );
         assert_eq!(summary.month, expected_month);
@@ -19484,6 +19630,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
 
     #[tokio::test]
     async fn quota_blocks_after_hourly_limit() {
+        let _guard = env_lock().lock_owned().await;
         let db_path = temp_db_path("quota-test");
         let db_str = db_path.to_string_lossy().to_string();
         let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)

@@ -216,6 +216,7 @@ interface AdminTranslationsShape {
     currentSnapshot: string
     todayShare: string
     monthToDate: string
+    monthAdded: string
     monthShare: string
     trendsTitle: string
     trendsDescription: string
@@ -748,10 +749,14 @@ interface AdminTranslationsShape {
         success: string
         errors: string
         quota: string
+        newKeys: string
+        newQuarantines: string
         keys: string
         quarantined: string
         exhausted: string
         remaining: string
+        proxyAvailable: string
+        proxyTotal: string
       }
       subtitles: {
         keysAll: string
@@ -1335,6 +1340,7 @@ export const translations: Record<Language, TranslationShape> = {
         currentSnapshot: 'Current snapshot',
         todayShare: 'Today share',
         monthToDate: 'Month to date',
+        monthAdded: 'Added this month',
         monthShare: 'Month share',
         trendsTitle: 'Traffic Trends',
         trendsDescription: 'Recent request and error changes from latest logs.',
@@ -1871,10 +1877,14 @@ export const translations: Record<Language, TranslationShape> = {
           success: 'Successful',
           errors: 'Errors',
           quota: 'Quota Exhausted',
+          newKeys: 'New Keys',
+          newQuarantines: 'New Quarantines',
           keys: 'Active Keys',
           quarantined: 'Quarantined',
           exhausted: 'Exhausted',
           remaining: 'Remaining',
+          proxyAvailable: 'Available Proxy Nodes',
+          proxyTotal: 'Proxy Nodes Total',
         },
         subtitles: {
           keysAll: 'All keys available',
@@ -2441,6 +2451,7 @@ export const translations: Record<Language, TranslationShape> = {
         currentSnapshot: '当前快照',
         todayShare: '今日占比',
         monthToDate: '本月累计',
+        monthAdded: '本月新增',
         monthShare: '本月占比',
         trendsTitle: '流量趋势',
         trendsDescription: '基于最新请求日志的请求量与错误变化。',
@@ -2977,10 +2988,14 @@ export const translations: Record<Language, TranslationShape> = {
           success: '成功',
           errors: '错误',
           quota: '额度耗尽',
+          newKeys: '新增密钥',
+          newQuarantines: '新增隔离密钥',
           keys: '活跃密钥',
           quarantined: '隔离中',
           exhausted: '已耗尽',
           remaining: '剩余可用',
+          proxyAvailable: '可用代理节点',
+          proxyTotal: '代理节点总数',
         },
         subtitles: {
           keysAll: '全部可用',

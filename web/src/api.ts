@@ -18,12 +18,43 @@ export interface SummaryWindowMetrics {
   success_count: number
   error_count: number
   quota_exhausted_count: number
+  new_keys: number
+  new_quarantines: number
 }
 
 export interface SummaryWindowsResponse {
   today: SummaryWindowMetrics
   yesterday: SummaryWindowMetrics
   month: SummaryWindowMetrics
+}
+
+export interface DashboardSiteStatusSnapshot {
+  remainingQuota: number
+  totalQuotaLimit: number
+  activeKeys: number
+  quarantinedKeys: number
+  exhaustedKeys: number
+  availableProxyNodes: number | null
+  totalProxyNodes: number | null
+}
+
+export interface DashboardForwardProxySnapshot {
+  availableNodes: number | null
+  totalNodes: number | null
+}
+
+export interface ForwardProxyDashboardSummaryResponse {
+  availableNodes: number
+  totalNodes: number
+}
+
+export interface DashboardSnapshotEvent {
+  summary: Summary
+  summaryWindows: SummaryWindowsResponse
+  siteStatus: DashboardSiteStatusSnapshot
+  forwardProxy: DashboardForwardProxySnapshot
+  keys: ApiKeyStats[]
+  logs: RequestLog[]
 }
 
 export interface PublicMetrics {
@@ -1447,4 +1478,10 @@ export function validateForwardProxyCandidateWithProgress(
 
 export function fetchForwardProxyStats(signal?: AbortSignal): Promise<ForwardProxyStatsResponse> {
   return requestJson('/api/stats/forward-proxy', { signal })
+}
+
+export function fetchForwardProxyDashboardSummary(
+  signal?: AbortSignal,
+): Promise<ForwardProxyDashboardSummaryResponse> {
+  return requestJson('/api/stats/forward-proxy/summary', { signal })
 }
