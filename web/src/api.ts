@@ -960,6 +960,8 @@ export interface ValidateKeysSummary {
   error: number
 }
 
+export type ValidateAssignedProxyMatchKind = 'registration_ip' | 'same_region' | 'other'
+
 export interface ValidateKeyResult {
   api_key: string
   status: string
@@ -967,6 +969,7 @@ export interface ValidateKeyResult {
   registration_region?: string | null
   assigned_proxy_key?: string | null
   assigned_proxy_label?: string | null
+  assigned_proxy_match_kind?: ValidateAssignedProxyMatchKind | null
   quota_limit?: number
   quota_remaining?: number
   detail?: string

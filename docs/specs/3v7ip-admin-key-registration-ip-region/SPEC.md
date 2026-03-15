@@ -20,6 +20,7 @@
 - 在 `api_keys` 中持久化 `registration_ip` 与 `registration_region`，并在 key 列表 / 详情返回。
 - 列表支持 `registration_ip` 精确筛选与 `registration_region` 多选 facets 筛选，且保持 URL / 分页上下文。
 - 地区解析遵循 `xp` 的 `country.is` 思路：批量解析、短暂失败回退、不阻断导入。
+- 导入校验弹窗中的映射节点名称按匹配来源着色：注册 IP=`success`、同地区=`info`、其他=`warning`。
 
 ### Non-goals
 
@@ -27,6 +28,7 @@
 - 不新增手工编辑注册 IP / 地区的后台入口。
 - 不支持 CIDR、模糊 IP 搜索或自定义 geo provider 配置页。
 - 不扩展校验对话框为 metadata 检查器；校验流程仍只验证 key 可用性。
+- 不改动代理选点优先级，也不把匹配来源持久化到数据库。
 
 ## 范围（Scope）
 
@@ -84,6 +86,15 @@
   - 对已存在 key，仅当目标字段为空时才补写，不覆盖已有值
   - geo lookup 失败不影响该 key 的创建/恢复/已存在结果
 
+### HTTP: `POST /api/keys/validate`
+
+- 响应新增可选字段：
+  - `results[*].assigned_proxy_match_kind: "registration_ip" | "same_region" | "other" | null`
+- 语义固定：
+  - `registration_ip`：当前选中的主代理节点直接命中注册 IP
+  - `same_region`：未命中注册 IP，但节点地区命中 `registration_region`
+  - `other`：其余 fallback/direct/preferred-hint 命中
+
 ### Browser URL contract
 
 - `/admin/keys` 新增：
@@ -102,6 +113,7 @@
   - 地区展示格式按 xp 的 `format_region` 语义：优先 `country + region`，若 region 像 subdivision code 且 city 存在，则显示 `country city (code)`
 - 本项目数据库只保存最终 `registration_region` 字符串，不额外拆分存 `country/region/city/operator`。
 - UI 需提示注册地区解析会访问 configured `country.is`-compatible 服务。
+- 校验弹窗只给“分配代理”值文本着色；IP badge、状态 badge、地区文案与列表/详情页现有展示保持不变。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -120,6 +132,18 @@
 - Given `GET /api/keys?registration_ip=8.8.8.8&region=US`
   When 打开列表
   Then 只返回完全匹配该 IP 且地区属于所选 region facets 的 key，并返回全量 region facets 计数。
+
+- Given 校验结果返回 `assigned_proxy_match_kind=registration_ip`
+  When 打开导入校验弹窗的注册信息 bubble
+  Then 节点名称文本使用成功色，且不影响其它字段颜色。
+
+- Given 校验结果返回 `assigned_proxy_match_kind=same_region`
+  When 打开导入校验弹窗的注册信息 bubble
+  Then 节点名称文本使用信息色。
+
+- Given 校验结果返回 `assigned_proxy_match_kind=other` 或缺失
+  When 打开导入校验弹窗的注册信息 bubble
+  Then 节点名称文本分别使用警告色或保持默认色。
 
 - Given 管理员从带 query 的 `/admin/keys` 进入 `/admin/keys/:id`
   When 点击返回
@@ -150,6 +174,19 @@
 展示批量导入后的校验结果弹窗，包括 valid / exhausted / unauthorized / error / duplicate 等状态。
 
 ![导入校验弹窗](assets/api-keys-validation-dialog.png)
+
+## Visual Evidence (PR)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: Admin/Components/ApiKeysValidationDialog/Assigned Proxy Match Kinds
+  state: proxy-match-kinds
+  evidence_note: verifies the registration bubble renders success/info/warning text colors for registration IP, same-region, and other proxy matches during import validation.
+  image:
+  ![导入校验映射节点颜色分层](./assets/api-keys-validation-proxy-match-kinds.png)
 
 ## 质量门槛（Quality Gates）
 

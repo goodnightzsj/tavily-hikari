@@ -1037,6 +1037,7 @@ function AdminDashboard(): JSX.Element {
     registration_region?: string | null
     assigned_proxy_key?: string | null
     assigned_proxy_label?: string | null
+    assigned_proxy_match_kind?: ValidateKeyResult['assigned_proxy_match_kind']
     quota_limit?: number
     quota_remaining?: number
     detail?: string
@@ -3638,8 +3639,11 @@ function AdminDashboard(): JSX.Element {
             ...row,
             registration_ip: res?.registration_ip ?? row.registration_ip,
             registration_region: res?.registration_region ?? row.registration_region,
-            assigned_proxy_key: res?.assigned_proxy_key ?? row.assigned_proxy_key,
-            assigned_proxy_label: res?.assigned_proxy_label ?? row.assigned_proxy_label,
+            assigned_proxy_key: res ? res.assigned_proxy_key : row.assigned_proxy_key,
+            assigned_proxy_label: res ? res.assigned_proxy_label : row.assigned_proxy_label,
+            assigned_proxy_match_kind: res
+              ? res.assigned_proxy_match_kind
+              : row.assigned_proxy_match_kind,
           }
         }
         if (!res) return row
@@ -3649,8 +3653,9 @@ function AdminDashboard(): JSX.Element {
           status,
           registration_ip: res.registration_ip ?? row.registration_ip,
           registration_region: res.registration_region ?? row.registration_region,
-          assigned_proxy_key: res.assigned_proxy_key ?? row.assigned_proxy_key,
-          assigned_proxy_label: res.assigned_proxy_label ?? row.assigned_proxy_label,
+          assigned_proxy_key: res.assigned_proxy_key,
+          assigned_proxy_label: res.assigned_proxy_label,
+          assigned_proxy_match_kind: res.assigned_proxy_match_kind,
           quota_limit: res.quota_limit,
           quota_remaining: res.quota_remaining,
           detail: res.detail,
@@ -3671,6 +3676,9 @@ function AdminDashboard(): JSX.Element {
         return {
           ...row,
           status: 'pending' as const,
+          assigned_proxy_key: undefined,
+          assigned_proxy_label: undefined,
+          assigned_proxy_match_kind: undefined,
           detail: undefined,
           quota_limit: undefined,
           quota_remaining: undefined,

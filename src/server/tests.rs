@@ -3650,12 +3650,24 @@ mod tests {
             Some("Direct")
         );
         assert_eq!(
+            results[0]
+                .get("assigned_proxy_match_kind")
+                .and_then(|v| v.as_str()),
+            Some("other")
+        );
+        assert_eq!(
             results[1].get("registration_ip").and_then(|v| v.as_str()),
             Some("1.1.1.1")
         );
         assert_eq!(
             results[1].get("registration_region").and_then(|v| v.as_str()),
             Some("US Westfield (MA)")
+        );
+        assert_eq!(
+            results[1]
+                .get("assigned_proxy_match_kind")
+                .and_then(|v| v.as_str()),
+            Some("other")
         );
         assert_eq!(
             results[2].get("registration_region").and_then(|v| v.as_str()),
