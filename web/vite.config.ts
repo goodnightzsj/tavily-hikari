@@ -5,10 +5,11 @@ import react from '@vitejs/plugin-react'
 
 const rootDir = fileURLToPath(new URL('.', import.meta.url))
 const forwardAuthValue = process.env.VITE_FORWARD_EMAIL ?? 'admin@example.com'
+const proxyTarget = process.env.VITE_PROXY_TARGET ?? 'http://127.0.0.1:58087'
 
 function withForwardAuth(): Partial<ProxyOptions> {
   return {
-    target: 'http://127.0.0.1:58087',
+    target: proxyTarget,
     changeOrigin: true,
     configure: (proxy) => {
       proxy.on('proxyReq', (proxyReq) => {
@@ -57,7 +58,7 @@ export default defineConfig({
     proxy: {
       '/api': withForwardAuth(),
       '/mcp': {
-        target: 'http://127.0.0.1:58087',
+        target: proxyTarget,
         changeOrigin: true,
       },
       '/health': withForwardAuth(),

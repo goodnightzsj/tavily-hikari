@@ -710,6 +710,7 @@ export interface AddApiKeysBatchResponse {
 export interface AddApiKeysBatchItem {
   api_key: string
   registration_ip?: string | null
+  assigned_proxy_key?: string | null
 }
 
 export async function addApiKeysBatch(
@@ -794,9 +795,18 @@ export interface ValidateKeysSummary {
 export interface ValidateKeyResult {
   api_key: string
   status: string
+  registration_ip?: string | null
+  registration_region?: string | null
+  assigned_proxy_key?: string | null
+  assigned_proxy_label?: string | null
   quota_limit?: number
   quota_remaining?: number
   detail?: string
+}
+
+export interface ValidateKeyInput {
+  api_key: string
+  registration_ip?: string | null
 }
 
 export interface ValidateKeysResponse {
@@ -804,12 +814,12 @@ export interface ValidateKeysResponse {
   results: ValidateKeyResult[]
 }
 
-export async function validateApiKeys(apiKeys: string[], signal?: AbortSignal): Promise<ValidateKeysResponse> {
+export async function validateApiKeys(items: ValidateKeyInput[], signal?: AbortSignal): Promise<ValidateKeysResponse> {
   return await requestJson('/api/keys/validate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal,
-    body: JSON.stringify({ api_keys: apiKeys }),
+    body: JSON.stringify({ items }),
   })
 }
 

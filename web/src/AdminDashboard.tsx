@@ -1033,6 +1033,9 @@ function AdminDashboard(): JSX.Element {
     api_key: string
     status: KeyValidationStatus
     registration_ip?: string | null
+    registration_region?: string | null
+    assigned_proxy_key?: string | null
+    assigned_proxy_label?: string | null
     quota_limit?: number
     quota_remaining?: number
     detail?: string
@@ -3442,15 +3445,35 @@ function AdminDashboard(): JSX.Element {
     setKeysValidation((prev) => {
       if (!prev) return prev
       if (runId !== keysValidateRunIdRef.current) return prev
-      const byKey = new Map(results.map((r) => [r.api_key, r]))
+      const byKey = new Map<string, ValidateKeyResult>()
+      for (const result of results) {
+        const current = byKey.get(result.api_key)
+        const isUsable =
+          result.status !== 'duplicate_in_input' && result.status !== 'pending'
+        if (!current || isUsable) {
+          byKey.set(result.api_key, result)
+        }
+      }
       const nextRows = prev.rows.map((row): KeyValidationRow => {
-        if (row.status === 'duplicate_in_input') return row
         const res = byKey.get(row.api_key)
+        if (row.status === 'duplicate_in_input') {
+          return {
+            ...row,
+            registration_ip: res?.registration_ip ?? row.registration_ip,
+            registration_region: res?.registration_region ?? row.registration_region,
+            assigned_proxy_key: res?.assigned_proxy_key ?? row.assigned_proxy_key,
+            assigned_proxy_label: res?.assigned_proxy_label ?? row.assigned_proxy_label,
+          }
+        }
         if (!res) return row
         const status = coerceValidationStatus(res.status)
         return {
           ...row,
           status,
+          registration_ip: res.registration_ip ?? row.registration_ip,
+          registration_region: res.registration_region ?? row.registration_region,
+          assigned_proxy_key: res.assigned_proxy_key ?? row.assigned_proxy_key,
+          assigned_proxy_label: res.assigned_proxy_label ?? row.assigned_proxy_label,
           quota_limit: res.quota_limit,
           quota_remaining: res.quota_remaining,
           detail: res.detail,
@@ -3481,14 +3504,14 @@ function AdminDashboard(): JSX.Element {
     })
   }, [])
 
-  const runValidateKeys = useCallback(async (apiKeys: string[], runId: number) => {
+  const runValidateKeys = useCallback(async (items: { api_key: string; registration_ip?: string | null }[], runId: number) => {
     const controller = new AbortController()
     keysValidateAbortRef.current?.abort()
     keysValidateAbortRef.current = controller
 
     const CHUNK_SIZE = 25
-    for (let i = 0; i < apiKeys.length; i += CHUNK_SIZE) {
-      const chunk = apiKeys.slice(i, i + CHUNK_SIZE)
+    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+      const chunk = items.slice(i, i + CHUNK_SIZE)
       if (chunk.length === 0) continue
       try {
         const resp = await validateApiKeys(chunk, controller.signal)
@@ -3496,7 +3519,12 @@ function AdminDashboard(): JSX.Element {
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to validate keys'
         applyValidationResults(
-          chunk.map((api_key) => ({ api_key, status: 'error', detail: message })),
+          chunk.map((item) => ({
+            api_key: item.api_key,
+            registration_ip: item.registration_ip,
+            status: 'error',
+            detail: message,
+          })),
           runId,
         )
       }
@@ -3523,7 +3551,7 @@ function AdminDashboard(): JSX.Element {
 
     const seen = new Set<string>()
     const rows: KeyValidationRow[] = []
-    const uniqueKeys: string[] = []
+    const uniqueEntries: { api_key: string; registration_ip?: string | null }[] = []
     const registrationIpByKey: Record<string, string> = {}
     let duplicateCount = 0
     for (const entry of parsedEntries) {
@@ -3539,7 +3567,10 @@ function AdminDashboard(): JSX.Element {
         continue
       }
       seen.add(api_key)
-      uniqueKeys.push(api_key)
+      uniqueEntries.push({
+        api_key,
+        registration_ip: entry.registration_ip,
+      })
       if (entry.registration_ip) {
         registrationIpByKey[api_key] = entry.registration_ip
       }
@@ -3557,7 +3588,7 @@ function AdminDashboard(): JSX.Element {
       group,
       input_lines: rawLines.length,
       valid_lines: parsedEntries.length,
-      unique_in_input: uniqueKeys.length,
+      unique_in_input: uniqueEntries.length,
       duplicate_in_input: duplicateCount,
       checking: true,
       importing: false,
@@ -3571,7 +3602,7 @@ function AdminDashboard(): JSX.Element {
     setNewKeysGroup('')
     beginKeysBatchClose()
 
-    await runValidateKeys(uniqueKeys, runId)
+    await runValidateKeys(uniqueEntries, runId)
   }
 
   const handleRetryFailedValidation = async () => {
@@ -3586,6 +3617,10 @@ function AdminDashboard(): JSX.Element {
     }
     const failedKeys = Array.from(failed)
     if (failedKeys.length === 0) return
+    const failedItems = failedKeys.map((api_key) => ({
+      api_key,
+      registration_ip: keysValidation.registration_ip_by_key[api_key] ?? undefined,
+    }))
 
     keysValidateRunIdRef.current = (keysValidateRunIdRef.current ?? 0) + 1
     const runId = keysValidateRunIdRef.current
@@ -3596,7 +3631,7 @@ function AdminDashboard(): JSX.Element {
       importWarning: undefined,
     }) : prev)
     markKeysPendingForRetry(failedKeys, runId)
-    await runValidateKeys(failedKeys, runId)
+    await runValidateKeys(failedItems, runId)
   }
 
   const handleRetryOneValidation = async (api_key: string) => {
@@ -3611,7 +3646,12 @@ function AdminDashboard(): JSX.Element {
       importWarning: undefined,
     }) : prev)
     markKeysPendingForRetry([api_key], runId)
-    await runValidateKeys([api_key], runId)
+    await runValidateKeys([
+      {
+        api_key,
+        registration_ip: keysValidation.registration_ip_by_key[api_key] ?? undefined,
+      },
+    ], runId)
   }
 
   const handleImportValidatedKeys = async () => {
@@ -3649,6 +3689,15 @@ function AdminDashboard(): JSX.Element {
         results: [],
       }
       let markExhaustedFailedCount = 0
+      const validationRowByKey = new Map<string, KeyValidationRow>()
+      for (const row of keysValidation.rows) {
+        const current = validationRowByKey.get(row.api_key)
+        const isUsable =
+          row.status !== 'duplicate_in_input' && row.status !== 'pending'
+        if (!current || isUsable) {
+          validationRowByKey.set(row.api_key, row)
+        }
+      }
 
       for (let i = 0; i < keysValidationValidKeys.length; i += API_KEYS_IMPORT_CHUNK_SIZE) {
         const chunk = keysValidationValidKeys.slice(i, i + API_KEYS_IMPORT_CHUNK_SIZE)
@@ -3656,6 +3705,7 @@ function AdminDashboard(): JSX.Element {
         const chunkItems: AddApiKeysBatchItem[] = chunk.map((api_key) => ({
           api_key,
           registration_ip: keysValidation.registration_ip_by_key[api_key] ?? undefined,
+          assigned_proxy_key: validationRowByKey.get(api_key)?.assigned_proxy_key ?? undefined,
         }))
         const chunkResponse = await addApiKeysBatch(chunkItems, normalizedGroup, exhaustedInChunk)
         response.summary.input_lines += chunkResponse.summary.input_lines

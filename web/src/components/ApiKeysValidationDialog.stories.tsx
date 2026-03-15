@@ -260,6 +260,9 @@ function RegistrationIpPreviewCanvas(): JSX.Element {
             api_key: "tvly-OK-NEW",
             status: "ok",
             registration_ip: "8.8.8.8",
+            registration_region: "US",
+            assigned_proxy_key: "__direct__",
+            assigned_proxy_label: "Direct",
             quota_limit: 1000,
             quota_remaining: 123,
             attempts: 1,
@@ -268,6 +271,7 @@ function RegistrationIpPreviewCanvas(): JSX.Element {
             api_key: "tvly-OK-EXHAUSTED",
             status: "ok_exhausted",
             registration_ip: "2606:4700:4700::1111",
+            registration_region: null,
             quota_limit: 1000,
             quota_remaining: 0,
             attempts: 1,
@@ -288,6 +292,9 @@ function RegistrationIpPreviewCanvas(): JSX.Element {
             api_key: "tvly-OK-NEW",
             status: "duplicate_in_input",
             registration_ip: "8.8.8.8",
+            registration_region: "US",
+            assigned_proxy_key: "__direct__",
+            assigned_proxy_label: "Direct",
             attempts: 0,
           },
         ],
@@ -297,6 +304,18 @@ function RegistrationIpPreviewCanvas(): JSX.Element {
 }
 
 export const RegistrationIpPreview: Story = {
+  args: {
+    initial: {
+      group: "default",
+      input_lines: 0,
+      valid_lines: 0,
+      unique_in_input: 0,
+      duplicate_in_input: 0,
+      checking: false,
+      importing: false,
+      rows: [],
+    },
+  },
   render: () => <RegistrationIpPreviewCanvas />,
   parameters: {
     viewport: { defaultViewport: "1440-device-desktop" },

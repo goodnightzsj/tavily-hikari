@@ -36,6 +36,9 @@ export type KeyValidationRow = {
   api_key: string;
   status: KeyValidationStatus;
   registration_ip?: string | null;
+  registration_region?: string | null;
+  assigned_proxy_key?: string | null;
+  assigned_proxy_label?: string | null;
   quota_limit?: number;
   quota_remaining?: number;
   detail?: string;
@@ -180,11 +183,29 @@ function filterKeyForStatus(status: KeyValidationStatus): ValidationFilterKey {
   }
 }
 
-function RegistrationIpIndicator(props: { label: string; tooltip: string }): JSX.Element {
+function RegistrationIpIndicator(props: {
+  label: string;
+  ip: string;
+  region?: string | null;
+  proxyLabel?: string | null;
+  proxyKey?: string | null;
+  ipLabel: string;
+  regionLabel: string;
+  proxyLabelText: string;
+}): JSX.Element {
   const triggerRef = React.useRef<HTMLSpanElement | null>(null);
   const bubbleRef = React.useRef<HTMLSpanElement | null>(null);
   const [open, setOpen] = React.useState(false);
   const [position, setPosition] = React.useState<BubblePosition | null>(null);
+  const region = props.region?.trim() ?? null;
+  const proxyValue = props.proxyLabel?.trim() || props.proxyKey?.trim() || null;
+  const accessibleLabel = [
+    `${props.ipLabel}: ${props.ip}`,
+    region ? `${props.regionLabel}: ${region}` : null,
+    proxyValue ? `${props.proxyLabelText}: ${proxyValue}` : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
 
   React.useLayoutEffect(() => {
     if (!open || !triggerRef.current || typeof window === "undefined") {
@@ -256,7 +277,7 @@ function RegistrationIpIndicator(props: { label: string; tooltip: string }): JSX
         ref={triggerRef}
         className="key-validation-detail-trigger inline-flex"
         tabIndex={0}
-        aria-label={props.tooltip}
+        aria-label={accessibleLabel}
         data-registration-ip-trigger="true"
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
@@ -286,7 +307,22 @@ function RegistrationIpIndicator(props: { label: string; tooltip: string }): JSX
                 ["--key-validation-bubble-arrow-left" as string]: `${position?.arrowLeft ?? 40}px`,
               }}
             >
-              {props.tooltip}
+              <span className="key-validation-bubble-line">
+                <span className="key-validation-bubble-label">{props.ipLabel}</span>
+                <span className="key-validation-bubble-value">{props.ip}</span>
+              </span>
+              {region ? (
+                <span className="key-validation-bubble-line">
+                  <span className="key-validation-bubble-label">{props.regionLabel}</span>
+                  <span className="key-validation-bubble-value">{region}</span>
+                </span>
+              ) : null}
+              {proxyValue ? (
+                <span className="key-validation-bubble-line">
+                  <span className="key-validation-bubble-label">{props.proxyLabelText}</span>
+                  <span className="key-validation-bubble-value">{proxyValue}</span>
+                </span>
+              ) : null}
             </span>,
             document.body,
           )
@@ -319,6 +355,9 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
   const tableStrings = validationStrings.table;
   const importStrings = validationStrings.import;
   const ipBadgeLabel = validationStrings.registrationIpBadge ?? "IP";
+  const registrationIpLabel = keyStrings.table.registrationIp ?? "Registration IP";
+  const registrationRegionLabel = keyStrings.table.registrationRegion ?? "Region";
+  const assignedProxyLabel = keyStrings.table.assignedProxy ?? "Assigned Proxy";
   const [activeFilter, setActiveFilter] = React.useState<ValidationFilterKey | null>(null);
 
   const groupLabel = props.state?.group?.trim() || "default";
@@ -570,12 +609,9 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                         : "—";
                     const label = statuses[row.status] ?? row.status;
                     const registrationIp = row.registration_ip?.trim();
-                    const registrationTooltip = registrationIp
-                      ? (validationStrings.registrationIpTooltip ?? "Registration IP: {ip}").replace(
-                          "{ip}",
-                          registrationIp,
-                        )
-                      : null;
+                    const registrationRegion = row.registration_region?.trim() ?? null;
+                    const assignedProxyKey = row.assigned_proxy_key?.trim() ?? null;
+                    const assignedProxyLabelValue = row.assigned_proxy_label?.trim() ?? null;
                     return (
                       <div key={`${row.api_key}-${index}`} className="p-3">
                         <div className="flex items-start justify-between gap-3">
@@ -602,10 +638,16 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                           >
                             {label}
                           </StatusBadge>
-                          {registrationIp && registrationTooltip ? (
+                          {registrationIp ? (
                             <RegistrationIpIndicator
                               label={ipBadgeLabel}
-                              tooltip={registrationTooltip}
+                              ip={registrationIp}
+                              region={registrationRegion}
+                              proxyKey={assignedProxyKey}
+                              proxyLabel={assignedProxyLabelValue}
+                              ipLabel={registrationIpLabel}
+                              regionLabel={registrationRegionLabel}
+                              proxyLabelText={assignedProxyLabel}
                             />
                           ) : null}
                           <span className="text-xs font-mono tabular-nums opacity-70 whitespace-nowrap">{quotaLabel}</span>
@@ -664,12 +706,9 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                             : "—";
                         const label = statuses[row.status] ?? row.status;
                         const registrationIp = row.registration_ip?.trim();
-                        const registrationTooltip = registrationIp
-                          ? (validationStrings.registrationIpTooltip ?? "Registration IP: {ip}").replace(
-                              "{ip}",
-                              registrationIp,
-                            )
-                          : null;
+                        const registrationRegion = row.registration_region?.trim() ?? null;
+                        const assignedProxyKey = row.assigned_proxy_key?.trim() ?? null;
+                        const assignedProxyLabelValue = row.assigned_proxy_label?.trim() ?? null;
                         return (
                           <TableRow key={`${row.api_key}-${index}`}>
                             <TableCell className="max-w-0">
@@ -687,10 +726,16 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                                     >
                                       {label}
                                     </StatusBadge>
-                                    {registrationIp && registrationTooltip ? (
+                                    {registrationIp ? (
                                       <RegistrationIpIndicator
                                         label={ipBadgeLabel}
-                                        tooltip={registrationTooltip}
+                                        ip={registrationIp}
+                                        region={registrationRegion}
+                                        proxyKey={assignedProxyKey}
+                                        proxyLabel={assignedProxyLabelValue}
+                                        ipLabel={registrationIpLabel}
+                                        regionLabel={registrationRegionLabel}
+                                        proxyLabelText={assignedProxyLabel}
                                       />
                                     ) : null}
                                     <span className="opacity-60">
@@ -709,10 +754,16 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                                   >
                                     {label}
                                   </StatusBadge>
-                                  {registrationIp && registrationTooltip ? (
+                                  {registrationIp ? (
                                     <RegistrationIpIndicator
                                       label={ipBadgeLabel}
-                                      tooltip={registrationTooltip}
+                                      ip={registrationIp}
+                                      region={registrationRegion}
+                                      proxyKey={assignedProxyKey}
+                                      proxyLabel={assignedProxyLabelValue}
+                                      ipLabel={registrationIpLabel}
+                                      regionLabel={registrationRegionLabel}
+                                      proxyLabelText={assignedProxyLabel}
                                     />
                                   ) : null}
                                 </div>

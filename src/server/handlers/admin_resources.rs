@@ -200,6 +200,7 @@ struct CreateKeyRequest {
     api_key: String,
     group: Option<String>,
     registration_ip: Option<String>,
+    assigned_proxy_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,12 +222,14 @@ struct BatchCreateKeysRequest {
 struct BatchCreateKeyItem {
     api_key: String,
     registration_ip: Option<String>,
+    assigned_proxy_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct NormalizedBatchCreateKeyItem {
     api_key: String,
     registration_ip: Option<String>,
+    assigned_proxy_key: Option<String>,
 }
 
 impl BatchCreateKeysRequest {
@@ -241,6 +244,7 @@ impl BatchCreateKeysRequest {
             .map(|api_key| BatchCreateKeyItem {
                 api_key,
                 registration_ip: None,
+                assigned_proxy_key: None,
             })
             .collect()
     }
@@ -492,7 +496,23 @@ struct BatchCreateKeysResponse {
 
 #[derive(Debug, Deserialize)]
 struct ValidateKeysRequest {
+    #[serde(default)]
     api_keys: Vec<String>,
+    #[serde(default)]
+    items: Vec<ValidateKeyItemInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidateKeyItemInput {
+    api_key: String,
+    #[serde(default)]
+    registration_ip: Option<String>,
+}
+
+#[derive(Debug)]
+struct NormalizedValidateKeyItem {
+    api_key: String,
+    registration_ip: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -511,6 +531,14 @@ struct ValidateKeysSummary {
 struct ValidateKeyResult {
     api_key: String,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_proxy_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_proxy_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota_limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -727,15 +755,33 @@ fn truncate_detail(mut input: String, max_len: usize) -> String {
 async fn validate_single_key(
     proxy: TavilyProxy,
     usage_base: String,
+    geo_origin: String,
     api_key: String,
+    registration_ip: Option<String>,
+    registration_region: Option<String>,
 ) -> (ValidateKeyResult, &'static str) {
-    match proxy.probe_api_key_quota(&api_key, &usage_base).await {
-        Ok((limit, remaining)) => {
+    match proxy
+        .probe_api_key_quota_with_registration(
+            &api_key,
+            &usage_base,
+            registration_ip.as_deref(),
+            registration_region.as_deref(),
+            &geo_origin,
+        )
+        .await
+    {
+        Ok((limit, remaining, assigned_proxy)) => {
+            let assigned_proxy_key = assigned_proxy.as_ref().map(|item| item.key.clone());
+            let assigned_proxy_label = assigned_proxy.as_ref().map(|item| item.label.clone());
             if remaining <= 0 {
                 (
                     ValidateKeyResult {
                         api_key,
                         status: "ok_exhausted".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key,
+                        assigned_proxy_label,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -747,6 +793,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "ok".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key,
+                        assigned_proxy_label,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -763,6 +813,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "unauthorized".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -774,6 +828,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "forbidden".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -785,6 +843,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "invalid".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -796,6 +858,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "error".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -808,6 +874,10 @@ async fn validate_single_key(
             ValidateKeyResult {
                 api_key,
                 status: "invalid".to_string(),
+                registration_ip,
+                registration_region,
+                assigned_proxy_key: None,
+                assigned_proxy_label: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(
@@ -821,6 +891,10 @@ async fn validate_single_key(
             ValidateKeyResult {
                 api_key,
                 status: "error".to_string(),
+                registration_ip,
+                registration_region,
+                assigned_proxy_key: None,
+                assigned_proxy_label: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(err.to_string(), 1400)),
@@ -839,20 +913,42 @@ async fn post_validate_api_keys(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let ValidateKeysRequest { api_keys } = payload;
+    let ValidateKeysRequest { api_keys, items } = payload;
+    let raw_items = if items.is_empty() {
+        api_keys
+            .into_iter()
+            .map(|api_key| ValidateKeyItemInput {
+                api_key,
+                registration_ip: None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        items
+    };
 
     let mut summary = ValidateKeysSummary {
-        input_lines: api_keys.len() as u64,
+        input_lines: raw_items.len() as u64,
         ..Default::default()
     };
 
-    let mut trimmed = Vec::<String>::with_capacity(api_keys.len());
-    for api_key in api_keys {
-        let api_key = api_key.trim();
+    let mut trimmed = Vec::<NormalizedValidateKeyItem>::with_capacity(raw_items.len());
+    let mut geo_lookup_ips = Vec::<String>::new();
+    for item in raw_items {
+        let api_key = item.api_key.trim();
         if api_key.is_empty() {
             continue;
         }
-        trimmed.push(api_key.to_string());
+        let registration_ip = item
+            .registration_ip
+            .as_deref()
+            .and_then(normalize_global_registration_ip);
+        if let Some(ip) = registration_ip.as_ref() {
+            geo_lookup_ips.push(ip.clone());
+        }
+        trimmed.push(NormalizedValidateKeyItem {
+            api_key: api_key.to_string(),
+            registration_ip,
+        });
     }
     summary.valid_lines = trimmed.len() as u64;
 
@@ -864,16 +960,25 @@ async fn post_validate_api_keys(
         return Ok((StatusCode::BAD_REQUEST, body).into_response());
     }
 
+    let region_by_ip = resolve_registration_regions(&state.api_key_ip_geo_origin, &geo_lookup_ips).await;
     let mut results = Vec::<ValidateKeyResult>::with_capacity(trimmed.len());
-    let mut pending = Vec::<(usize, String)>::new();
+    let mut pending = Vec::<(usize, String, Option<String>, Option<String>)>::new();
     let mut seen = HashSet::<String>::new();
 
-    for api_key in trimmed {
-        if !seen.insert(api_key.clone()) {
+    for item in trimmed {
+        let registration_region = item
+            .registration_ip
+            .as_ref()
+            .and_then(|ip| region_by_ip.get(ip).cloned());
+        if !seen.insert(item.api_key.clone()) {
             summary.duplicate_in_input += 1;
             results.push(ValidateKeyResult {
-                api_key,
+                api_key: item.api_key,
                 status: "duplicate_in_input".to_string(),
+                registration_ip: item.registration_ip,
+                registration_region,
+                assigned_proxy_key: None,
+                assigned_proxy_label: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: None,
@@ -883,25 +988,39 @@ async fn post_validate_api_keys(
 
         let pos = results.len();
         results.push(ValidateKeyResult {
-            api_key: api_key.clone(),
+            api_key: item.api_key.clone(),
             status: "pending".to_string(),
+            registration_ip: item.registration_ip.clone(),
+            registration_region: registration_region.clone(),
+            assigned_proxy_key: None,
+            assigned_proxy_label: None,
             quota_limit: None,
             quota_remaining: None,
             detail: None,
         });
-        pending.push((pos, api_key));
+        pending.push((pos, item.api_key, item.registration_ip, registration_region));
     }
 
     summary.unique_in_input = seen.len() as u64;
 
     let proxy = state.proxy.clone();
     let usage_base = state.usage_base.clone();
+    let geo_origin = state.api_key_ip_geo_origin.clone();
     let checked = futures_stream::iter(pending.into_iter())
-        .map(|(pos, api_key)| {
+        .map(|(pos, api_key, registration_ip, registration_region)| {
             let proxy = proxy.clone();
             let usage_base = usage_base.clone();
+            let geo_origin = geo_origin.clone();
             async move {
-                let (result, kind) = validate_single_key(proxy, usage_base, api_key).await;
+                let (result, kind) = validate_single_key(
+                    proxy,
+                    usage_base,
+                    geo_origin,
+                    api_key,
+                    registration_ip,
+                    registration_region,
+                )
+                .await;
                 (pos, result, kind)
             }
         })
@@ -941,6 +1060,7 @@ async fn create_api_key(
         api_key,
         group: group_raw,
         registration_ip: registration_ip_raw,
+        assigned_proxy_key,
     } = payload;
     let api_key = api_key.trim();
     if api_key.is_empty() {
@@ -964,11 +1084,13 @@ async fn create_api_key(
 
     match state
         .proxy
-        .add_or_undelete_key_with_status_in_group_and_registration(
+        .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity_hint(
             api_key,
             group,
             registration_ip.as_deref(),
             registration_region.as_deref(),
+            &state.api_key_ip_geo_origin,
+            assigned_proxy_key.as_deref(),
         )
         .await
     {
@@ -1034,9 +1156,16 @@ async fn create_api_keys_batch(
         if let Some(ip) = registration_ip.as_ref() {
             geo_lookup_ips.push(ip.clone());
         }
+        let assigned_proxy_key = item
+            .assigned_proxy_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         trimmed.push(NormalizedBatchCreateKeyItem {
             api_key: api_key.to_string(),
             registration_ip,
+            assigned_proxy_key,
         });
     }
     summary.valid_lines = trimmed.len() as u64;
@@ -1073,11 +1202,13 @@ async fn create_api_keys_batch(
 
         match state
             .proxy
-            .add_or_undelete_key_with_status_in_group_and_registration(
+            .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity_hint(
                 &item.api_key,
                 group,
                 item.registration_ip.as_deref(),
                 registration_region.as_deref(),
+                &state.api_key_ip_geo_origin,
+                item.assigned_proxy_key.as_deref(),
             )
             .await
         {

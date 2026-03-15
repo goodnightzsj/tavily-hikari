@@ -2,8 +2,9 @@
 mod tests {
     use super::*;
     use axum::Router;
-    use axum::extract::{Json, Query};
-    use axum::http::Method;
+    use axum::extract::{Json, Query, State};
+    use axum::http::{HeaderMap, Method, Uri};
+    use axum::response::{IntoResponse, Response};
     use axum::routing::{any, get, patch, post};
     use nanoid::nanoid;
     use reqwest::Client;
@@ -13,7 +14,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-    use tavily_hikari::{DEFAULT_UPSTREAM, effective_token_hourly_limit};
+    use tavily_hikari::{DEFAULT_UPSTREAM, ForwardProxySettings, effective_token_hourly_limit};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
 
@@ -2739,6 +2740,41 @@ mod tests {
         addr
     }
 
+    async fn spawn_keys_admin_server_with_usage_and_geo(
+        proxy: TavilyProxy,
+        forward_auth: ForwardAuthConfig,
+        dev_open_admin: bool,
+        usage_base: String,
+        geo_origin: String,
+    ) -> SocketAddr {
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth,
+            forward_auth_enabled: true,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            dev_open_admin,
+            usage_base,
+            api_key_ip_geo_origin: geo_origin,
+        });
+
+        let app = Router::new()
+            .route("/api/keys/batch", post(create_api_keys_batch))
+            .route("/api/keys/validate", post(post_validate_api_keys))
+            .route("/api/admin/login", post(post_admin_login))
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
     async fn spawn_usage_mock_server() -> SocketAddr {
         let app = Router::new().route(
             "/usage",
@@ -2792,6 +2828,76 @@ mod tests {
         addr
     }
 
+    #[derive(Clone)]
+    struct ProxyRelayState {
+        upstream_base: String,
+        hits: Arc<AtomicUsize>,
+        client: Client,
+    }
+
+    async fn proxy_relay_handler(
+        State(state): State<ProxyRelayState>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+    ) -> Response {
+        state.hits.fetch_add(1, Ordering::SeqCst);
+        if headers.get("authorization").is_none() {
+            return (
+                reqwest::StatusCode::OK,
+                Json(serde_json::json!({
+                    "key": { "limit": 1000, "usage": 0 }
+                })),
+            )
+                .into_response();
+        }
+        let target = format!(
+            "{}{}",
+            state.upstream_base,
+            uri.path_and_query().map(|value| value.as_str()).unwrap_or("/")
+        );
+        let mut req = state.client.request(method, target);
+        for (name, value) in &headers {
+            if name.as_str().eq_ignore_ascii_case("host") {
+                continue;
+            }
+            req = req.header(name, value);
+        }
+        match req.send().await {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.bytes().await.unwrap_or_default();
+                (status, body).into_response()
+            }
+            Err(err) => (
+                reqwest::StatusCode::BAD_GATEWAY,
+                format!("proxy relay error: {err}"),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn spawn_usage_proxy_relay_server(
+        upstream_base: String,
+        hits: Arc<AtomicUsize>,
+    ) -> SocketAddr {
+        let app = Router::new()
+            .fallback(any(proxy_relay_handler))
+            .with_state(ProxyRelayState {
+                upstream_base,
+                hits,
+                client: Client::new(),
+            });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
     async fn spawn_api_key_geo_mock_server() -> SocketAddr {
         let app = Router::new().route(
             "/geo",
@@ -2810,6 +2916,12 @@ mod tests {
                             "country": "US",
                             "city": "Westfield",
                             "subdivision": "MA",
+                        }),
+                        "18.183.246.69" => serde_json::json!({
+                            "ip": ip,
+                            "country": "JP",
+                            "city": "Tokyo",
+                            "subdivision": "13",
                         }),
                         _ => serde_json::json!({
                             "ip": ip,
@@ -3353,7 +3465,7 @@ mod tests {
             None,
         );
 
-        let usage_addr = spawn_usage_mock_server().await;
+        let usage_addr = spawn_forward_proxy_probe_upstream().await;
         let usage_base = format!("http://{}", usage_addr);
         let addr =
             spawn_keys_admin_server_with_usage_base(proxy, forward_auth, false, usage_base).await;
@@ -3412,6 +3524,170 @@ mod tests {
         assert_eq!(
             results[4].get("status").and_then(|v| v.as_str()),
             Some("duplicate_in_input")
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_validate_items_return_registration_region_metadata() {
+        let db_path = temp_db_path("keys-validate-registration-region");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let forward_auth = ForwardAuthConfig::new(
+            Some(HeaderName::from_static("x-forward-user")),
+            Some("admin".to_string()),
+            None,
+            None,
+        );
+
+        let usage_addr = spawn_usage_mock_server().await;
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let addr = spawn_keys_admin_server_with_usage_and_geo(
+            proxy,
+            forward_auth,
+            false,
+            format!("http://{usage_addr}"),
+            format!("http://{geo_addr}/geo"),
+        )
+        .await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/keys/validate", addr);
+        let resp = client
+            .post(url)
+            .header("x-forward-user", "admin")
+            .json(&serde_json::json!({
+                "items": [
+                    { "api_key": "tvly-ok", "registration_ip": "8.8.8.8" },
+                    { "api_key": "tvly-exhausted", "registration_ip": "1.1.1.1" },
+                    { "api_key": "tvly-ok", "registration_ip": "8.8.8.8" }
+                ]
+            }))
+            .send()
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("parse json body");
+        let results = body
+            .get("results")
+            .and_then(|v| v.as_array())
+            .expect("results array");
+        assert_eq!(
+            results[0].get("registration_ip").and_then(|v| v.as_str()),
+            Some("8.8.8.8")
+        );
+        assert_eq!(
+            results[0].get("registration_region").and_then(|v| v.as_str()),
+            Some("US")
+        );
+        assert_eq!(
+            results[0].get("assigned_proxy_key").and_then(|v| v.as_str()),
+            Some("__direct__")
+        );
+        assert_eq!(
+            results[0].get("assigned_proxy_label").and_then(|v| v.as_str()),
+            Some("Direct")
+        );
+        assert_eq!(
+            results[1].get("registration_ip").and_then(|v| v.as_str()),
+            Some("1.1.1.1")
+        );
+        assert_eq!(
+            results[1].get("registration_region").and_then(|v| v.as_str()),
+            Some("US Westfield (MA)")
+        );
+        assert_eq!(
+            results[2].get("registration_region").and_then(|v| v.as_str()),
+            Some("US")
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_validate_items_probe_usage_through_selected_proxy_node() {
+        let db_path = temp_db_path("keys-validate-via-forward-proxy");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let usage_addr = spawn_usage_mock_server().await;
+        let relay_hits = Arc::new(AtomicUsize::new(0));
+        let relay_addr =
+            spawn_usage_proxy_relay_server(format!("http://{usage_addr}"), relay_hits.clone())
+                .await;
+        proxy
+            .update_forward_proxy_settings(ForwardProxySettings {
+                proxy_urls: vec![format!("http://{relay_addr}")],
+                subscription_urls: Vec::new(),
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+            })
+            .await
+            .expect("proxy settings updated");
+        relay_hits.store(0, Ordering::SeqCst);
+
+        let forward_auth = ForwardAuthConfig::new(
+            Some(HeaderName::from_static("x-forward-user")),
+            Some("admin".to_string()),
+            None,
+            None,
+        );
+
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let addr = spawn_keys_admin_server_with_usage_and_geo(
+            proxy,
+            forward_auth,
+            false,
+            "http://usage.test".to_string(),
+            format!("http://{geo_addr}/geo"),
+        )
+        .await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/keys/validate", addr);
+        let resp = client
+            .post(url)
+            .header("x-forward-user", "admin")
+            .json(&serde_json::json!({
+                "items": [
+                    { "api_key": "tvly-ok", "registration_ip": "18.183.246.69" }
+                ]
+            }))
+            .send()
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+        let proxy_attempt_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM forward_proxy_attempts WHERE proxy_key = ?",
+        )
+        .bind(format!("http://{relay_addr}"))
+        .fetch_one(&pool)
+        .await
+        .expect("count proxy attempts");
+        assert!(
+            proxy_attempt_count > 0,
+            "usage probe should record attempts against the selected forward proxy node"
         );
 
         let _ = std::fs::remove_file(db_path);
@@ -3862,6 +4138,90 @@ mod tests {
         .expect("private key metadata");
         assert!(private_row.0.is_none(), "private ip should not be stored");
         assert!(private_row.1.is_none(), "private region should stay empty");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_batch_updates_existing_registration_metadata_without_overriding_group() {
+        let db_path = temp_db_path("keys-batch-update-existing-registration");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        proxy
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                "tvly-existing",
+                Some("old"),
+                Some("8.8.8.8"),
+                Some("US"),
+            )
+            .await
+            .expect("existing key created");
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let forward_auth = ForwardAuthConfig::new(
+            Some(HeaderName::from_static("x-forward-user")),
+            Some("admin".to_string()),
+            None,
+            None,
+        );
+        let addr = spawn_keys_admin_server_with_geo_origin(
+            proxy,
+            forward_auth,
+            false,
+            format!("http://{geo_addr}/geo"),
+        )
+        .await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/keys/batch", addr);
+        let resp = client
+            .post(url)
+            .header("x-forward-user", "admin")
+            .json(&serde_json::json!({
+                "items": [
+                    { "api_key": "tvly-existing", "registration_ip": "1.1.1.1" }
+                ],
+                "group": "new"
+            }))
+            .send()
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("parse json body");
+        let summary = body.get("summary").expect("summary exists");
+        assert_eq!(summary.get("existed").and_then(|v| v.as_u64()), Some(1));
+
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT group_name, registration_ip, registration_region FROM api_keys WHERE api_key = ?",
+        )
+        .bind("tvly-existing")
+        .fetch_one(&pool)
+        .await
+        .expect("existing key exists");
+        assert_eq!(
+            row.0.as_deref(),
+            Some("old"),
+            "group_name should not be overridden for existing keys"
+        );
+        assert_eq!(row.1.as_deref(), Some("1.1.1.1"));
+        assert_eq!(row.2.as_deref(), Some("US Westfield (MA)"));
 
         let _ = std::fs::remove_file(db_path);
     }

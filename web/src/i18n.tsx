@@ -841,6 +841,7 @@ interface AdminTranslationsShape {
       registration: string
       registrationIp: string
       registrationRegion: string
+      assignedProxy: string
       syncedAt: string
       lastUsed: string
       statusChanged: string
@@ -1920,6 +1921,7 @@ export const translations: Record<Language, TranslationShape> = {
           registration: 'Registration',
           registrationIp: 'Registration IP',
           registrationRegion: 'Region',
+          assignedProxy: 'Assigned Proxy',
           status: 'Status',
           total: 'Total',
         success: 'Success',
@@ -2990,6 +2992,7 @@ export const translations: Record<Language, TranslationShape> = {
           registration: '注册信息',
           registrationIp: '注册 IP',
           registrationRegion: '地区',
+          assignedProxy: '分配代理',
           status: '状态',
           total: '总请求',
           success: '成功',
