@@ -786,10 +786,19 @@ struct RegistrationAffinityContext<'a> {
     registration_region: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignedProxyMatchKind {
+    RegistrationIp,
+    SameRegion,
+    Other,
+}
+
 #[derive(Debug, Clone)]
 pub struct ForwardProxyAssignmentPreview {
     pub key: String,
     pub label: String,
+    pub match_kind: AssignedProxyMatchKind,
 }
 
 fn normalize_ip_string(raw: &str) -> Option<String> {
@@ -2891,14 +2900,20 @@ impl TavilyProxy {
             .collect()
     }
 
-    async fn select_proxy_affinity_for_registration_with_hint(
+    async fn select_proxy_affinity_preview_for_registration_with_hint(
         &self,
         subject: &str,
         geo_origin: &str,
         registration_ip: Option<&str>,
         registration_region: Option<&str>,
         preferred_primary_proxy_key: Option<&str>,
-    ) -> Result<forward_proxy::ForwardProxyAffinityRecord, ProxyError> {
+    ) -> Result<
+        (
+            forward_proxy::ForwardProxyAffinityRecord,
+            Option<ForwardProxyAssignmentPreview>,
+        ),
+        ProxyError,
+    > {
         let (ranked_non_direct, ranked_any) = {
             let mut manager = self.forward_proxy.lock().await;
             manager.ensure_non_zero_weight();
@@ -2952,6 +2967,8 @@ impl TavilyProxy {
                         })
                         .map(|candidate| candidate.endpoint.clone())
                 });
+        let exact_match_key = exact_match.as_ref().map(|candidate| candidate.key.clone());
+        let region_match_key = region_match.as_ref().map(|candidate| candidate.key.clone());
 
         let primary = exact_match
             .or(region_match)
@@ -2959,6 +2976,21 @@ impl TavilyProxy {
             .or_else(|| primary_pool.first().cloned())
             .or_else(|| ranked_any.first().cloned());
         let primary_proxy_key = primary.as_ref().map(|endpoint| endpoint.key.clone());
+        let primary_match_kind = primary.as_ref().map(|endpoint| {
+            if exact_match_key
+                .as_ref()
+                .is_some_and(|candidate_key| candidate_key == &endpoint.key)
+            {
+                AssignedProxyMatchKind::RegistrationIp
+            } else if region_match_key
+                .as_ref()
+                .is_some_and(|candidate_key| candidate_key == &endpoint.key)
+            {
+                AssignedProxyMatchKind::SameRegion
+            } else {
+                AssignedProxyMatchKind::Other
+            }
+        });
 
         let mut secondary_exclude = HashSet::new();
         if let Some(primary_proxy_key) = primary_proxy_key.as_ref() {
@@ -2981,28 +3013,39 @@ impl TavilyProxy {
             .next()
             .map(|endpoint| endpoint.key);
 
-        Ok(forward_proxy::ForwardProxyAffinityRecord {
-            primary_proxy_key,
-            secondary_proxy_key,
-            updated_at: Utc::now().timestamp(),
-        })
+        Ok((
+            forward_proxy::ForwardProxyAffinityRecord {
+                primary_proxy_key,
+                secondary_proxy_key,
+                updated_at: Utc::now().timestamp(),
+            },
+            primary
+                .zip(primary_match_kind)
+                .map(|(endpoint, match_kind)| ForwardProxyAssignmentPreview {
+                    key: endpoint.key,
+                    label: endpoint.display_name,
+                    match_kind,
+                }),
+        ))
     }
 
-    async fn select_proxy_affinity_for_registration(
+    async fn select_proxy_affinity_for_registration_with_hint(
         &self,
         subject: &str,
         geo_origin: &str,
         registration_ip: Option<&str>,
         registration_region: Option<&str>,
+        preferred_primary_proxy_key: Option<&str>,
     ) -> Result<forward_proxy::ForwardProxyAffinityRecord, ProxyError> {
-        self.select_proxy_affinity_for_registration_with_hint(
+        self.select_proxy_affinity_preview_for_registration_with_hint(
             subject,
             geo_origin,
             registration_ip,
             registration_region,
-            None,
+            preferred_primary_proxy_key,
         )
         .await
+        .map(|(record, _preview)| record)
     }
 
     async fn build_proxy_attempt_plan_for_record(
@@ -3059,19 +3102,6 @@ impl TavilyProxy {
             }
         }
         Ok(plan)
-    }
-
-    async fn preview_proxy_assignment_for_record(
-        &self,
-        record: &forward_proxy::ForwardProxyAffinityRecord,
-    ) -> Option<ForwardProxyAssignmentPreview> {
-        let primary_key = record.primary_proxy_key.as_ref()?;
-        let manager = self.forward_proxy.lock().await;
-        let endpoint = manager.endpoint(primary_key)?;
-        Some(ForwardProxyAssignmentPreview {
-            key: endpoint.key.clone(),
-            label: endpoint.display_name.clone(),
-        })
     }
 
     async fn build_proxy_attempt_plan(
@@ -6156,23 +6186,21 @@ impl TavilyProxy {
         registration_region: Option<&str>,
         geo_origin: &str,
     ) -> Result<(i64, i64, Option<ForwardProxyAssignmentPreview>), ProxyError> {
-        let proxy_affinity = if registration_ip.is_some() || registration_region.is_some() {
-            Some(
-                self.select_proxy_affinity_for_registration(
-                    &format!("validate:{api_key}"),
-                    geo_origin,
-                    registration_ip,
-                    registration_region,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        let assigned_proxy = match proxy_affinity.as_ref() {
-            Some(record) => self.preview_proxy_assignment_for_record(record).await,
-            None => None,
-        };
+        let (proxy_affinity, assigned_proxy) =
+            if registration_ip.is_some() || registration_region.is_some() {
+                let (record, preview) = self
+                    .select_proxy_affinity_preview_for_registration_with_hint(
+                        &format!("validate:{api_key}"),
+                        geo_origin,
+                        registration_ip,
+                        registration_region,
+                        None,
+                    )
+                    .await?;
+                (Some(record), preview)
+            } else {
+                (None, None)
+            };
         let (limit, remaining) = self
             .fetch_usage_quota_for_secret(
                 api_key,
@@ -17876,12 +17904,13 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             );
         }
 
-        let exact = proxy
-            .select_proxy_affinity_for_registration(
+        let (exact, exact_preview) = proxy
+            .select_proxy_affinity_preview_for_registration_with_hint(
                 "subject:exact",
                 &geo_origin,
                 Some("18.183.246.69"),
                 Some("JP Tokyo (13)"),
+                None,
             )
             .await
             .expect("exact proxy affinity");
@@ -17890,13 +17919,19 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             Some("http://18.183.246.69:8080"),
             "exact IP match should win before region matching"
         );
+        assert_eq!(
+            exact_preview.as_ref().map(|item| item.match_kind),
+            Some(AssignedProxyMatchKind::RegistrationIp),
+            "exact IP selections should expose registration_ip match kind"
+        );
 
-        let region = proxy
-            .select_proxy_affinity_for_registration(
+        let (region, region_preview) = proxy
+            .select_proxy_affinity_preview_for_registration_with_hint(
                 "subject:region",
                 &geo_origin,
                 Some("103.232.214.107"),
                 Some("HK"),
+                None,
             )
             .await
             .expect("region proxy affinity");
@@ -17905,19 +17940,30 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             Some("http://1.1.1.1:8080"),
             "same-region proxy should win when no exact IP node exists"
         );
+        assert_eq!(
+            region_preview.as_ref().map(|item| item.match_kind),
+            Some(AssignedProxyMatchKind::SameRegion),
+            "same-region selections should expose same_region match kind"
+        );
 
-        let fallback = proxy
-            .select_proxy_affinity_for_registration(
+        let (fallback, fallback_preview) = proxy
+            .select_proxy_affinity_preview_for_registration_with_hint(
                 "subject:fallback",
                 &geo_origin,
                 Some("103.232.214.107"),
                 Some("ZZ"),
+                None,
             )
             .await
             .expect("fallback proxy affinity");
         assert!(
             fallback.primary_proxy_key.is_some(),
             "selection should still fall back to a selectable proxy node"
+        );
+        assert_eq!(
+            fallback_preview.as_ref().map(|item| item.match_kind),
+            Some(AssignedProxyMatchKind::Other),
+            "fallback selections should expose other match kind"
         );
 
         let _ = std::fs::remove_file(db_path);

@@ -1037,6 +1037,7 @@ function AdminDashboard(): JSX.Element {
     registration_region?: string | null
     assigned_proxy_key?: string | null
     assigned_proxy_label?: string | null
+    assigned_proxy_match_kind?: ValidateKeyResult['assigned_proxy_match_kind']
     quota_limit?: number
     quota_remaining?: number
     detail?: string
@@ -3640,6 +3641,8 @@ function AdminDashboard(): JSX.Element {
             registration_region: res?.registration_region ?? row.registration_region,
             assigned_proxy_key: res?.assigned_proxy_key ?? row.assigned_proxy_key,
             assigned_proxy_label: res?.assigned_proxy_label ?? row.assigned_proxy_label,
+            assigned_proxy_match_kind:
+              res?.assigned_proxy_match_kind ?? row.assigned_proxy_match_kind,
           }
         }
         if (!res) return row
@@ -3651,6 +3654,8 @@ function AdminDashboard(): JSX.Element {
           registration_region: res.registration_region ?? row.registration_region,
           assigned_proxy_key: res.assigned_proxy_key ?? row.assigned_proxy_key,
           assigned_proxy_label: res.assigned_proxy_label ?? row.assigned_proxy_label,
+          assigned_proxy_match_kind:
+            res.assigned_proxy_match_kind ?? row.assigned_proxy_match_kind,
           quota_limit: res.quota_limit,
           quota_remaining: res.quota_remaining,
           detail: res.detail,

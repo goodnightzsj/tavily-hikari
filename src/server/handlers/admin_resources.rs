@@ -540,6 +540,8 @@ struct ValidateKeyResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     assigned_proxy_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_proxy_match_kind: Option<tavily_hikari::AssignedProxyMatchKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     quota_limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota_remaining: Option<i64>,
@@ -1030,6 +1032,7 @@ async fn validate_single_key(
         Ok((limit, remaining, assigned_proxy)) => {
             let assigned_proxy_key = assigned_proxy.as_ref().map(|item| item.key.clone());
             let assigned_proxy_label = assigned_proxy.as_ref().map(|item| item.label.clone());
+            let assigned_proxy_match_kind = assigned_proxy.map(|item| item.match_kind);
             if remaining <= 0 {
                 (
                     ValidateKeyResult {
@@ -1039,6 +1042,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key,
                         assigned_proxy_label,
+                        assigned_proxy_match_kind,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -1054,6 +1058,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key,
                         assigned_proxy_label,
+                        assigned_proxy_match_kind,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -1074,6 +1079,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1089,6 +1095,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1104,6 +1111,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1119,6 +1127,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1135,6 +1144,7 @@ async fn validate_single_key(
                 registration_region,
                 assigned_proxy_key: None,
                 assigned_proxy_label: None,
+                assigned_proxy_match_kind: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(
@@ -1152,6 +1162,7 @@ async fn validate_single_key(
                 registration_region,
                 assigned_proxy_key: None,
                 assigned_proxy_label: None,
+                assigned_proxy_match_kind: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(err.to_string(), 1400)),
@@ -1236,6 +1247,7 @@ async fn post_validate_api_keys(
                 registration_region,
                 assigned_proxy_key: None,
                 assigned_proxy_label: None,
+                assigned_proxy_match_kind: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: None,
@@ -1251,6 +1263,7 @@ async fn post_validate_api_keys(
             registration_region: registration_region.clone(),
             assigned_proxy_key: None,
             assigned_proxy_label: None,
+            assigned_proxy_match_kind: None,
             quota_limit: None,
             quota_remaining: None,
             detail: None,

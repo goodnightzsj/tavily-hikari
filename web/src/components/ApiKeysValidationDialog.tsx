@@ -20,7 +20,7 @@ import {
   TableHeader,
   TableRow,
 } from "./ui/table";
-import type { AddApiKeysBatchResponse } from "../api";
+import type { AddApiKeysBatchResponse, ValidateAssignedProxyMatchKind } from "../api";
 
 export type KeyValidationStatus =
   | "pending"
@@ -39,6 +39,7 @@ export type KeyValidationRow = {
   registration_region?: string | null;
   assigned_proxy_key?: string | null;
   assigned_proxy_label?: string | null;
+  assigned_proxy_match_kind?: ValidateAssignedProxyMatchKind | null;
   quota_limit?: number;
   quota_remaining?: number;
   detail?: string;
@@ -183,12 +184,28 @@ function filterKeyForStatus(status: KeyValidationStatus): ValidationFilterKey {
   }
 }
 
+export function assignedProxyMatchToneClass(
+  matchKind?: ValidateAssignedProxyMatchKind | null,
+): string {
+  switch (matchKind) {
+    case "registration_ip":
+      return "text-success";
+    case "same_region":
+      return "text-info";
+    case "other":
+      return "text-warning";
+    default:
+      return "";
+  }
+}
+
 function RegistrationIpIndicator(props: {
   label: string;
   ip: string;
   region?: string | null;
   proxyLabel?: string | null;
   proxyKey?: string | null;
+  proxyMatchKind?: ValidateAssignedProxyMatchKind | null;
   ipLabel: string;
   regionLabel: string;
   proxyLabelText: string;
@@ -199,6 +216,7 @@ function RegistrationIpIndicator(props: {
   const [position, setPosition] = React.useState<BubblePosition | null>(null);
   const region = props.region?.trim() ?? null;
   const proxyValue = props.proxyLabel?.trim() || props.proxyKey?.trim() || null;
+  const proxyValueToneClass = assignedProxyMatchToneClass(props.proxyMatchKind);
   const accessibleLabel = [
     `${props.ipLabel}: ${props.ip}`,
     region ? `${props.regionLabel}: ${region}` : null,
@@ -320,7 +338,11 @@ function RegistrationIpIndicator(props: {
               {proxyValue ? (
                 <span className="key-validation-bubble-line">
                   <span className="key-validation-bubble-label">{props.proxyLabelText}</span>
-                  <span className="key-validation-bubble-value">{proxyValue}</span>
+                  <span
+                    className={`key-validation-bubble-value${proxyValueToneClass ? ` ${proxyValueToneClass}` : ""}`}
+                  >
+                    {proxyValue}
+                  </span>
                 </span>
               ) : null}
             </span>,
@@ -612,6 +634,7 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                     const registrationRegion = row.registration_region?.trim() ?? null;
                     const assignedProxyKey = row.assigned_proxy_key?.trim() ?? null;
                     const assignedProxyLabelValue = row.assigned_proxy_label?.trim() ?? null;
+                    const assignedProxyMatchKind = row.assigned_proxy_match_kind ?? null;
                     return (
                       <div key={`${row.api_key}-${index}`} className="p-3">
                         <div className="flex items-start justify-between gap-3">
@@ -645,6 +668,7 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                               region={registrationRegion}
                               proxyKey={assignedProxyKey}
                               proxyLabel={assignedProxyLabelValue}
+                              proxyMatchKind={assignedProxyMatchKind}
                               ipLabel={registrationIpLabel}
                               regionLabel={registrationRegionLabel}
                               proxyLabelText={assignedProxyLabel}
@@ -709,6 +733,7 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                         const registrationRegion = row.registration_region?.trim() ?? null;
                         const assignedProxyKey = row.assigned_proxy_key?.trim() ?? null;
                         const assignedProxyLabelValue = row.assigned_proxy_label?.trim() ?? null;
+                        const assignedProxyMatchKind = row.assigned_proxy_match_kind ?? null;
                         return (
                           <TableRow key={`${row.api_key}-${index}`}>
                             <TableCell className="max-w-0">
@@ -733,6 +758,7 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                                         region={registrationRegion}
                                         proxyKey={assignedProxyKey}
                                         proxyLabel={assignedProxyLabelValue}
+                                        proxyMatchKind={assignedProxyMatchKind}
                                         ipLabel={registrationIpLabel}
                                         regionLabel={registrationRegionLabel}
                                         proxyLabelText={assignedProxyLabel}
@@ -761,6 +787,7 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
                                       region={registrationRegion}
                                       proxyKey={assignedProxyKey}
                                       proxyLabel={assignedProxyLabelValue}
+                                      proxyMatchKind={assignedProxyMatchKind}
                                       ipLabel={registrationIpLabel}
                                       regionLabel={registrationRegionLabel}
                                       proxyLabelText={assignedProxyLabel}
