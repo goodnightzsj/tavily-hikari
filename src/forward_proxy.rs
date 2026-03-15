@@ -312,6 +312,31 @@ impl ForwardProxyEndpoint {
     }
 }
 
+pub fn endpoint_host(endpoint: &ForwardProxyEndpoint) -> Option<String> {
+    if let Some(url) = endpoint.endpoint_url.as_ref() {
+        return url.host_str().map(ToOwned::to_owned);
+    }
+    let raw = endpoint.raw_url.as_deref()?;
+    if !raw.contains("://") {
+        return Url::parse(&format!("http://{raw}"))
+            .ok()
+            .and_then(|url| url.host_str().map(ToOwned::to_owned));
+    }
+    let (scheme_raw, _) = raw.split_once("://")?;
+    match scheme_raw.to_ascii_lowercase().as_str() {
+        "http" | "https" | "socks5" | "socks5h" | "socks" | "vless" | "trojan" => Url::parse(raw)
+            .ok()
+            .and_then(|url| url.host_str().map(ToOwned::to_owned)),
+        "vmess" => parse_vmess_share_link(raw)
+            .ok()
+            .map(|parsed| parsed.address),
+        "ss" => parse_shadowsocks_share_link(raw)
+            .ok()
+            .map(|parsed| parsed.host),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ForwardProxyRuntimeState {
     pub proxy_key: String,

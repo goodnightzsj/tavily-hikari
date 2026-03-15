@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 
 import {
@@ -222,6 +222,101 @@ export const PostImportWithRemainingRows: Story = {
       },
     },
   },
+  parameters: {
+    viewport: { defaultViewport: "1440-device-desktop" },
+  },
+};
+
+function RegistrationIpPreviewCanvas(): JSX.Element {
+  const timeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    timeoutRef.current = window.setTimeout(() => {
+      const trigger = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-registration-ip-trigger='true']"),
+      ).find((candidate) => candidate.getClientRects().length > 0);
+      if (!trigger) return;
+      trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+      trigger.focus();
+    }, 180);
+    return () => {
+      if (timeoutRef.current != null) window.clearTimeout(timeoutRef.current);
+    };
+  }, []);
+
+  return (
+    <ModalHarness
+      initial={{
+        group: "default",
+        input_lines: 7,
+        valid_lines: 7,
+        unique_in_input: 5,
+        duplicate_in_input: 2,
+        checking: false,
+        importing: false,
+        rows: [
+          {
+            api_key: "tvly-OK-NEW",
+            status: "ok",
+            registration_ip: "8.8.8.8",
+            registration_region: "US",
+            assigned_proxy_key: "__direct__",
+            assigned_proxy_label: "Direct",
+            quota_limit: 1000,
+            quota_remaining: 123,
+            attempts: 1,
+          },
+          {
+            api_key: "tvly-OK-EXHAUSTED",
+            status: "ok_exhausted",
+            registration_ip: "2606:4700:4700::1111",
+            registration_region: null,
+            quota_limit: 1000,
+            quota_remaining: 0,
+            attempts: 1,
+          },
+          {
+            api_key: "tvly-UNAUTHORIZED",
+            status: "unauthorized",
+            detail: "Tavily usage request failed with 401 Unauthorized. This usually means the key is invalid or revoked.",
+            attempts: 1,
+          },
+          {
+            api_key: "tvly-ERROR",
+            status: "error",
+            detail: "Upstream returned 502 Bad Gateway.",
+            attempts: 1,
+          },
+          {
+            api_key: "tvly-OK-NEW",
+            status: "duplicate_in_input",
+            registration_ip: "8.8.8.8",
+            registration_region: "US",
+            assigned_proxy_key: "__direct__",
+            assigned_proxy_label: "Direct",
+            attempts: 0,
+          },
+        ],
+      }}
+    />
+  );
+}
+
+export const RegistrationIpPreview: Story = {
+  args: {
+    initial: {
+      group: "default",
+      input_lines: 0,
+      valid_lines: 0,
+      unique_in_input: 0,
+      duplicate_in_input: 0,
+      checking: false,
+      importing: false,
+      rows: [],
+    },
+  },
+  render: () => <RegistrationIpPreviewCanvas />,
   parameters: {
     viewport: { defaultViewport: "1440-device-desktop" },
   },

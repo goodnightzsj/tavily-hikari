@@ -73,6 +73,8 @@ async fn list_keys(
             query.per_page.unwrap_or(20),
             &query.group,
             &query.status,
+            query.registration_ip.as_deref(),
+            &query.region,
         )
         .await
         .map(|result| {
@@ -104,6 +106,15 @@ async fn list_keys(
                             count: facet.count,
                         })
                         .collect(),
+                    regions: result
+                        .facets
+                        .regions
+                        .into_iter()
+                        .map(|facet| ApiKeyFacetCountView {
+                            value: facet.value,
+                            count: facet.count,
+                        })
+                        .collect(),
                 },
             })
         })
@@ -119,6 +130,8 @@ struct ListKeysQuery {
     per_page: Option<i64>,
     group: Vec<String>,
     status: Vec<String>,
+    registration_ip: Option<String>,
+    region: Vec<String>,
 }
 
 impl ListKeysQuery {
@@ -142,6 +155,13 @@ impl ListKeysQuery {
                 }
                 "group" => query.group.push(value.into_owned()),
                 "status" => query.status.push(value.into_owned()),
+                "registration_ip" => {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        query.registration_ip = Some(value.to_string());
+                    }
+                }
+                "region" => query.region.push(value.into_owned()),
                 _ => {}
             }
         }
@@ -162,6 +182,7 @@ struct ApiKeyFacetCountView {
 struct ApiKeyFacetsView {
     groups: Vec<ApiKeyFacetCountView>,
     statuses: Vec<ApiKeyFacetCountView>,
+    regions: Vec<ApiKeyFacetCountView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,6 +199,8 @@ struct PaginatedApiKeysView {
 struct CreateKeyRequest {
     api_key: String,
     group: Option<String>,
+    registration_ip: Option<String>,
+    assigned_proxy_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,9 +212,255 @@ const API_KEYS_BATCH_LIMIT: usize = 1000;
 
 #[derive(Debug, Deserialize)]
 struct BatchCreateKeysRequest {
-    api_keys: Vec<String>,
+    api_keys: Option<Vec<String>>,
+    items: Option<Vec<BatchCreateKeyItem>>,
     group: Option<String>,
     exhausted_api_keys: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchCreateKeyItem {
+    api_key: String,
+    registration_ip: Option<String>,
+    assigned_proxy_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedBatchCreateKeyItem {
+    api_key: String,
+    registration_ip: Option<String>,
+    assigned_proxy_key: Option<String>,
+}
+
+impl BatchCreateKeysRequest {
+    fn into_items(self) -> Vec<BatchCreateKeyItem> {
+        if let Some(items) = self.items {
+            return items;
+        }
+
+        self.api_keys
+            .unwrap_or_default()
+            .into_iter()
+            .map(|api_key| BatchCreateKeyItem {
+                api_key,
+                registration_ip: None,
+                assigned_proxy_key: None,
+            })
+            .collect()
+    }
+}
+
+const API_KEY_IP_GEO_BATCH_FIELDS: &str = "?fields=city,subdivision,asn";
+const API_KEY_IP_GEO_BATCH_SIZE: usize = 100;
+const API_KEY_IP_GEO_HTTP_TIMEOUT_SECS: u64 = 10;
+const API_KEY_IP_GEO_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+#[derive(Debug, Deserialize)]
+struct CountryIsBatchEntry {
+    ip: String,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    city: Option<String>,
+    #[serde(default)]
+    subdivision: Option<String>,
+}
+
+fn normalize_ip_string(raw: &str) -> Option<String> {
+    raw.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+fn normalize_global_registration_ip(raw: &str) -> Option<String> {
+    let normalized = normalize_ip_string(raw)?;
+    if is_global_geo_ip(&normalized) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn is_global_geo_ip(raw: &str) -> bool {
+    match raw.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => is_public_ipv4(ip),
+        Ok(IpAddr::V6(ip)) => is_public_ipv6(ip),
+        Err(_) => false,
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    if ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+    {
+        return false;
+    }
+
+    let [a, b, c, _d] = ip.octets();
+    if a == 0 {
+        return false;
+    }
+    if a == 100 && (64..=127).contains(&b) {
+        return false;
+    }
+    if a == 192 && b == 0 && c == 0 {
+        return false;
+    }
+    if a == 198 && (b == 18 || b == 19) {
+        return false;
+    }
+    if a >= 240 {
+        return false;
+    }
+
+    true
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4() {
+        return is_public_ipv4(v4);
+    }
+
+    let segments = ip.segments();
+    let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !ip.is_unique_local()
+        && !ip.is_unicast_link_local()
+        && !is_documentation
+}
+
+fn trim_or_empty(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn looks_like_subdivision_code(raw: &str) -> bool {
+    let raw = raw.trim();
+    let len = raw.len();
+    if !(2..=3).contains(&len) {
+        return false;
+    }
+    raw.chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+fn format_registration_region(country: &str, subdivision: &str, city: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if !country.is_empty() {
+        parts.push(country.to_string());
+    }
+    if !subdivision.is_empty() {
+        if looks_like_subdivision_code(subdivision) && !city.is_empty() {
+            parts.push(format!("{city} ({subdivision})"));
+        } else {
+            parts.push(subdivision.to_string());
+        }
+    } else if parts.is_empty() && !city.is_empty() {
+        parts.push(city.to_string());
+    }
+    let result = parts.join(" ").trim().to_string();
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn build_registration_geo_batch_url(origin: &str) -> String {
+    let origin = origin.trim().trim_end_matches('/');
+    if origin.contains('?') {
+        format!("{origin}&{}", API_KEY_IP_GEO_BATCH_FIELDS.trim_start_matches('?'))
+    } else {
+        format!("{origin}{API_KEY_IP_GEO_BATCH_FIELDS}")
+    }
+}
+
+async fn resolve_registration_regions(
+    origin: &str,
+    ips: &[String],
+) -> HashMap<String, String> {
+    let pending = ips
+        .iter()
+        .filter_map(|ip| normalize_global_registration_ip(ip))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return HashMap::new();
+    }
+
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(API_KEY_IP_GEO_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(API_KEY_IP_GEO_HTTP_TIMEOUT_SECS))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("build api key geo resolver client error: {err}");
+            return HashMap::new();
+        }
+    };
+    let batch_url = build_registration_geo_batch_url(origin);
+    let mut resolved = HashMap::new();
+
+    'batch_lookup: for batch in pending.chunks(API_KEY_IP_GEO_BATCH_SIZE) {
+        let mut attempt = 0usize;
+        let response = loop {
+            match client.post(&batch_url).json(batch).send().await {
+                Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt == 0 => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                Ok(response) => break response,
+                Err(err) if attempt == 0 => {
+                    attempt += 1;
+                    eprintln!("api key geo lookup request error, retrying once: {err}");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(err) => {
+                    eprintln!("api key geo lookup request error: {err}");
+                    continue 'batch_lookup;
+                }
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            eprintln!("api key geo lookup returned status: {status}");
+            continue;
+        }
+
+        let entries = match response.json::<Vec<CountryIsBatchEntry>>().await {
+            Ok(entries) => entries,
+            Err(err) => {
+                eprintln!("api key geo lookup decode error: {err}");
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let Some(ip) = normalize_ip_string(&entry.ip) else {
+                continue;
+            };
+            let region = format_registration_region(
+                trim_or_empty(entry.country).as_str(),
+                trim_or_empty(entry.subdivision).as_str(),
+                trim_or_empty(entry.city).as_str(),
+            );
+            if let Some(region) = region {
+                resolved.insert(ip, region);
+            }
+        }
+    }
+
+    resolved
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -227,7 +496,23 @@ struct BatchCreateKeysResponse {
 
 #[derive(Debug, Deserialize)]
 struct ValidateKeysRequest {
+    #[serde(default)]
     api_keys: Vec<String>,
+    #[serde(default)]
+    items: Vec<ValidateKeyItemInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidateKeyItemInput {
+    api_key: String,
+    #[serde(default)]
+    registration_ip: Option<String>,
+}
+
+#[derive(Debug)]
+struct NormalizedValidateKeyItem {
+    api_key: String,
+    registration_ip: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -246,6 +531,14 @@ struct ValidateKeysSummary {
 struct ValidateKeyResult {
     api_key: String,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_proxy_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_proxy_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota_limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -719,15 +1012,33 @@ fn truncate_detail(mut input: String, max_len: usize) -> String {
 async fn validate_single_key(
     proxy: TavilyProxy,
     usage_base: String,
+    geo_origin: String,
     api_key: String,
+    registration_ip: Option<String>,
+    registration_region: Option<String>,
 ) -> (ValidateKeyResult, &'static str) {
-    match proxy.probe_api_key_quota(&api_key, &usage_base).await {
-        Ok((limit, remaining)) => {
+    match proxy
+        .probe_api_key_quota_with_registration(
+            &api_key,
+            &usage_base,
+            registration_ip.as_deref(),
+            registration_region.as_deref(),
+            &geo_origin,
+        )
+        .await
+    {
+        Ok((limit, remaining, assigned_proxy)) => {
+            let assigned_proxy_key = assigned_proxy.as_ref().map(|item| item.key.clone());
+            let assigned_proxy_label = assigned_proxy.as_ref().map(|item| item.label.clone());
             if remaining <= 0 {
                 (
                     ValidateKeyResult {
                         api_key,
                         status: "ok_exhausted".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key,
+                        assigned_proxy_label,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -739,6 +1050,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "ok".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key,
+                        assigned_proxy_label,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -755,6 +1070,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "unauthorized".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -766,6 +1085,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "forbidden".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -777,6 +1100,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "invalid".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -788,6 +1115,10 @@ async fn validate_single_key(
                     ValidateKeyResult {
                         api_key,
                         status: "error".to_string(),
+                        registration_ip,
+                        registration_region,
+                        assigned_proxy_key: None,
+                        assigned_proxy_label: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -800,6 +1131,10 @@ async fn validate_single_key(
             ValidateKeyResult {
                 api_key,
                 status: "invalid".to_string(),
+                registration_ip,
+                registration_region,
+                assigned_proxy_key: None,
+                assigned_proxy_label: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(
@@ -813,6 +1148,10 @@ async fn validate_single_key(
             ValidateKeyResult {
                 api_key,
                 status: "error".to_string(),
+                registration_ip,
+                registration_region,
+                assigned_proxy_key: None,
+                assigned_proxy_label: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(err.to_string(), 1400)),
@@ -831,20 +1170,42 @@ async fn post_validate_api_keys(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let ValidateKeysRequest { api_keys } = payload;
+    let ValidateKeysRequest { api_keys, items } = payload;
+    let raw_items = if items.is_empty() {
+        api_keys
+            .into_iter()
+            .map(|api_key| ValidateKeyItemInput {
+                api_key,
+                registration_ip: None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        items
+    };
 
     let mut summary = ValidateKeysSummary {
-        input_lines: api_keys.len() as u64,
+        input_lines: raw_items.len() as u64,
         ..Default::default()
     };
 
-    let mut trimmed = Vec::<String>::with_capacity(api_keys.len());
-    for api_key in api_keys {
-        let api_key = api_key.trim();
+    let mut trimmed = Vec::<NormalizedValidateKeyItem>::with_capacity(raw_items.len());
+    let mut geo_lookup_ips = Vec::<String>::new();
+    for item in raw_items {
+        let api_key = item.api_key.trim();
         if api_key.is_empty() {
             continue;
         }
-        trimmed.push(api_key.to_string());
+        let registration_ip = item
+            .registration_ip
+            .as_deref()
+            .and_then(normalize_global_registration_ip);
+        if let Some(ip) = registration_ip.as_ref() {
+            geo_lookup_ips.push(ip.clone());
+        }
+        trimmed.push(NormalizedValidateKeyItem {
+            api_key: api_key.to_string(),
+            registration_ip,
+        });
     }
     summary.valid_lines = trimmed.len() as u64;
 
@@ -856,16 +1217,25 @@ async fn post_validate_api_keys(
         return Ok((StatusCode::BAD_REQUEST, body).into_response());
     }
 
+    let region_by_ip = resolve_registration_regions(&state.api_key_ip_geo_origin, &geo_lookup_ips).await;
     let mut results = Vec::<ValidateKeyResult>::with_capacity(trimmed.len());
-    let mut pending = Vec::<(usize, String)>::new();
+    let mut pending = Vec::<(usize, String, Option<String>, Option<String>)>::new();
     let mut seen = HashSet::<String>::new();
 
-    for api_key in trimmed {
-        if !seen.insert(api_key.clone()) {
+    for item in trimmed {
+        let registration_region = item
+            .registration_ip
+            .as_ref()
+            .and_then(|ip| region_by_ip.get(ip).cloned());
+        if !seen.insert(item.api_key.clone()) {
             summary.duplicate_in_input += 1;
             results.push(ValidateKeyResult {
-                api_key,
+                api_key: item.api_key,
                 status: "duplicate_in_input".to_string(),
+                registration_ip: item.registration_ip,
+                registration_region,
+                assigned_proxy_key: None,
+                assigned_proxy_label: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: None,
@@ -875,25 +1245,39 @@ async fn post_validate_api_keys(
 
         let pos = results.len();
         results.push(ValidateKeyResult {
-            api_key: api_key.clone(),
+            api_key: item.api_key.clone(),
             status: "pending".to_string(),
+            registration_ip: item.registration_ip.clone(),
+            registration_region: registration_region.clone(),
+            assigned_proxy_key: None,
+            assigned_proxy_label: None,
             quota_limit: None,
             quota_remaining: None,
             detail: None,
         });
-        pending.push((pos, api_key));
+        pending.push((pos, item.api_key, item.registration_ip, registration_region));
     }
 
     summary.unique_in_input = seen.len() as u64;
 
     let proxy = state.proxy.clone();
     let usage_base = state.usage_base.clone();
+    let geo_origin = state.api_key_ip_geo_origin.clone();
     let checked = futures_stream::iter(pending.into_iter())
-        .map(|(pos, api_key)| {
+        .map(|(pos, api_key, registration_ip, registration_region)| {
             let proxy = proxy.clone();
             let usage_base = usage_base.clone();
+            let geo_origin = geo_origin.clone();
             async move {
-                let (result, kind) = validate_single_key(proxy, usage_base, api_key).await;
+                let (result, kind) = validate_single_key(
+                    proxy,
+                    usage_base,
+                    geo_origin,
+                    api_key,
+                    registration_ip,
+                    registration_region,
+                )
+                .await;
                 (pos, result, kind)
             }
         })
@@ -932,6 +1316,8 @@ async fn create_api_key(
     let CreateKeyRequest {
         api_key,
         group: group_raw,
+        registration_ip: registration_ip_raw,
+        assigned_proxy_key,
     } = payload;
     let api_key = api_key.trim();
     if api_key.is_empty() {
@@ -942,13 +1328,30 @@ async fn create_api_key(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let registration_ip = registration_ip_raw
+        .as_deref()
+        .and_then(normalize_global_registration_ip);
+    let registration_region = if let Some(registration_ip) = registration_ip.as_ref() {
+        resolve_registration_regions(&state.api_key_ip_geo_origin, std::slice::from_ref(registration_ip))
+            .await
+            .remove(registration_ip)
+    } else {
+        None
+    };
 
     match state
         .proxy
-        .add_or_undelete_key_in_group(api_key, group)
+        .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity_hint(
+            api_key,
+            group,
+            registration_ip.as_deref(),
+            registration_region.as_deref(),
+            &state.api_key_ip_geo_origin,
+            assigned_proxy_key.as_deref(),
+        )
         .await
     {
-        Ok(id) => Ok((StatusCode::CREATED, Json(CreateKeyResponse { id }))),
+        Ok((id, _)) => Ok((StatusCode::CREATED, Json(CreateKeyResponse { id }))),
         Err(err) => {
             eprintln!("create api key error: {err}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -967,9 +1370,17 @@ async fn create_api_keys_batch(
 
     let BatchCreateKeysRequest {
         api_keys,
+        items,
         group: group_raw,
         exhausted_api_keys,
     } = payload;
+    let raw_items = BatchCreateKeysRequest {
+        api_keys,
+        items,
+        group: None,
+        exhausted_api_keys: None,
+    }
+    .into_items();
     let group = group_raw
         .as_deref()
         .map(str::trim)
@@ -983,18 +1394,36 @@ async fn create_api_keys_batch(
         .collect();
 
     let mut summary = BatchCreateKeysSummary {
-        input_lines: api_keys.len() as u64,
+        input_lines: raw_items.len() as u64,
         ..Default::default()
     };
 
-    let mut trimmed = Vec::<String>::with_capacity(api_keys.len());
-    for api_key in api_keys {
-        let api_key = api_key.trim();
+    let mut trimmed = Vec::<NormalizedBatchCreateKeyItem>::with_capacity(raw_items.len());
+    let mut geo_lookup_ips = Vec::<String>::new();
+    for item in raw_items {
+        let api_key = item.api_key.trim();
         if api_key.is_empty() {
             summary.ignored_empty += 1;
             continue;
         }
-        trimmed.push(api_key.to_string());
+        let registration_ip = item
+            .registration_ip
+            .as_deref()
+            .and_then(normalize_global_registration_ip);
+        if let Some(ip) = registration_ip.as_ref() {
+            geo_lookup_ips.push(ip.clone());
+        }
+        let assigned_proxy_key = item
+            .assigned_proxy_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        trimmed.push(NormalizedBatchCreateKeyItem {
+            api_key: api_key.to_string(),
+            registration_ip,
+            assigned_proxy_key,
+        });
     }
     summary.valid_lines = trimmed.len() as u64;
 
@@ -1008,12 +1437,13 @@ async fn create_api_keys_batch(
 
     let mut results = Vec::with_capacity(trimmed.len());
     let mut seen = HashSet::<String>::new();
+    let region_by_ip = resolve_registration_regions(&state.api_key_ip_geo_origin, &geo_lookup_ips).await;
 
-    for api_key in trimmed {
-        if !seen.insert(api_key.clone()) {
+    for item in trimmed {
+        if !seen.insert(item.api_key.clone()) {
             summary.duplicate_in_input += 1;
             results.push(BatchCreateKeysResult {
-                api_key,
+                api_key: item.api_key,
                 status: "duplicate_in_input".to_string(),
                 id: None,
                 error: None,
@@ -1022,9 +1452,21 @@ async fn create_api_keys_batch(
             continue;
         }
 
+        let registration_region = item
+            .registration_ip
+            .as_ref()
+            .and_then(|ip| region_by_ip.get(ip).cloned());
+
         match state
             .proxy
-            .add_or_undelete_key_with_status_in_group(&api_key, group)
+            .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity_hint(
+                &item.api_key,
+                group,
+                item.registration_ip.as_deref(),
+                registration_region.as_deref(),
+                &state.api_key_ip_geo_origin,
+                item.assigned_proxy_key.as_deref(),
+            )
             .await
         {
             Ok((id, status)) => {
@@ -1035,10 +1477,10 @@ async fn create_api_keys_batch(
                     _ => {}
                 }
                 let mut marked_exhausted = None;
-                if exhausted_set.contains(&api_key) {
+                if exhausted_set.contains(&item.api_key) {
                     marked_exhausted = match state
                         .proxy
-                        .mark_key_quota_exhausted_by_secret(&api_key)
+                        .mark_key_quota_exhausted_by_secret(&item.api_key)
                         .await
                     {
                         Ok(changed) => Some(changed),
@@ -1049,7 +1491,7 @@ async fn create_api_keys_batch(
                     };
                 }
                 results.push(BatchCreateKeysResult {
-                    api_key,
+                    api_key: item.api_key,
                     status: status.as_str().to_string(),
                     id: Some(id),
                     error: None,
@@ -1059,7 +1501,7 @@ async fn create_api_keys_batch(
             Err(err) => {
                 summary.failed += 1;
                 results.push(BatchCreateKeysResult {
-                    api_key,
+                    api_key: item.api_key,
                     status: "failed".to_string(),
                     id: None,
                     error: Some(err.to_string()),

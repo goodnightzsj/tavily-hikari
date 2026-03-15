@@ -4,6 +4,7 @@ use std::{
     cmp::min,
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
@@ -254,6 +255,10 @@ const OUTCOME_SUCCESS: &str = "success";
 const OUTCOME_ERROR: &str = "error";
 const OUTCOME_QUOTA_EXHAUSTED: &str = "quota_exhausted";
 const OUTCOME_UNKNOWN: &str = "unknown";
+const API_KEY_IP_GEO_BATCH_FIELDS: &str = "?fields=city,subdivision,asn";
+const API_KEY_IP_GEO_BATCH_SIZE: usize = 100;
+const API_KEY_IP_GEO_HTTP_TIMEOUT_SECS: u64 = 10;
+const API_KEY_IP_GEO_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 // dev-open-admin mode uses a synthetic token id ("dev") for request attribution.
 // Keep a placeholder row in auth_tokens so SQLite FOREIGN KEY constraints in
@@ -745,6 +750,239 @@ fn account_quota_limits_from_row(
     }
 }
 
+fn normalize_optional_api_key_field(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CountryIsBatchEntry {
+    ip: String,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    city: Option<String>,
+    #[serde(default)]
+    subdivision: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ForwardProxyGeoCandidate {
+    endpoint: forward_proxy::ForwardProxyEndpoint,
+    host_ips: Vec<String>,
+    regions: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+struct RegistrationAffinityContext<'a> {
+    geo_origin: &'a str,
+    registration_ip: Option<&'a str>,
+    registration_region: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForwardProxyAssignmentPreview {
+    pub key: String,
+    pub label: String,
+}
+
+fn normalize_ip_string(raw: &str) -> Option<String> {
+    raw.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    if ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+    {
+        return false;
+    }
+
+    let [a, b, c, _d] = ip.octets();
+    if a == 0 {
+        return false;
+    }
+    if a == 100 && (64..=127).contains(&b) {
+        return false;
+    }
+    if a == 192 && b == 0 && c == 0 {
+        return false;
+    }
+    if a == 198 && (b == 18 || b == 19) {
+        return false;
+    }
+    if a >= 240 {
+        return false;
+    }
+
+    true
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4() {
+        return is_public_ipv4(v4);
+    }
+
+    let segments = ip.segments();
+    let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !ip.is_unique_local()
+        && !ip.is_unicast_link_local()
+        && !is_documentation
+}
+
+fn is_global_geo_ip(raw: &str) -> bool {
+    match raw.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => is_public_ipv4(ip),
+        Ok(IpAddr::V6(ip)) => is_public_ipv6(ip),
+        Err(_) => false,
+    }
+}
+
+fn build_registration_geo_batch_url(origin: &str) -> String {
+    let origin = origin.trim().trim_end_matches('/');
+    if origin.contains('?') {
+        format!(
+            "{origin}&{}",
+            API_KEY_IP_GEO_BATCH_FIELDS.trim_start_matches('?')
+        )
+    } else {
+        format!("{origin}{API_KEY_IP_GEO_BATCH_FIELDS}")
+    }
+}
+
+fn trim_or_empty(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn looks_like_subdivision_code(raw: &str) -> bool {
+    let raw = raw.trim();
+    let len = raw.len();
+    if !(2..=3).contains(&len) {
+        return false;
+    }
+    raw.chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+fn format_registration_region(country: &str, subdivision: &str, city: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if !country.is_empty() {
+        parts.push(country.to_string());
+    }
+    if !subdivision.is_empty() {
+        if looks_like_subdivision_code(subdivision) && !city.is_empty() {
+            parts.push(format!("{city} ({subdivision})"));
+        } else {
+            parts.push(subdivision.to_string());
+        }
+    } else if parts.is_empty() && !city.is_empty() {
+        parts.push(city.to_string());
+    }
+    let result = parts.join(" ").trim().to_string();
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+async fn resolve_registration_regions(origin: &str, ips: &[String]) -> HashMap<String, String> {
+    let pending = ips
+        .iter()
+        .filter_map(|ip| normalize_ip_string(ip))
+        .filter(|ip| is_global_geo_ip(ip))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return HashMap::new();
+    }
+
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(API_KEY_IP_GEO_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(API_KEY_IP_GEO_HTTP_TIMEOUT_SECS))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("build api key geo resolver client error: {err}");
+            return HashMap::new();
+        }
+    };
+    let batch_url = build_registration_geo_batch_url(origin);
+    let mut resolved = HashMap::new();
+
+    'batch_lookup: for batch in pending.chunks(API_KEY_IP_GEO_BATCH_SIZE) {
+        let mut attempt = 0usize;
+        let response = loop {
+            match client.post(&batch_url).json(batch).send().await {
+                Ok(response)
+                    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        && attempt == 0 =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                Ok(response) => break response,
+                Err(err) if attempt == 0 => {
+                    attempt += 1;
+                    eprintln!("api key geo lookup request error, retrying once: {err}");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(err) => {
+                    eprintln!("api key geo lookup request error: {err}");
+                    continue 'batch_lookup;
+                }
+            }
+        };
+
+        if !response.status().is_success() {
+            eprintln!("api key geo lookup returned status: {}", response.status());
+            continue;
+        }
+
+        let entries = match response.json::<Vec<CountryIsBatchEntry>>().await {
+            Ok(entries) => entries,
+            Err(err) => {
+                eprintln!("api key geo lookup decode error: {err}");
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let Some(ip) = normalize_ip_string(&entry.ip) else {
+                continue;
+            };
+            let region = format_registration_region(
+                trim_or_empty(entry.country).as_str(),
+                trim_or_empty(entry.subdivision).as_str(),
+                trim_or_empty(entry.city).as_str(),
+            );
+            if let Some(region) = region {
+                resolved.insert(ip, region);
+            }
+        }
+    }
+
+    resolved
+}
+
 fn default_account_quota_limits_for_created_at(
     user_created_at: i64,
     zero_base_cutover_at: i64,
@@ -1049,6 +1287,7 @@ pub struct TavilyProxy {
     upstream: Url,
     key_store: Arc<KeyStore>,
     upstream_origin: String,
+    api_key_geo_origin: String,
     token_quota: TokenQuota,
     token_request_limit: TokenRequestLimit,
     affinity: Arc<Mutex<TokenAffinityState>>,
@@ -1333,6 +1572,11 @@ impl TavilyProxy {
             upstream,
             key_store,
             upstream_origin,
+            api_key_geo_origin: std::env::var("API_KEY_IP_GEO_ORIGIN")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "https://api.country.is".to_string()),
             token_quota,
             token_request_limit,
             affinity: Arc::new(Mutex::new(TokenAffinityState::new(TOKEN_AFFINITY_TTL_SECS))),
@@ -2343,38 +2587,141 @@ impl TavilyProxy {
         Ok(())
     }
 
+    async fn load_api_key_registration_metadata(
+        &self,
+        api_key_id: &str,
+    ) -> Result<(Option<String>, Option<String>), ProxyError> {
+        let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT registration_ip, registration_region FROM api_keys WHERE id = ? LIMIT 1",
+        )
+        .bind(api_key_id)
+        .fetch_optional(&self.key_store.pool)
+        .await?;
+        Ok(row.unwrap_or((None, None)))
+    }
+
+    async fn rank_registration_aware_candidates(
+        &self,
+        subject: &str,
+        affinity: RegistrationAffinityContext<'_>,
+        exclude: &HashSet<String>,
+        allow_direct: bool,
+        limit: usize,
+    ) -> Vec<forward_proxy::ForwardProxyEndpoint> {
+        let ranked = {
+            let mut manager = self.forward_proxy.lock().await;
+            manager.ensure_non_zero_weight();
+            manager.rank_candidates_for_subject(subject, exclude, allow_direct, limit)
+        };
+        let normalized_registration_ip = affinity.registration_ip.and_then(normalize_ip_string);
+        let normalized_registration_region = affinity
+            .registration_region
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if normalized_registration_ip.is_none() && normalized_registration_region.is_none() {
+            return ranked;
+        }
+
+        let mut direct = Vec::new();
+        let mut non_direct = Vec::new();
+        for endpoint in ranked {
+            if endpoint.is_direct() {
+                direct.push(endpoint);
+            } else {
+                non_direct.push(endpoint);
+            }
+        }
+        if non_direct.is_empty() {
+            return direct;
+        }
+
+        let geo_candidates = self
+            .resolve_forward_proxy_geo_candidates(affinity.geo_origin, non_direct.clone())
+            .await;
+        let mut exact_keys = HashSet::new();
+        let mut region_keys = HashSet::new();
+        for candidate in geo_candidates {
+            if normalized_registration_ip
+                .as_ref()
+                .is_some_and(|registration_ip| {
+                    candidate.host_ips.iter().any(|ip| ip == registration_ip)
+                })
+            {
+                exact_keys.insert(candidate.endpoint.key.clone());
+            }
+            if normalized_registration_region
+                .as_ref()
+                .is_some_and(|registration_region| {
+                    candidate
+                        .regions
+                        .iter()
+                        .any(|region| region == registration_region)
+                })
+            {
+                region_keys.insert(candidate.endpoint.key.clone());
+            }
+        }
+
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+        for endpoint in &non_direct {
+            if exact_keys.contains(&endpoint.key) && seen.insert(endpoint.key.clone()) {
+                ordered.push(endpoint.clone());
+            }
+        }
+        for endpoint in &non_direct {
+            if region_keys.contains(&endpoint.key) && seen.insert(endpoint.key.clone()) {
+                ordered.push(endpoint.clone());
+            }
+        }
+        for endpoint in non_direct {
+            if seen.insert(endpoint.key.clone()) {
+                ordered.push(endpoint);
+            }
+        }
+        if allow_direct {
+            ordered.extend(direct);
+        }
+        ordered
+    }
+
     async fn reconcile_proxy_affinity_record(
         &self,
         api_key_id: &str,
     ) -> Result<forward_proxy::ForwardProxyAffinityRecord, ProxyError> {
         let mut record = self.load_proxy_affinity_record(api_key_id).await?;
+        let (registration_ip, registration_region) =
+            self.load_api_key_registration_metadata(api_key_id).await?;
         let now = Utc::now().timestamp();
-        let mut manager = self.forward_proxy.lock().await;
-        manager.ensure_non_zero_weight();
+        {
+            let mut manager = self.forward_proxy.lock().await;
+            manager.ensure_non_zero_weight();
 
-        let is_valid = |proxy_key: &str,
-                        manager: &forward_proxy::ForwardProxyManager,
-                        allow_direct_primary: bool| {
-            let Some(endpoint) = manager.endpoint(proxy_key) else {
-                return false;
+            let is_valid = |proxy_key: &str,
+                            manager: &forward_proxy::ForwardProxyManager,
+                            allow_direct_primary: bool| {
+                let Some(endpoint) = manager.endpoint(proxy_key) else {
+                    return false;
+                };
+                if endpoint.is_direct() && !allow_direct_primary {
+                    return false;
+                }
+                manager.runtime(proxy_key).is_some_and(|runtime| {
+                    runtime.available && runtime.weight > 0.0 && endpoint.is_selectable()
+                })
             };
-            if endpoint.is_direct() && !allow_direct_primary {
-                return false;
-            }
-            manager.runtime(proxy_key).is_some_and(|runtime| {
-                runtime.available && runtime.weight > 0.0 && endpoint.is_selectable()
-            })
-        };
 
-        if let Some(primary) = record.primary_proxy_key.as_deref()
-            && !is_valid(primary, &manager, true)
-        {
-            record.primary_proxy_key = None;
-        }
-        if let Some(secondary) = record.secondary_proxy_key.as_deref()
-            && !is_valid(secondary, &manager, true)
-        {
-            record.secondary_proxy_key = None;
+            if let Some(primary) = record.primary_proxy_key.as_deref()
+                && !is_valid(primary, &manager, true)
+            {
+                record.primary_proxy_key = None;
+            }
+            if let Some(secondary) = record.secondary_proxy_key.as_deref()
+                && !is_valid(secondary, &manager, true)
+            {
+                record.secondary_proxy_key = None;
+            }
         }
         if record.primary_proxy_key == record.secondary_proxy_key {
             record.secondary_proxy_key = None;
@@ -2382,26 +2729,21 @@ impl TavilyProxy {
 
         if record.primary_proxy_key.is_none() {
             let exclude = HashSet::new();
-            if let Some(primary) = manager
-                .rank_candidates_for_subject(
+            if let Some(primary) = self
+                .rank_registration_aware_candidates(
                     &format!("{api_key_id}:primary"),
+                    RegistrationAffinityContext {
+                        geo_origin: &self.api_key_geo_origin,
+                        registration_ip: registration_ip.as_deref(),
+                        registration_region: registration_region.as_deref(),
+                    },
                     &exclude,
-                    false,
+                    true,
                     forward_proxy::FORWARD_PROXY_DEFAULT_PRIMARY_CANDIDATE_COUNT,
                 )
+                .await
                 .into_iter()
                 .next()
-                .or_else(|| {
-                    manager
-                        .rank_candidates_for_subject(
-                            &format!("{api_key_id}:primary"),
-                            &exclude,
-                            true,
-                            forward_proxy::FORWARD_PROXY_DEFAULT_PRIMARY_CANDIDATE_COUNT,
-                        )
-                        .into_iter()
-                        .next()
-                })
             {
                 record.primary_proxy_key = Some(primary.key.clone());
             }
@@ -2412,26 +2754,21 @@ impl TavilyProxy {
             if let Some(primary) = record.primary_proxy_key.as_ref() {
                 exclude.insert(primary.clone());
             }
-            if let Some(secondary) = manager
-                .rank_candidates_for_subject(
+            if let Some(secondary) = self
+                .rank_registration_aware_candidates(
                     &format!("{api_key_id}:secondary"),
+                    RegistrationAffinityContext {
+                        geo_origin: &self.api_key_geo_origin,
+                        registration_ip: registration_ip.as_deref(),
+                        registration_region: registration_region.as_deref(),
+                    },
                     &exclude,
-                    false,
+                    true,
                     forward_proxy::FORWARD_PROXY_DEFAULT_SECONDARY_CANDIDATE_COUNT,
                 )
+                .await
                 .into_iter()
                 .next()
-                .or_else(|| {
-                    manager
-                        .rank_candidates_for_subject(
-                            &format!("{api_key_id}:secondary"),
-                            &exclude,
-                            true,
-                            forward_proxy::FORWARD_PROXY_DEFAULT_SECONDARY_CANDIDATE_COUNT,
-                        )
-                        .into_iter()
-                        .next()
-                })
             {
                 record.secondary_proxy_key = Some(secondary.key.clone());
             }
@@ -2441,7 +2778,6 @@ impl TavilyProxy {
             record.primary_proxy_key = record.secondary_proxy_key.take();
         }
         record.updated_at = now;
-        drop(manager);
         self.store_proxy_affinity_record(api_key_id, record.clone())
             .await?;
         Ok(record)
@@ -2459,37 +2795,283 @@ impl TavilyProxy {
         if record.secondary_proxy_key.as_deref() == Some(succeeded_proxy_key) {
             record.primary_proxy_key = Some(succeeded_proxy_key.to_string());
             record.secondary_proxy_key = None;
-            let manager = self.forward_proxy.lock().await;
+            let (registration_ip, registration_region) =
+                self.load_api_key_registration_metadata(api_key_id).await?;
             let mut exclude = HashSet::new();
             exclude.insert(succeeded_proxy_key.to_string());
-            if let Some(next_secondary) = manager
-                .rank_candidates_for_subject(
+            if let Some(next_secondary) = self
+                .rank_registration_aware_candidates(
                     &format!("{api_key_id}:secondary"),
+                    RegistrationAffinityContext {
+                        geo_origin: &self.api_key_geo_origin,
+                        registration_ip: registration_ip.as_deref(),
+                        registration_region: registration_region.as_deref(),
+                    },
                     &exclude,
-                    false,
+                    true,
                     forward_proxy::FORWARD_PROXY_DEFAULT_SECONDARY_CANDIDATE_COUNT,
                 )
+                .await
                 .into_iter()
                 .next()
-                .or_else(|| {
-                    manager
-                        .rank_candidates_for_subject(
-                            &format!("{api_key_id}:secondary"),
-                            &exclude,
-                            true,
-                            forward_proxy::FORWARD_PROXY_DEFAULT_SECONDARY_CANDIDATE_COUNT,
-                        )
-                        .into_iter()
-                        .next()
-                })
             {
                 record.secondary_proxy_key = Some(next_secondary.key.clone());
             }
-            drop(manager);
             record.updated_at = Utc::now().timestamp();
             self.store_proxy_affinity_record(api_key_id, record).await?;
         }
         Ok(())
+    }
+
+    async fn resolve_forward_proxy_host_ips(host: &str) -> Vec<String> {
+        if let Some(ip) = normalize_ip_string(host) {
+            return vec![ip];
+        }
+
+        let resolved = match tokio::net::lookup_host((host, 80)).await {
+            Ok(addrs) => addrs,
+            Err(_) => return Vec::new(),
+        };
+        let mut seen = HashSet::new();
+        let mut ips = Vec::new();
+        for addr in resolved {
+            let ip = addr.ip().to_string();
+            if seen.insert(ip.clone()) {
+                ips.push(ip);
+            }
+        }
+        ips
+    }
+
+    async fn resolve_forward_proxy_geo_candidates(
+        &self,
+        geo_origin: &str,
+        endpoints: Vec<forward_proxy::ForwardProxyEndpoint>,
+    ) -> Vec<ForwardProxyGeoCandidate> {
+        let mut host_ips = HashMap::<String, Vec<String>>::new();
+        for endpoint in &endpoints {
+            let Some(host) = forward_proxy::endpoint_host(endpoint) else {
+                continue;
+            };
+            if host_ips.contains_key(&host) {
+                continue;
+            }
+            host_ips.insert(
+                host.clone(),
+                Self::resolve_forward_proxy_host_ips(&host).await,
+            );
+        }
+
+        let geo_lookup_ips = host_ips
+            .values()
+            .flatten()
+            .filter(|ip| is_global_geo_ip(ip))
+            .cloned()
+            .collect::<Vec<_>>();
+        let region_by_ip = resolve_registration_regions(geo_origin, &geo_lookup_ips).await;
+
+        endpoints
+            .into_iter()
+            .map(|endpoint| {
+                let resolved_ips = forward_proxy::endpoint_host(&endpoint)
+                    .and_then(|host| host_ips.get(&host).cloned())
+                    .unwrap_or_default();
+                let mut seen_regions = HashSet::new();
+                let regions = resolved_ips
+                    .iter()
+                    .filter_map(|ip| region_by_ip.get(ip).cloned())
+                    .filter(|region| seen_regions.insert(region.clone()))
+                    .collect::<Vec<_>>();
+                ForwardProxyGeoCandidate {
+                    endpoint,
+                    host_ips: resolved_ips,
+                    regions,
+                }
+            })
+            .collect()
+    }
+
+    async fn select_proxy_affinity_for_registration_with_hint(
+        &self,
+        subject: &str,
+        geo_origin: &str,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+        preferred_primary_proxy_key: Option<&str>,
+    ) -> Result<forward_proxy::ForwardProxyAffinityRecord, ProxyError> {
+        let (ranked_non_direct, ranked_any) = {
+            let mut manager = self.forward_proxy.lock().await;
+            manager.ensure_non_zero_weight();
+            let exclude = HashSet::new();
+            let limit = manager.endpoints.len().max(1);
+            (
+                manager.rank_candidates_for_subject(subject, &exclude, false, limit),
+                manager.rank_candidates_for_subject(subject, &exclude, true, limit),
+            )
+        };
+
+        let primary_pool = if ranked_non_direct.is_empty() {
+            ranked_any.clone()
+        } else {
+            ranked_non_direct.clone()
+        };
+        let geo_candidates = self
+            .resolve_forward_proxy_geo_candidates(geo_origin, primary_pool.clone())
+            .await;
+        let normalized_registration_ip = registration_ip.and_then(normalize_ip_string);
+        let normalized_registration_region = registration_region
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let preferred_primary = preferred_primary_proxy_key.and_then(|preferred_key| {
+            ranked_any
+                .iter()
+                .find(|endpoint| endpoint.key == preferred_key)
+                .cloned()
+        });
+
+        let exact_match = normalized_registration_ip
+            .as_ref()
+            .and_then(|registration_ip| {
+                geo_candidates
+                    .iter()
+                    .find(|candidate| candidate.host_ips.iter().any(|ip| ip == registration_ip))
+                    .map(|candidate| candidate.endpoint.clone())
+            });
+        let region_match =
+            normalized_registration_region
+                .as_ref()
+                .and_then(|registration_region| {
+                    geo_candidates
+                        .iter()
+                        .find(|candidate| {
+                            candidate
+                                .regions
+                                .iter()
+                                .any(|region| region == registration_region)
+                        })
+                        .map(|candidate| candidate.endpoint.clone())
+                });
+
+        let primary = exact_match
+            .or(region_match)
+            .or(preferred_primary)
+            .or_else(|| primary_pool.first().cloned())
+            .or_else(|| ranked_any.first().cloned());
+        let primary_proxy_key = primary.as_ref().map(|endpoint| endpoint.key.clone());
+
+        let mut secondary_exclude = HashSet::new();
+        if let Some(primary_proxy_key) = primary_proxy_key.as_ref() {
+            secondary_exclude.insert(primary_proxy_key.clone());
+        }
+        let secondary_proxy_key = self
+            .rank_registration_aware_candidates(
+                &format!("{subject}:secondary"),
+                RegistrationAffinityContext {
+                    geo_origin,
+                    registration_ip: normalized_registration_ip.as_deref(),
+                    registration_region: normalized_registration_region.as_deref(),
+                },
+                &secondary_exclude,
+                true,
+                ranked_any.len().max(1),
+            )
+            .await
+            .into_iter()
+            .next()
+            .map(|endpoint| endpoint.key);
+
+        Ok(forward_proxy::ForwardProxyAffinityRecord {
+            primary_proxy_key,
+            secondary_proxy_key,
+            updated_at: Utc::now().timestamp(),
+        })
+    }
+
+    async fn select_proxy_affinity_for_registration(
+        &self,
+        subject: &str,
+        geo_origin: &str,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+    ) -> Result<forward_proxy::ForwardProxyAffinityRecord, ProxyError> {
+        self.select_proxy_affinity_for_registration_with_hint(
+            subject,
+            geo_origin,
+            registration_ip,
+            registration_region,
+            None,
+        )
+        .await
+    }
+
+    async fn build_proxy_attempt_plan_for_record(
+        &self,
+        subject: &str,
+        record: &forward_proxy::ForwardProxyAffinityRecord,
+    ) -> Result<Vec<forward_proxy::SelectedForwardProxy>, ProxyError> {
+        let mut plan = Vec::new();
+        let mut seen = HashSet::new();
+        {
+            let manager = self.forward_proxy.lock().await;
+            for key in [
+                record.primary_proxy_key.as_ref(),
+                record.secondary_proxy_key.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if seen.insert(key.clone())
+                    && let Some(endpoint) = manager.endpoint(key)
+                    && endpoint.is_selectable()
+                    && manager
+                        .runtime(key)
+                        .is_some_and(|runtime| runtime.available && runtime.weight.is_finite())
+                {
+                    plan.push(forward_proxy::SelectedForwardProxy::from_endpoint(endpoint));
+                }
+            }
+        }
+        let (registration_ip, registration_region) =
+            self.load_api_key_registration_metadata(subject).await?;
+        let limit = {
+            let manager = self.forward_proxy.lock().await;
+            manager.endpoints.len().max(1)
+        };
+        for endpoint in self
+            .rank_registration_aware_candidates(
+                subject,
+                RegistrationAffinityContext {
+                    geo_origin: &self.api_key_geo_origin,
+                    registration_ip: registration_ip.as_deref(),
+                    registration_region: registration_region.as_deref(),
+                },
+                &seen,
+                false,
+                limit,
+            )
+            .await
+        {
+            if seen.insert(endpoint.key.clone()) {
+                plan.push(forward_proxy::SelectedForwardProxy::from_endpoint(
+                    &endpoint,
+                ));
+            }
+        }
+        Ok(plan)
+    }
+
+    async fn preview_proxy_assignment_for_record(
+        &self,
+        record: &forward_proxy::ForwardProxyAffinityRecord,
+    ) -> Option<ForwardProxyAssignmentPreview> {
+        let primary_key = record.primary_proxy_key.as_ref()?;
+        let manager = self.forward_proxy.lock().await;
+        let endpoint = manager.endpoint(primary_key)?;
+        Some(ForwardProxyAssignmentPreview {
+            key: endpoint.key.clone(),
+            label: endpoint.display_name.clone(),
+        })
     }
 
     async fn build_proxy_attempt_plan(
@@ -2497,41 +3079,8 @@ impl TavilyProxy {
         api_key_id: &str,
     ) -> Result<Vec<forward_proxy::SelectedForwardProxy>, ProxyError> {
         let record = self.reconcile_proxy_affinity_record(api_key_id).await?;
-        let manager = self.forward_proxy.lock().await;
-        let mut plan = Vec::new();
-        let mut seen = HashSet::new();
-        for key in [
-            record.primary_proxy_key.as_ref(),
-            record.secondary_proxy_key.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if seen.insert(key.clone())
-                && let Some(endpoint) = manager.endpoint(key)
-                && endpoint.is_selectable()
-            {
-                plan.push(forward_proxy::SelectedForwardProxy::from_endpoint(endpoint));
-            }
-        }
-        if plan.is_empty() {
-            let exclude = HashSet::new();
-            if let Some(endpoint) = manager
-                .rank_candidates_for_subject(
-                    &format!("{api_key_id}:fallback"),
-                    &exclude,
-                    true,
-                    forward_proxy::FORWARD_PROXY_DEFAULT_PRIMARY_CANDIDATE_COUNT,
-                )
-                .into_iter()
-                .next()
-            {
-                plan.push(forward_proxy::SelectedForwardProxy::from_endpoint(
-                    &endpoint,
-                ));
-            }
-        }
-        Ok(plan)
+        self.build_proxy_attempt_plan_for_record(api_key_id, &record)
+            .await
     }
 
     async fn record_forward_proxy_attempt(
@@ -2585,10 +3134,12 @@ impl TavilyProxy {
         Ok(())
     }
 
-    async fn send_with_forward_proxy<F>(
+    async fn send_with_forward_proxy_plan<F>(
         &self,
-        api_key_id: &str,
+        _subject: &str,
+        affinity_owner_key_id: Option<&str>,
         request_kind: &str,
+        plan: Vec<forward_proxy::SelectedForwardProxy>,
         mut build: F,
     ) -> Result<(reqwest::Response, forward_proxy::SelectedForwardProxy), ProxyError>
     where
@@ -2601,10 +3152,6 @@ impl TavilyProxy {
         if let Err(err) = self.maybe_run_forward_proxy_maintenance().await {
             eprintln!("forward-proxy maintenance error: {err}");
         }
-        let plan: Vec<forward_proxy::SelectedForwardProxy> = self
-            .build_proxy_attempt_plan(api_key_id)
-            .await
-            .unwrap_or_default();
         let mut last_error: Option<ProxyError> = None;
         for candidate in plan {
             let client = match self
@@ -2618,7 +3165,7 @@ impl TavilyProxy {
                     let _ = self
                         .record_forward_proxy_attempt(
                             &candidate.key,
-                            Some(api_key_id),
+                            affinity_owner_key_id,
                             request_kind,
                             false,
                             None,
@@ -2636,16 +3183,18 @@ impl TavilyProxy {
                     let _ = self
                         .record_forward_proxy_attempt(
                             &candidate.key,
-                            Some(api_key_id),
+                            affinity_owner_key_id,
                             request_kind,
                             true,
                             Some(latency_ms),
                             None,
                         )
                         .await;
-                    let _ = self
-                        .promote_proxy_affinity_secondary(api_key_id, &candidate.key)
-                        .await;
+                    if let Some(api_key_id) = affinity_owner_key_id {
+                        let _ = self
+                            .promote_proxy_affinity_secondary(api_key_id, &candidate.key)
+                            .await;
+                    }
                     return Ok((response, candidate));
                 }
                 Err(err) => {
@@ -2653,7 +3202,7 @@ impl TavilyProxy {
                     let _ = self
                         .record_forward_proxy_attempt(
                             &candidate.key,
-                            Some(api_key_id),
+                            affinity_owner_key_id,
                             request_kind,
                             false,
                             None,
@@ -2684,7 +3233,7 @@ impl TavilyProxy {
                 let _ = self
                     .record_forward_proxy_attempt(
                         &direct.key,
-                        Some(api_key_id),
+                        affinity_owner_key_id,
                         request_kind,
                         true,
                         Some(started.elapsed().as_secs_f64() * 1000.0),
@@ -2697,7 +3246,7 @@ impl TavilyProxy {
                 let _ = self
                     .record_forward_proxy_attempt(
                         &direct.key,
-                        Some(api_key_id),
+                        affinity_owner_key_id,
                         request_kind,
                         false,
                         None,
@@ -2707,6 +3256,41 @@ impl TavilyProxy {
                 Err(last_error.unwrap_or(ProxyError::Http(err)))
             }
         }
+    }
+
+    async fn send_with_forward_proxy<F>(
+        &self,
+        api_key_id: &str,
+        request_kind: &str,
+        build: F,
+    ) -> Result<(reqwest::Response, forward_proxy::SelectedForwardProxy), ProxyError>
+    where
+        F: FnMut(Client) -> reqwest::RequestBuilder,
+    {
+        let plan = self
+            .build_proxy_attempt_plan(api_key_id)
+            .await
+            .unwrap_or_default();
+        self.send_with_forward_proxy_plan(api_key_id, Some(api_key_id), request_kind, plan, build)
+            .await
+    }
+
+    async fn send_with_forward_proxy_affinity<F>(
+        &self,
+        subject: &str,
+        request_kind: &str,
+        affinity: &forward_proxy::ForwardProxyAffinityRecord,
+        build: F,
+    ) -> Result<(reqwest::Response, forward_proxy::SelectedForwardProxy), ProxyError>
+    where
+        F: FnMut(Client) -> reqwest::RequestBuilder,
+    {
+        let plan = self
+            .build_proxy_attempt_plan_for_record(subject, affinity)
+            .await
+            .unwrap_or_default();
+        self.send_with_forward_proxy_plan(subject, None, request_kind, plan, build)
+            .await
     }
 
     async fn billing_subject_for_token(&self, token_id: &str) -> Result<String, ProxyError> {
@@ -3671,9 +4255,11 @@ impl TavilyProxy {
         per_page: i64,
         groups: &[String],
         statuses: &[String],
+        registration_ip: Option<&str>,
+        regions: &[String],
     ) -> Result<PaginatedApiKeyMetrics, ProxyError> {
         self.key_store
-            .fetch_api_key_metrics_page(page, per_page, groups, statuses)
+            .fetch_api_key_metrics_page(page, per_page, groups, statuses, registration_ip, regions)
             .await
     }
 
@@ -4732,6 +5318,82 @@ impl TavilyProxy {
             .await
     }
 
+    /// Admin: add/undelete an API key in the provided group and refresh registration metadata
+    /// when the caller provides a new registration IP.
+    pub async fn add_or_undelete_key_with_status_in_group_and_registration(
+        &self,
+        api_key: &str,
+        group: Option<&str>,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+    ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
+        self.key_store
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                api_key,
+                group,
+                registration_ip,
+                registration_region,
+                None,
+            )
+            .await
+    }
+
+    /// Admin: add/undelete an API key, then bind it to the most relevant forward proxy node
+    /// based on registration IP/region before persisting the affinity.
+    pub async fn add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity(
+        &self,
+        api_key: &str,
+        group: Option<&str>,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+        geo_origin: &str,
+    ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
+        self.add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity_hint(
+            api_key,
+            group,
+            registration_ip,
+            registration_region,
+            geo_origin,
+            None,
+        )
+        .await
+    }
+
+    /// Admin: add/undelete an API key and persist the caller-selected proxy node when provided.
+    pub async fn add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity_hint(
+        &self,
+        api_key: &str,
+        group: Option<&str>,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+        geo_origin: &str,
+        preferred_primary_proxy_key: Option<&str>,
+    ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
+        let proxy_affinity = if registration_ip.is_some() || registration_region.is_some() {
+            Some(
+                self.select_proxy_affinity_for_registration_with_hint(
+                    api_key,
+                    geo_origin,
+                    registration_ip,
+                    registration_region,
+                    preferred_primary_proxy_key,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        self.key_store
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                api_key,
+                group,
+                registration_ip,
+                registration_region,
+                proxy_affinity.as_ref(),
+            )
+            .await
+    }
+
     /// Admin: soft delete a key by ID.
     pub async fn soft_delete_key_by_id(&self, key_id: &str) -> Result<(), ProxyError> {
         self.key_store.soft_delete_key_by_id(key_id).await
@@ -5444,7 +6106,14 @@ impl TavilyProxy {
             return Err(ProxyError::Database(sqlx::Error::RowNotFound));
         };
         let (limit, remaining) = match self
-            .fetch_usage_quota_for_secret(&secret, usage_base, None, Some(key_id), "quota_sync")
+            .fetch_usage_quota_for_secret(
+                &secret,
+                usage_base,
+                None,
+                Some(key_id),
+                None,
+                "quota_sync",
+            )
             .await
         {
             Ok(quota) => quota,
@@ -5473,9 +6142,48 @@ impl TavilyProxy {
             usage_base,
             Some(Duration::from_secs(USAGE_PROBE_TIMEOUT_SECS)),
             None,
+            None,
             "quota_probe",
         )
         .await
+    }
+
+    pub async fn probe_api_key_quota_with_registration(
+        &self,
+        api_key: &str,
+        usage_base: &str,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+        geo_origin: &str,
+    ) -> Result<(i64, i64, Option<ForwardProxyAssignmentPreview>), ProxyError> {
+        let proxy_affinity = if registration_ip.is_some() || registration_region.is_some() {
+            Some(
+                self.select_proxy_affinity_for_registration(
+                    &format!("validate:{api_key}"),
+                    geo_origin,
+                    registration_ip,
+                    registration_region,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let assigned_proxy = match proxy_affinity.as_ref() {
+            Some(record) => self.preview_proxy_assignment_for_record(record).await,
+            None => None,
+        };
+        let (limit, remaining) = self
+            .fetch_usage_quota_for_secret(
+                api_key,
+                usage_base,
+                Some(Duration::from_secs(USAGE_PROBE_TIMEOUT_SECS)),
+                None,
+                proxy_affinity.as_ref().map(|record| (api_key, record)),
+                "quota_probe",
+            )
+            .await?;
+        Ok((limit, remaining, assigned_proxy))
     }
 
     /// Admin: mark a key as quota-exhausted by its secret string.
@@ -5492,6 +6200,7 @@ impl TavilyProxy {
         usage_base: &str,
         timeout: Option<Duration>,
         api_key_id: Option<&str>,
+        proxy_affinity: Option<(&str, &forward_proxy::ForwardProxyAffinityRecord)>,
         request_kind: &str,
     ) -> Result<(i64, i64), ProxyError> {
         let base = Url::parse(usage_base).map_err(|e| ProxyError::InvalidEndpoint {
@@ -5503,8 +6212,8 @@ impl TavilyProxy {
 
         let secret_header = secret.to_string();
         let request_url = url.clone();
-        let resp = match api_key_id {
-            Some(api_key_id) => self
+        let resp = match (api_key_id, proxy_affinity) {
+            (Some(api_key_id), _) => self
                 .send_with_forward_proxy(api_key_id, request_kind, |client| {
                     let mut req = client
                         .get(request_url.clone())
@@ -5516,7 +6225,19 @@ impl TavilyProxy {
                 })
                 .await
                 .map(|(response, _)| response)?,
-            None => {
+            (None, Some((subject, proxy_affinity))) => self
+                .send_with_forward_proxy_affinity(subject, request_kind, proxy_affinity, |client| {
+                    let mut req = client
+                        .get(request_url.clone())
+                        .header("Authorization", format!("Bearer {}", secret_header));
+                    if let Some(timeout) = timeout {
+                        req = req.timeout(timeout);
+                    }
+                    req
+                })
+                .await
+                .map(|(response, _)| response)?,
+            (None, None) => {
                 let mut req = self
                     .client
                     .get(request_url.clone())
@@ -5786,6 +6507,8 @@ impl KeyStore {
                 id TEXT PRIMARY KEY,
                 api_key TEXT NOT NULL UNIQUE,
                 group_name TEXT,
+                registration_ip TEXT,
+                registration_region TEXT,
                 status TEXT NOT NULL DEFAULT 'active',
                 status_changed_at INTEGER,
                 last_used_at INTEGER NOT NULL DEFAULT 0,
@@ -7854,6 +8577,18 @@ impl KeyStore {
                 .await?;
         }
 
+        if !self.api_keys_column_exists("registration_ip").await? {
+            sqlx::query("ALTER TABLE api_keys ADD COLUMN registration_ip TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !self.api_keys_column_exists("registration_region").await? {
+            sqlx::query("ALTER TABLE api_keys ADD COLUMN registration_region TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+
         // Add deleted_at for soft delete marker (timestamp)
         if !self.api_keys_column_exists("deleted_at").await? {
             sqlx::query("ALTER TABLE api_keys ADD COLUMN deleted_at INTEGER")
@@ -8015,6 +8750,8 @@ impl KeyStore {
                 id TEXT PRIMARY KEY,
                 api_key TEXT NOT NULL UNIQUE,
                 group_name TEXT,
+                registration_ip TEXT,
+                registration_region TEXT,
                 status TEXT NOT NULL DEFAULT 'active',
                 status_changed_at INTEGER,
                 last_used_at INTEGER NOT NULL DEFAULT 0,
@@ -8034,6 +8771,8 @@ impl KeyStore {
                 id,
                 api_key,
                 group_name,
+                registration_ip,
+                registration_region,
                 status,
                 status_changed_at,
                 last_used_at,
@@ -8046,6 +8785,8 @@ impl KeyStore {
                 id,
                 api_key,
                 group_name,
+                registration_ip,
+                registration_region,
                 status,
                 status_changed_at,
                 last_used_at,
@@ -12844,7 +13585,9 @@ impl KeyStore {
         group: Option<&str>,
     ) -> Result<String, ProxyError> {
         let (id, _) = self
-            .add_or_undelete_key_with_status_in_group(api_key, group)
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                api_key, group, None, None, None,
+            )
             .await?;
         Ok(id)
     }
@@ -12854,8 +13597,10 @@ impl KeyStore {
         &self,
         api_key: &str,
     ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
-        self.add_or_undelete_key_with_status_in_group(api_key, None)
-            .await
+        self.add_or_undelete_key_with_status_in_group_and_registration(
+            api_key, None, None, None, None,
+        )
+        .await
     }
 
     // Admin ops: add/undelete key by secret with status and optional group assignment.
@@ -12868,15 +13613,43 @@ impl KeyStore {
         api_key: &str,
         group: Option<&str>,
     ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
+        self.add_or_undelete_key_with_status_in_group_and_registration(
+            api_key, group, None, None, None,
+        )
+        .await
+    }
+
+    async fn add_or_undelete_key_with_status_in_group_and_registration(
+        &self,
+        api_key: &str,
+        group: Option<&str>,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+        proxy_affinity: Option<&forward_proxy::ForwardProxyAffinityRecord>,
+    ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
         let normalized_group = group
             .map(str::trim)
             .filter(|g| !g.is_empty())
+            .map(str::to_string);
+        let normalized_registration_ip = registration_ip
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let normalized_registration_region = registration_region
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_string);
         let mut retry_idx = 0usize;
 
         loop {
             match self
-                .add_or_undelete_key_with_status_in_group_once(api_key, normalized_group.as_deref())
+                .add_or_undelete_key_with_status_in_group_once(
+                    api_key,
+                    normalized_group.as_deref(),
+                    normalized_registration_ip.as_deref(),
+                    normalized_registration_region.as_deref(),
+                    proxy_affinity,
+                )
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -12902,14 +13675,17 @@ impl KeyStore {
         &self,
         api_key: &str,
         group: Option<&str>,
+        registration_ip: Option<&str>,
+        registration_region: Option<&str>,
+        proxy_affinity: Option<&forward_proxy::ForwardProxyAffinityRecord>,
     ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
         let mut tx = self.pool.begin().await?;
         let now = Utc::now().timestamp();
 
         let operation_result: Result<(String, ApiKeyUpsertStatus), ProxyError> = async {
-            if let Some((id, deleted_at, existing_group)) =
-                sqlx::query_as::<_, (String, Option<i64>, Option<String>)>(
-                    "SELECT id, deleted_at, group_name FROM api_keys WHERE api_key = ? LIMIT 1",
+            if let Some((id, deleted_at, existing_group, _existing_registration_ip, _existing_registration_region)) =
+                sqlx::query_as::<_, (String, Option<i64>, Option<String>, Option<String>, Option<String>)>(
+                    "SELECT id, deleted_at, group_name, registration_ip, registration_region FROM api_keys WHERE api_key = ? LIMIT 1",
                 )
                 .bind(api_key)
                 .fetch_optional(&mut *tx)
@@ -12920,34 +13696,62 @@ impl KeyStore {
                     .map(str::trim)
                     .map(|g| g.is_empty())
                     .unwrap_or(true);
+                let should_refresh_registration = registration_ip.is_some();
 
+                let mut assignments = Vec::new();
                 if deleted_at.is_some() {
-                    if let Some(group) = group {
-                        sqlx::query(
-                            "UPDATE api_keys SET deleted_at = NULL, group_name = ? WHERE id = ?",
-                        )
-                        .bind(group)
-                        .bind(&id)
-                        .execute(&mut *tx)
-                        .await?;
-                    } else {
-                        sqlx::query("UPDATE api_keys SET deleted_at = NULL WHERE id = ?")
-                            .bind(&id)
-                            .execute(&mut *tx)
-                            .await?;
-                    }
-
-                    return Ok((id, ApiKeyUpsertStatus::Undeleted));
+                    assignments.push("deleted_at = NULL".to_string());
+                }
+                if group.is_some() && existing_empty {
+                    assignments.push("group_name = ?".to_string());
+                }
+                if should_refresh_registration {
+                    assignments.push("registration_ip = ?".to_string());
+                }
+                if should_refresh_registration {
+                    assignments.push("registration_region = ?".to_string());
                 }
 
-                if let Some(group) = group
-                    && existing_empty
+                if !assignments.is_empty() {
+                    let mut query = String::from("UPDATE api_keys SET ");
+                    query.push_str(&assignments.join(", "));
+                    query.push_str(" WHERE id = ?");
+                    let mut sql = sqlx::query(&query);
+                    if let Some(group) = group
+                        && existing_empty
+                    {
+                        sql = sql.bind(group);
+                    }
+                    if should_refresh_registration {
+                        sql = sql.bind(registration_ip);
+                    }
+                    if should_refresh_registration {
+                        sql = sql.bind(registration_region);
+                    }
+                    sql.bind(&id).execute(&mut *tx).await?;
+                }
+                if registration_ip.is_some()
+                    && let Some(proxy_affinity) = proxy_affinity
                 {
-                    sqlx::query("UPDATE api_keys SET group_name = ? WHERE id = ?")
-                        .bind(group)
-                        .bind(&id)
-                        .execute(&mut *tx)
-                        .await?;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO forward_proxy_key_affinity (key_id, primary_proxy_key, secondary_proxy_key, updated_at)
+                        VALUES (?1, ?2, ?3, strftime('%s', 'now'))
+                        ON CONFLICT(key_id) DO UPDATE SET
+                            primary_proxy_key = excluded.primary_proxy_key,
+                            secondary_proxy_key = excluded.secondary_proxy_key,
+                            updated_at = strftime('%s', 'now')
+                        "#,
+                    )
+                    .bind(&id)
+                    .bind(proxy_affinity.primary_proxy_key.as_deref())
+                    .bind(proxy_affinity.secondary_proxy_key.as_deref())
+                    .execute(&mut *tx)
+                    .await?;
+                }
+
+                if deleted_at.is_some() {
+                    return Ok((id, ApiKeyUpsertStatus::Undeleted));
                 }
 
                 return Ok((id, ApiKeyUpsertStatus::Existed));
@@ -12956,17 +13760,46 @@ impl KeyStore {
             let id = Self::generate_unique_key_id(&mut tx).await?;
             sqlx::query(
                 r#"
-                INSERT INTO api_keys (id, api_key, group_name, status, status_changed_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO api_keys (
+                    id,
+                    api_key,
+                    group_name,
+                    registration_ip,
+                    registration_region,
+                    status,
+                    status_changed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&id)
             .bind(api_key)
             .bind(group)
+            .bind(registration_ip)
+            .bind(registration_region)
             .bind(STATUS_ACTIVE)
             .bind(now)
             .execute(&mut *tx)
             .await?;
+            if registration_ip.is_some()
+                && let Some(proxy_affinity) = proxy_affinity
+            {
+                sqlx::query(
+                    r#"
+                    INSERT INTO forward_proxy_key_affinity (key_id, primary_proxy_key, secondary_proxy_key, updated_at)
+                    VALUES (?1, ?2, ?3, strftime('%s', 'now'))
+                    ON CONFLICT(key_id) DO UPDATE SET
+                        primary_proxy_key = excluded.primary_proxy_key,
+                        secondary_proxy_key = excluded.secondary_proxy_key,
+                        updated_at = strftime('%s', 'now')
+                    "#,
+                )
+                .bind(&id)
+                .bind(proxy_affinity.primary_proxy_key.as_deref())
+                .bind(proxy_affinity.secondary_proxy_key.as_deref())
+                .execute(&mut *tx)
+                .await?;
+            }
             Ok((id, ApiKeyUpsertStatus::Created))
         }
         .await;
@@ -13170,6 +14003,8 @@ impl KeyStore {
                 ak.id,
                 ak.status,
                 ak.group_name,
+                ak.registration_ip,
+                ak.registration_region,
                 ak.status_changed_at,
                 ak.last_used_at,
                 ak.deleted_at,
@@ -13195,6 +14030,8 @@ impl KeyStore {
         let id: String = row.try_get("id")?;
         let status: String = row.try_get("status")?;
         let group_name: Option<String> = row.try_get("group_name")?;
+        let registration_ip: Option<String> = row.try_get("registration_ip")?;
+        let registration_region: Option<String> = row.try_get("registration_region")?;
         let status_changed_at: Option<i64> = row.try_get("status_changed_at")?;
         let last_used_at: i64 = row.try_get("last_used_at")?;
         let deleted_at: Option<i64> = row.try_get("deleted_at")?;
@@ -13214,14 +14051,9 @@ impl KeyStore {
         Ok(ApiKeyMetrics {
             id,
             status,
-            group_name: group_name.and_then(|name| {
-                let trimmed = name.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_owned())
-                }
-            }),
+            group_name: normalize_optional_api_key_field(group_name),
+            registration_ip: normalize_optional_api_key_field(registration_ip),
+            registration_region: normalize_optional_api_key_field(registration_region),
             status_changed_at: status_changed_at.and_then(normalize_timestamp),
             last_used_at: normalize_timestamp(last_used_at),
             deleted_at: deleted_at.and_then(normalize_timestamp),
@@ -13246,6 +14078,20 @@ impl KeyStore {
         let mut normalized = Vec::new();
         for group in groups {
             let value = group.trim().to_string();
+            if !normalized.iter().any(|existing| existing == &value) {
+                normalized.push(value);
+            }
+        }
+        normalized
+    }
+
+    fn normalize_api_key_regions(regions: &[String]) -> Vec<String> {
+        let mut normalized = Vec::new();
+        for region in regions {
+            let value = region.trim().to_string();
+            if value.is_empty() {
+                continue;
+            }
             if !normalized.iter().any(|existing| existing == &value) {
                 normalized.push(value);
             }
@@ -13317,15 +14163,56 @@ impl KeyStore {
         builder.push(")");
     }
 
+    fn push_api_key_registration_ip_filter<'a>(
+        builder: &mut QueryBuilder<'a, Sqlite>,
+        registration_ip: Option<&'a str>,
+    ) {
+        let Some(registration_ip) = registration_ip
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+
+        builder
+            .push(" AND TRIM(COALESCE(ak.registration_ip, '')) = ")
+            .push_bind(registration_ip);
+    }
+
+    fn push_api_key_region_filters<'a>(
+        builder: &mut QueryBuilder<'a, Sqlite>,
+        regions: &'a [String],
+    ) {
+        if regions.is_empty() {
+            return;
+        }
+
+        builder.push(" AND (");
+        for (index, region) in regions.iter().enumerate() {
+            if index > 0 {
+                builder.push(" OR ");
+            }
+            builder
+                .push("(TRIM(COALESCE(ak.registration_region, '')) = ")
+                .push_bind(region)
+                .push(")");
+        }
+        builder.push(")");
+    }
+
     async fn fetch_api_key_group_facets(
         &self,
         statuses: &[String],
+        registration_ip: Option<&str>,
+        regions: &[String],
     ) -> Result<Vec<ApiKeyFacetCount>, ProxyError> {
         let mut builder = QueryBuilder::<Sqlite>::new(
             "SELECT TRIM(COALESCE(ak.group_name, '')) AS value, COUNT(*) AS count",
         );
         builder.push(Self::api_key_metrics_from_clause());
         Self::push_api_key_status_filters(&mut builder, statuses);
+        Self::push_api_key_registration_ip_filter(&mut builder, registration_ip);
+        Self::push_api_key_region_filters(&mut builder, regions);
         builder.push(" GROUP BY value ORDER BY value ASC");
 
         let rows = builder.build().fetch_all(&self.pool).await?;
@@ -13343,12 +14230,44 @@ impl KeyStore {
     async fn fetch_api_key_status_facets(
         &self,
         groups: &[String],
+        registration_ip: Option<&str>,
+        regions: &[String],
     ) -> Result<Vec<ApiKeyFacetCount>, ProxyError> {
         let mut builder = QueryBuilder::<Sqlite>::new(
             "SELECT CASE WHEN aq.key_id IS NOT NULL THEN 'quarantined' ELSE ak.status END AS value, COUNT(*) AS count",
         );
         builder.push(Self::api_key_metrics_from_clause());
         Self::push_api_key_group_filters(&mut builder, groups);
+        Self::push_api_key_registration_ip_filter(&mut builder, registration_ip);
+        Self::push_api_key_region_filters(&mut builder, regions);
+        builder.push(" GROUP BY value ORDER BY value ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ApiKeyFacetCount {
+                    value: row.try_get("value")?,
+                    count: row.try_get("count")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(ProxyError::from)
+    }
+
+    async fn fetch_api_key_region_facets(
+        &self,
+        groups: &[String],
+        statuses: &[String],
+        registration_ip: Option<&str>,
+    ) -> Result<Vec<ApiKeyFacetCount>, ProxyError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT TRIM(COALESCE(ak.registration_region, '')) AS value, COUNT(*) AS count",
+        );
+        builder.push(Self::api_key_metrics_from_clause());
+        Self::push_api_key_group_filters(&mut builder, groups);
+        Self::push_api_key_status_filters(&mut builder, statuses);
+        Self::push_api_key_registration_ip_filter(&mut builder, registration_ip);
+        builder.push(" AND TRIM(COALESCE(ak.registration_region, '')) != ''");
         builder.push(" GROUP BY value ORDER BY value ASC");
 
         let rows = builder.build().fetch_all(&self.pool).await?;
@@ -13384,16 +14303,24 @@ impl KeyStore {
         per_page: i64,
         groups: &[String],
         statuses: &[String],
+        registration_ip: Option<&str>,
+        regions: &[String],
     ) -> Result<PaginatedApiKeyMetrics, ProxyError> {
         let requested_page = page.max(1);
         let per_page = per_page.clamp(1, 100);
         let groups = Self::normalize_api_key_groups(groups);
         let statuses = Self::normalize_api_key_statuses(statuses);
+        let registration_ip = registration_ip
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let regions = Self::normalize_api_key_regions(regions);
 
         let mut count_builder = QueryBuilder::<Sqlite>::new("SELECT COUNT(*)");
         count_builder.push(Self::api_key_metrics_from_clause());
         Self::push_api_key_group_filters(&mut count_builder, &groups);
         Self::push_api_key_status_filters(&mut count_builder, &statuses);
+        Self::push_api_key_registration_ip_filter(&mut count_builder, registration_ip);
+        Self::push_api_key_region_filters(&mut count_builder, &regions);
         let total = count_builder
             .build_query_scalar::<i64>()
             .fetch_one(&self.pool)
@@ -13405,6 +14332,8 @@ impl KeyStore {
         let mut items_builder = QueryBuilder::<Sqlite>::new(Self::api_key_metrics_query(false));
         Self::push_api_key_group_filters(&mut items_builder, &groups);
         Self::push_api_key_status_filters(&mut items_builder, &statuses);
+        Self::push_api_key_registration_ip_filter(&mut items_builder, registration_ip);
+        Self::push_api_key_region_filters(&mut items_builder, &regions);
         items_builder.push(
             " ORDER BY CASE WHEN ak.status = 'active' THEN 0 ELSE 1 END ASC, COALESCE(ak.last_used_at, 0) DESC, ak.id ASC",
         );
@@ -13418,8 +14347,15 @@ impl KeyStore {
             .map(Self::map_api_key_metrics_row)
             .collect::<Result<Vec<_>, _>>()?;
 
-        let group_counts = self.fetch_api_key_group_facets(&statuses).await?;
-        let status_counts = self.fetch_api_key_status_facets(&groups).await?;
+        let group_counts = self
+            .fetch_api_key_group_facets(&statuses, registration_ip, &regions)
+            .await?;
+        let status_counts = self
+            .fetch_api_key_status_facets(&groups, registration_ip, &regions)
+            .await?;
+        let region_counts = self
+            .fetch_api_key_region_facets(&groups, &statuses, registration_ip)
+            .await?;
 
         Ok(PaginatedApiKeyMetrics {
             items,
@@ -13429,6 +14365,7 @@ impl KeyStore {
             facets: ApiKeyListFacets {
                 groups: group_counts,
                 statuses: status_counts,
+                regions: region_counts,
             },
         })
     }
@@ -13443,6 +14380,8 @@ impl KeyStore {
                 ak.id,
                 ak.status,
                 ak.group_name,
+                ak.registration_ip,
+                ak.registration_region,
                 ak.status_changed_at,
                 ak.last_used_at,
                 ak.deleted_at,
@@ -13485,6 +14424,8 @@ impl KeyStore {
             let id: String = row.try_get("id")?;
             let status: String = row.try_get("status")?;
             let group_name: Option<String> = row.try_get("group_name")?;
+            let registration_ip: Option<String> = row.try_get("registration_ip")?;
+            let registration_region: Option<String> = row.try_get("registration_region")?;
             let status_changed_at: Option<i64> = row.try_get("status_changed_at")?;
             let last_used_at: i64 = row.try_get("last_used_at")?;
             let deleted_at: Option<i64> = row.try_get("deleted_at")?;
@@ -13506,14 +14447,9 @@ impl KeyStore {
             Ok(ApiKeyMetrics {
                 id,
                 status,
-                group_name: group_name.and_then(|name| {
-                    let trimmed = name.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_owned())
-                    }
-                }),
+                group_name: normalize_optional_api_key_field(group_name),
+                registration_ip: normalize_optional_api_key_field(registration_ip),
+                registration_region: normalize_optional_api_key_field(registration_region),
                 status_changed_at: status_changed_at.and_then(normalize_timestamp),
                 last_used_at: normalize_timestamp(last_used_at),
                 deleted_at: deleted_at.and_then(normalize_timestamp),
@@ -14398,6 +15334,8 @@ pub struct ApiKeyMetrics {
     pub id: String,
     pub status: String,
     pub group_name: Option<String>,
+    pub registration_ip: Option<String>,
+    pub registration_region: Option<String>,
     pub status_changed_at: Option<i64>,
     pub last_used_at: Option<i64>,
     pub deleted_at: Option<i64>,
@@ -14421,6 +15359,7 @@ pub struct ApiKeyFacetCount {
 pub struct ApiKeyListFacets {
     pub groups: Vec<ApiKeyFacetCount>,
     pub statuses: Vec<ApiKeyFacetCount>,
+    pub regions: Vec<ApiKeyFacetCount>,
 }
 
 #[derive(Debug, Clone)]
@@ -16244,6 +17183,7 @@ mod tests {
         Json, Router,
         routing::{get, post},
     };
+    use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::sync::{Arc, OnceLock};
     use tokio::net::TcpListener;
@@ -16252,6 +17192,59 @@ mod tests {
         static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
         LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    async fn spawn_api_key_geo_mock_server() -> SocketAddr {
+        let app = Router::new().route(
+            "/geo",
+            post(|Json(ips): Json<Vec<String>>| async move {
+                let entries = ips
+                    .into_iter()
+                    .map(|ip| match ip.as_str() {
+                        "18.183.246.69" => serde_json::json!({
+                            "ip": ip,
+                            "country": "JP",
+                            "city": "Tokyo",
+                            "subdivision": "13"
+                        }),
+                        "1.1.1.1" => serde_json::json!({
+                            "ip": ip,
+                            "country": "HK",
+                            "city": null,
+                            "subdivision": null
+                        }),
+                        "1.0.0.1" => serde_json::json!({
+                            "ip": ip,
+                            "country": "HK",
+                            "city": null,
+                            "subdivision": null
+                        }),
+                        "8.8.8.8" => serde_json::json!({
+                            "ip": ip,
+                            "country": "US",
+                            "city": null,
+                            "subdivision": null
+                        }),
+                        _ => serde_json::json!({
+                            "ip": ip,
+                            "country": null,
+                            "city": null,
+                            "subdivision": null
+                        }),
+                    })
+                    .collect::<Vec<_>>();
+                Json(entries)
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
     }
 
     #[test]
@@ -16781,6 +17774,364 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         assert_eq!(
             inserted_count, 1,
             "follow-up insert must succeed even after previous tx failure"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn add_or_undelete_key_with_status_refreshes_existing_registration_metadata_only() {
+        let db_path = temp_db_path("api-key-upsert-refresh-registration");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let (key_id, created_status) = proxy
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                "tvly-existing",
+                Some("old"),
+                Some("8.8.8.8"),
+                Some("US"),
+            )
+            .await
+            .expect("existing key created");
+        assert_eq!(created_status, ApiKeyUpsertStatus::Created);
+
+        let (same_key_id, existed_status) = proxy
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                "tvly-existing",
+                Some("new"),
+                Some("8.8.4.4"),
+                Some("US Westfield (MA)"),
+            )
+            .await
+            .expect("existing key refreshed");
+        assert_eq!(same_key_id, key_id);
+        assert_eq!(existed_status, ApiKeyUpsertStatus::Existed);
+
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT group_name, registration_ip, registration_region FROM api_keys WHERE id = ?",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("fetch refreshed key");
+        assert_eq!(row.0.as_deref(), Some("old"));
+        assert_eq!(row.1.as_deref(), Some("8.8.4.4"));
+        assert_eq!(row.2.as_deref(), Some("US Westfield (MA)"));
+
+        proxy
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                "tvly-existing",
+                None,
+                Some("2606:4700:4700::1111"),
+                None,
+            )
+            .await
+            .expect("existing key refreshed to empty region");
+
+        let refreshed_row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT group_name, registration_ip, registration_region FROM api_keys WHERE id = ?",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("fetch refreshed key after region clear");
+        assert_eq!(refreshed_row.0.as_deref(), Some("old"));
+        assert_eq!(refreshed_row.1.as_deref(), Some("2606:4700:4700::1111"));
+        assert!(
+            refreshed_row.2.is_none(),
+            "region should clear when the new registration ip has no resolved region"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn select_proxy_affinity_for_registration_prefers_exact_ip_then_region() {
+        let db_path = temp_db_path("proxy-affinity-registration-selection");
+        let db_str = db_path.to_string_lossy().to_string();
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let geo_origin = format!("http://{geo_addr}/geo");
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        {
+            let mut manager = proxy.forward_proxy.lock().await;
+            manager.apply_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![
+                        "http://18.183.246.69:8080".to_string(),
+                        "http://1.1.1.1:8080".to_string(),
+                        "http://8.8.8.8:8080".to_string(),
+                    ],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                }
+                .normalized(),
+            );
+        }
+
+        let exact = proxy
+            .select_proxy_affinity_for_registration(
+                "subject:exact",
+                &geo_origin,
+                Some("18.183.246.69"),
+                Some("JP Tokyo (13)"),
+            )
+            .await
+            .expect("exact proxy affinity");
+        assert_eq!(
+            exact.primary_proxy_key.as_deref(),
+            Some("http://18.183.246.69:8080"),
+            "exact IP match should win before region matching"
+        );
+
+        let region = proxy
+            .select_proxy_affinity_for_registration(
+                "subject:region",
+                &geo_origin,
+                Some("103.232.214.107"),
+                Some("HK"),
+            )
+            .await
+            .expect("region proxy affinity");
+        assert_eq!(
+            region.primary_proxy_key.as_deref(),
+            Some("http://1.1.1.1:8080"),
+            "same-region proxy should win when no exact IP node exists"
+        );
+
+        let fallback = proxy
+            .select_proxy_affinity_for_registration(
+                "subject:fallback",
+                &geo_origin,
+                Some("103.232.214.107"),
+                Some("ZZ"),
+            )
+            .await
+            .expect("fallback proxy affinity");
+        assert!(
+            fallback.primary_proxy_key.is_some(),
+            "selection should still fall back to a selectable proxy node"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn add_or_undelete_key_with_registration_proxy_affinity_persists_and_refreshes() {
+        let db_path = temp_db_path("proxy-affinity-registration-persist");
+        let db_str = db_path.to_string_lossy().to_string();
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let geo_origin = format!("http://{geo_addr}/geo");
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        {
+            let mut manager = proxy.forward_proxy.lock().await;
+            manager.apply_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![
+                        "http://18.183.246.69:8080".to_string(),
+                        "http://1.1.1.1:8080".to_string(),
+                    ],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                }
+                .normalized(),
+            );
+        }
+
+        let (key_id, created_status) = proxy
+            .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity(
+                "tvly-affinity",
+                Some("alpha"),
+                Some("18.183.246.69"),
+                Some("JP Tokyo (13)"),
+                &geo_origin,
+            )
+            .await
+            .expect("key created with proxy affinity");
+        assert_eq!(created_status, ApiKeyUpsertStatus::Created);
+
+        let created_affinity: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT primary_proxy_key, secondary_proxy_key FROM forward_proxy_key_affinity WHERE key_id = ?",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("load created affinity");
+        assert_eq!(
+            created_affinity.0.as_deref(),
+            Some("http://18.183.246.69:8080")
+        );
+
+        let (same_key_id, existed_status) = proxy
+            .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity(
+                "tvly-affinity",
+                Some("beta"),
+                Some("1.1.1.1"),
+                Some("HK"),
+                &geo_origin,
+            )
+            .await
+            .expect("key refreshed with new proxy affinity");
+        assert_eq!(same_key_id, key_id);
+        assert_eq!(existed_status, ApiKeyUpsertStatus::Existed);
+
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT group_name, registration_ip, registration_region FROM api_keys WHERE id = ?",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("load refreshed key");
+        assert_eq!(row.0.as_deref(), Some("alpha"));
+        assert_eq!(row.1.as_deref(), Some("1.1.1.1"));
+        assert_eq!(row.2.as_deref(), Some("HK"));
+
+        let refreshed_affinity: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT primary_proxy_key, secondary_proxy_key FROM forward_proxy_key_affinity WHERE key_id = ?",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("load refreshed affinity");
+        assert_eq!(refreshed_affinity.0.as_deref(), Some("http://1.1.1.1:8080"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn add_or_undelete_key_with_registration_proxy_affinity_hint_keeps_validation_fallback() {
+        let db_path = temp_db_path("proxy-affinity-registration-hint");
+        let db_str = db_path.to_string_lossy().to_string();
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let geo_origin = format!("http://{geo_addr}/geo");
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        {
+            let mut manager = proxy.forward_proxy.lock().await;
+            manager.apply_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![
+                        "http://18.183.246.69:8080".to_string(),
+                        "http://1.1.1.1:8080".to_string(),
+                        "http://8.8.8.8:8080".to_string(),
+                    ],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                }
+                .normalized(),
+            );
+        }
+
+        let (key_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity_hint(
+                "tvly-hinted-fallback",
+                None,
+                Some("9.9.9.9"),
+                None,
+                &geo_origin,
+                Some("http://1.1.1.1:8080"),
+            )
+            .await
+            .expect("key created with hinted proxy affinity");
+
+        let created_affinity: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT primary_proxy_key, secondary_proxy_key FROM forward_proxy_key_affinity WHERE key_id = ?",
+        )
+        .bind(&key_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("load hinted affinity");
+        assert_eq!(
+            created_affinity.0.as_deref(),
+            Some("http://1.1.1.1:8080"),
+            "fallback imports should preserve the proxy chosen during validation"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn build_proxy_attempt_plan_prefers_same_region_candidates_before_other_regions() {
+        let db_path = temp_db_path("proxy-attempt-plan-region-order");
+        let db_str = db_path.to_string_lossy().to_string();
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let geo_origin = format!("http://{geo_addr}/geo");
+
+        let mut proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        proxy.api_key_geo_origin = geo_origin.clone();
+        {
+            let mut manager = proxy.forward_proxy.lock().await;
+            manager.apply_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![
+                        "http://18.183.246.69:8080".to_string(),
+                        "http://1.1.1.1:8080".to_string(),
+                        "http://1.0.0.1:8080".to_string(),
+                        "http://8.8.8.8:8080".to_string(),
+                    ],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: true,
+                }
+                .normalized(),
+            );
+        }
+
+        let (key_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group_and_registration_proxy_affinity(
+                "tvly-region-plan",
+                None,
+                Some("1.1.1.1"),
+                Some("HK"),
+                &geo_origin,
+            )
+            .await
+            .expect("key created with region-aware proxy affinity");
+        let plan = proxy
+            .build_proxy_attempt_plan(&key_id)
+            .await
+            .expect("build proxy attempt plan");
+        let plan_keys = plan.into_iter().map(|item| item.key).collect::<Vec<_>>();
+
+        assert_eq!(
+            plan_keys.first().map(String::as_str),
+            Some("http://1.1.1.1:8080")
+        );
+        let same_region_pos = plan_keys
+            .iter()
+            .position(|key| key == "http://1.0.0.1:8080")
+            .expect("same-region backup present in plan");
+        let other_region_positions = ["http://18.183.246.69:8080", "http://8.8.8.8:8080"]
+            .into_iter()
+            .filter_map(|key| plan_keys.iter().position(|item| item == key))
+            .collect::<Vec<_>>();
+        assert!(
+            other_region_positions
+                .iter()
+                .all(|position| same_region_pos < *position),
+            "same-region backup should be attempted before other-region candidates"
+        );
+        assert!(
+            !plan_keys
+                .iter()
+                .any(|key| key == forward_proxy::FORWARD_PROXY_DIRECT_KEY),
+            "direct should only be considered after all proxy candidates fail"
         );
 
         let _ = std::fs::remove_file(db_path);
