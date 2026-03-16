@@ -216,6 +216,7 @@ interface AdminTranslationsShape {
     currentSnapshot: string
     todayShare: string
     monthToDate: string
+    monthAdded: string
     monthShare: string
     trendsTitle: string
     trendsDescription: string
@@ -368,8 +369,10 @@ interface AdminTranslationsShape {
     progress: {
       titleValidate: string
       titleSave: string
+      titleRevalidate: string
       badgeValidate: string
       badgeSave: string
+      badgeRevalidate: string
       buttonValidatingSubscription: string
       buttonValidatingManual: string
       buttonAddingSubscription: string
@@ -748,10 +751,14 @@ interface AdminTranslationsShape {
         success: string
         errors: string
         quota: string
+        newKeys: string
+        newQuarantines: string
         keys: string
         quarantined: string
         exhausted: string
         remaining: string
+        proxyAvailable: string
+        proxyTotal: string
       }
       subtitles: {
         keysAll: string
@@ -1361,6 +1368,7 @@ export const translations: Record<Language, TranslationShape> = {
         currentSnapshot: 'Current snapshot',
         todayShare: 'Today share',
         monthToDate: 'Month to date',
+        monthAdded: 'Added this month',
         monthShare: 'Month share',
         trendsTitle: 'Traffic Trends',
         trendsDescription: 'Recent request and error changes from latest logs.',
@@ -1419,8 +1427,8 @@ export const translations: Record<Language, TranslationShape> = {
           refresh: 'Refresh stats',
           save: 'Save settings',
           saving: 'Saving…',
-          validateSubscriptions: 'Validate subscriptions',
-          validatingSubscriptions: 'Validating subscriptions…',
+          validateSubscriptions: 'Revalidate all',
+          validatingSubscriptions: 'Revalidating all…',
           validateManual: 'Validate manual proxies',
           validatingManual: 'Validating manual proxies…',
         },
@@ -1513,8 +1521,10 @@ export const translations: Record<Language, TranslationShape> = {
         progress: {
           titleValidate: 'Validation progress',
           titleSave: 'Add progress',
+          titleRevalidate: 'Revalidation progress',
           badgeValidate: 'Validate',
           badgeSave: 'Add',
+          badgeRevalidate: 'Revalidate',
           buttonValidatingSubscription: 'Validating subscription…',
           buttonValidatingManual: 'Validating nodes…',
           buttonAddingSubscription: 'Adding subscription…',
@@ -1897,10 +1907,14 @@ export const translations: Record<Language, TranslationShape> = {
           success: 'Successful',
           errors: 'Errors',
           quota: 'Quota Exhausted',
+          newKeys: 'New Keys',
+          newQuarantines: 'New Quarantines',
           keys: 'Active Keys',
           quarantined: 'Quarantined',
           exhausted: 'Exhausted',
           remaining: 'Remaining',
+          proxyAvailable: 'Available Proxy Nodes',
+          proxyTotal: 'Proxy Nodes Total',
         },
         subtitles: {
           keysAll: 'All keys available',
@@ -2493,6 +2507,7 @@ export const translations: Record<Language, TranslationShape> = {
         currentSnapshot: '当前快照',
         todayShare: '今日占比',
         monthToDate: '本月累计',
+        monthAdded: '本月新增',
         monthShare: '本月占比',
         trendsTitle: '流量趋势',
         trendsDescription: '基于最新请求日志的请求量与错误变化。',
@@ -2551,8 +2566,8 @@ export const translations: Record<Language, TranslationShape> = {
           refresh: '刷新统计',
           save: '保存设置',
           saving: '保存中…',
-          validateSubscriptions: '验证订阅',
-          validatingSubscriptions: '正在验证订阅…',
+          validateSubscriptions: '全量验证',
+          validatingSubscriptions: '正在全量验证…',
           validateManual: '验证手工节点',
           validatingManual: '正在验证手工节点…',
         },
@@ -2645,8 +2660,10 @@ export const translations: Record<Language, TranslationShape> = {
         progress: {
           titleValidate: '验证进度',
           titleSave: '添加进度',
+          titleRevalidate: '全量验证进度',
           badgeValidate: '验证',
           badgeSave: '添加',
+          badgeRevalidate: '全量验证',
           buttonValidatingSubscription: '正在验证订阅…',
           buttonValidatingManual: '正在验证节点…',
           buttonAddingSubscription: '正在添加订阅…',
@@ -3029,10 +3046,14 @@ export const translations: Record<Language, TranslationShape> = {
           success: '成功',
           errors: '错误',
           quota: '额度耗尽',
+          newKeys: '新增密钥',
+          newQuarantines: '新增隔离密钥',
           keys: '活跃密钥',
           quarantined: '隔离中',
           exhausted: '已耗尽',
           remaining: '剩余可用',
+          proxyAvailable: '可用代理节点',
+          proxyTotal: '代理节点总数',
         },
         subtitles: {
           keysAll: '全部可用',

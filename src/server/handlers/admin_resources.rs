@@ -540,6 +540,8 @@ struct ValidateKeyResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     assigned_proxy_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_proxy_match_kind: Option<tavily_hikari::AssignedProxyMatchKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     quota_limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota_remaining: Option<i64>,
@@ -963,6 +965,105 @@ async fn post_forward_proxy_candidate_validation(
     Ok(Json(build_forward_proxy_validation_view(validation)).into_response())
 }
 
+async fn post_forward_proxy_revalidate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+
+    if request_accepts_event_stream(&headers) {
+        let state = state.clone();
+        let stream = stream! {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<tavily_hikari::ForwardProxyProgressEvent>();
+            tokio::spawn(async move {
+                let progress_tx = tx.clone();
+                let progress = move |event| {
+                    let _ = progress_tx.send(event);
+                };
+
+                match state
+                    .proxy
+                    .revalidate_forward_proxy_with_progress(Some(&progress))
+                    .await
+                {
+                    Ok(response) => {
+                        if let Ok(payload) = serde_json::to_value(&response) {
+                            let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::complete(
+                                "revalidate",
+                                payload,
+                            ));
+                        } else {
+                            let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::error(
+                                "revalidate",
+                                "failed to encode forward proxy settings response",
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("revalidate forward proxy settings error: {err}");
+                        let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::error(
+                            "revalidate",
+                            err.to_string(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ));
+                    }
+                }
+            });
+
+            while let Some(event) = rx.recv().await {
+                match serde_json::to_string(&event) {
+                    Ok(json) => yield Ok::<Event, axum::http::Error>(Event::default().data(json)),
+                    Err(err) => {
+                        yield Ok::<Event, axum::http::Error>(Event::default().data(
+                            serde_json::json!({
+                                "type": "error",
+                                "operation": "revalidate",
+                                "message": format!("failed to encode progress event: {err}"),
+                            })
+                            .to_string(),
+                        ));
+                        break;
+                    }
+                }
+                if matches!(
+                    event,
+                    tavily_hikari::ForwardProxyProgressEvent::Complete { .. }
+                        | tavily_hikari::ForwardProxyProgressEvent::Error { .. }
+                ) {
+                    break;
+                }
+            }
+        };
+
+        return Ok(
+            Sse::new(stream)
+                .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text(""))
+                .into_response(),
+        );
+    }
+
+    state
+        .proxy
+        .revalidate_forward_proxy_with_progress(None)
+        .await
+        .map(|response| Json(response).into_response())
+        .map_err(|err| {
+            eprintln!("revalidate forward proxy settings error: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        })
+}
+
 async fn get_forward_proxy_live_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -977,6 +1078,36 @@ async fn get_forward_proxy_live_stats(
         .map(Json)
         .map_err(|err| {
             eprintln!("get forward proxy live stats error: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForwardProxyDashboardSummaryView {
+    available_nodes: i64,
+    total_nodes: i64,
+}
+
+async fn get_forward_proxy_dashboard_summary(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<ForwardProxyDashboardSummaryView>, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    state
+        .proxy
+        .get_forward_proxy_dashboard_summary()
+        .await
+        .map(|summary| {
+            Json(ForwardProxyDashboardSummaryView {
+                available_nodes: summary.available_nodes,
+                total_nodes: summary.total_nodes,
+            })
+        })
+        .map_err(|err| {
+            eprintln!("get forward proxy dashboard summary error: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         })
 }
@@ -1030,6 +1161,7 @@ async fn validate_single_key(
         Ok((limit, remaining, assigned_proxy)) => {
             let assigned_proxy_key = assigned_proxy.as_ref().map(|item| item.key.clone());
             let assigned_proxy_label = assigned_proxy.as_ref().map(|item| item.label.clone());
+            let assigned_proxy_match_kind = assigned_proxy.map(|item| item.match_kind);
             if remaining <= 0 {
                 (
                     ValidateKeyResult {
@@ -1039,6 +1171,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key,
                         assigned_proxy_label,
+                        assigned_proxy_match_kind,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -1054,6 +1187,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key,
                         assigned_proxy_label,
+                        assigned_proxy_match_kind,
                         quota_limit: Some(limit),
                         quota_remaining: Some(remaining),
                         detail: None,
@@ -1074,6 +1208,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1089,6 +1224,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1104,6 +1240,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1119,6 +1256,7 @@ async fn validate_single_key(
                         registration_region,
                         assigned_proxy_key: None,
                         assigned_proxy_label: None,
+                        assigned_proxy_match_kind: None,
                         quota_limit: None,
                         quota_remaining: None,
                         detail: Some(detail),
@@ -1135,6 +1273,7 @@ async fn validate_single_key(
                 registration_region,
                 assigned_proxy_key: None,
                 assigned_proxy_label: None,
+                assigned_proxy_match_kind: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(
@@ -1152,6 +1291,7 @@ async fn validate_single_key(
                 registration_region,
                 assigned_proxy_key: None,
                 assigned_proxy_label: None,
+                assigned_proxy_match_kind: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: Some(truncate_detail(err.to_string(), 1400)),
@@ -1236,6 +1376,7 @@ async fn post_validate_api_keys(
                 registration_region,
                 assigned_proxy_key: None,
                 assigned_proxy_label: None,
+                assigned_proxy_match_kind: None,
                 quota_limit: None,
                 quota_remaining: None,
                 detail: None,
@@ -1251,6 +1392,7 @@ async fn post_validate_api_keys(
             registration_region: registration_region.clone(),
             assigned_proxy_key: None,
             assigned_proxy_label: None,
+            assigned_proxy_match_kind: None,
             quota_limit: None,
             quota_remaining: None,
             detail: None,

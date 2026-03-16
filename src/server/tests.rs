@@ -2979,6 +2979,7 @@ mod tests {
         let app = Router::new()
             .route("/api/admin/login", post(post_admin_login))
             .route("/api/admin/logout", post(post_admin_logout))
+            .route("/api/events", get(sse_dashboard))
             .route("/api/summary", get(fetch_summary))
             .route("/api/summary/windows", get(fetch_summary_windows))
             .route("/api/keys", get(list_keys))
@@ -3135,6 +3136,21 @@ mod tests {
         usage_base: String,
         dev_open_admin: bool,
     ) -> SocketAddr {
+        spawn_admin_forward_proxy_server_with_geo_origin(
+            proxy,
+            usage_base,
+            dev_open_admin,
+            "https://api.country.is".to_string(),
+        )
+        .await
+    }
+
+    async fn spawn_admin_forward_proxy_server_with_geo_origin(
+        proxy: TavilyProxy,
+        usage_base: String,
+        dev_open_admin: bool,
+        api_key_ip_geo_origin: String,
+    ) -> SocketAddr {
         let static_dir = temp_static_dir("admin-forward-proxy");
         let state = Arc::new(AppState {
             proxy,
@@ -3145,7 +3161,7 @@ mod tests {
             linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
             dev_open_admin,
             usage_base,
-            api_key_ip_geo_origin: "https://api.country.is".to_string(),
+            api_key_ip_geo_origin,
         });
 
         let app = Router::new()
@@ -3154,6 +3170,14 @@ mod tests {
             .route(
                 "/api/settings/forward-proxy/validate",
                 post(post_forward_proxy_candidate_validation),
+            )
+            .route(
+                "/api/settings/forward-proxy/revalidate",
+                post(post_forward_proxy_revalidate),
+            )
+            .route(
+                "/api/stats/forward-proxy/summary",
+                get(get_forward_proxy_dashboard_summary),
             )
             .route("/api/stats/forward-proxy", get(get_forward_proxy_live_stats))
             .with_state(state);
@@ -3269,6 +3293,35 @@ mod tests {
             get(move || {
                 let state = state.clone();
                 async move {
+                    let (status, body) = {
+                        let guard = state.lock().expect("subscription state lock");
+                        (guard.0, guard.1.clone())
+                    };
+                    (status, body)
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
+    async fn spawn_counted_forward_proxy_subscription_server(
+        state: Arc<Mutex<(StatusCode, String)>>,
+        hits: Arc<AtomicUsize>,
+    ) -> SocketAddr {
+        let app = Router::new().route(
+            "/subscription",
+            get(move || {
+                let state = state.clone();
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
                     let (status, body) = {
                         let guard = state.lock().expect("subscription state lock");
                         (guard.0, guard.1.clone())
@@ -3650,12 +3703,24 @@ mod tests {
             Some("Direct")
         );
         assert_eq!(
+            results[0]
+                .get("assigned_proxy_match_kind")
+                .and_then(|v| v.as_str()),
+            Some("other")
+        );
+        assert_eq!(
             results[1].get("registration_ip").and_then(|v| v.as_str()),
             Some("1.1.1.1")
         );
         assert_eq!(
             results[1].get("registration_region").and_then(|v| v.as_str()),
             Some("US Westfield (MA)")
+        );
+        assert_eq!(
+            results[1]
+                .get("assigned_proxy_match_kind")
+                .and_then(|v| v.as_str()),
+            Some("other")
         );
         assert_eq!(
             results[2].get("registration_region").and_then(|v| v.as_str()),
@@ -4193,6 +4258,256 @@ mod tests {
         .expect("private key metadata");
         assert!(private_row.0.is_none(), "private ip should not be stored");
         assert!(private_row.1.is_none(), "private region should stay empty");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_batch_structured_items_persist_assigned_proxy_hint_without_registration_metadata(
+    ) {
+        let db_path = temp_db_path("keys-batch-assigned-proxy-hint");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        proxy
+            .update_forward_proxy_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![
+                        "http://18.183.246.69:8080".to_string(),
+                        "http://1.1.1.1:8080".to_string(),
+                    ],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                },
+                false,
+            )
+            .await
+            .expect("proxy settings updated");
+
+        let forward_auth = ForwardAuthConfig::new(
+            Some(HeaderName::from_static("x-forward-user")),
+            Some("admin".to_string()),
+            None,
+            None,
+        );
+        let addr = spawn_keys_admin_server(proxy, forward_auth, false).await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/keys/batch", addr);
+        let resp = client
+            .post(url)
+            .header("x-forward-user", "admin")
+            .json(&serde_json::json!({
+                "items": [
+                    {
+                        "api_key": "tvly-assigned-proxy-hint",
+                        "assigned_proxy_key": "http://1.1.1.1:8080"
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT api_keys.registration_ip,
+                   api_keys.registration_region,
+                   forward_proxy_key_affinity.primary_proxy_key
+              FROM api_keys
+              LEFT JOIN forward_proxy_key_affinity
+                ON forward_proxy_key_affinity.key_id = api_keys.id
+             WHERE api_keys.api_key = ?
+            "#,
+        )
+        .bind("tvly-assigned-proxy-hint")
+        .fetch_one(&pool)
+        .await
+        .expect("hint-only key exists");
+        assert!(row.0.is_none(), "hint-only batch import should not store registration_ip");
+        assert!(
+            row.1.is_none(),
+            "hint-only batch import should not fabricate registration_region"
+        );
+        assert_eq!(row.2.as_deref(), Some("http://1.1.1.1:8080"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_batch_structured_items_ignore_stale_assigned_proxy_hint_without_registration_metadata(
+    ) {
+        let db_path = temp_db_path("keys-batch-stale-assigned-proxy-hint");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        proxy
+            .update_forward_proxy_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![
+                        "http://18.183.246.69:8080".to_string(),
+                        "http://1.1.1.1:8080".to_string(),
+                    ],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                },
+                false,
+            )
+            .await
+            .expect("proxy settings updated");
+
+        let forward_auth = ForwardAuthConfig::new(
+            Some(HeaderName::from_static("x-forward-user")),
+            Some("admin".to_string()),
+            None,
+            None,
+        );
+        let addr = spawn_keys_admin_server(proxy, forward_auth, false).await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/keys/batch", addr);
+        let resp = client
+            .post(url)
+            .header("x-forward-user", "admin")
+            .json(&serde_json::json!({
+                "items": [
+                    {
+                        "api_key": "tvly-stale-assigned-proxy-hint",
+                        "assigned_proxy_key": "http://9.9.9.9:8080"
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let affinity_row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT forward_proxy_key_affinity.primary_proxy_key,
+                   forward_proxy_key_affinity.secondary_proxy_key
+              FROM api_keys
+              LEFT JOIN forward_proxy_key_affinity
+                ON forward_proxy_key_affinity.key_id = api_keys.id
+             WHERE api_keys.api_key = ?
+            "#,
+        )
+        .bind("tvly-stale-assigned-proxy-hint")
+        .fetch_optional(&pool)
+        .await
+        .expect("stale hint-only key exists");
+        assert!(
+            affinity_row
+                .as_ref()
+                .is_some_and(|row| row.0.is_none() && row.1.is_none()),
+            "stale assigned_proxy_key should not bind a fallback affinity row"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_batch_structured_items_ignore_direct_assigned_proxy_hint_without_registration_metadata(
+    ) {
+        let db_path = temp_db_path("keys-batch-direct-assigned-proxy-hint");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let forward_auth = ForwardAuthConfig::new(
+            Some(HeaderName::from_static("x-forward-user")),
+            Some("admin".to_string()),
+            None,
+            None,
+        );
+        let addr = spawn_keys_admin_server(proxy, forward_auth, false).await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/keys/batch", addr);
+        let resp = client
+            .post(url)
+            .header("x-forward-user", "admin")
+            .json(&serde_json::json!({
+                "items": [
+                    {
+                        "api_key": "tvly-direct-assigned-proxy-hint",
+                        "assigned_proxy_key": "__direct__"
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let affinity_row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT forward_proxy_key_affinity.primary_proxy_key,
+                   forward_proxy_key_affinity.secondary_proxy_key
+              FROM api_keys
+              LEFT JOIN forward_proxy_key_affinity
+                ON forward_proxy_key_affinity.key_id = api_keys.id
+             WHERE api_keys.api_key = ?
+            "#,
+        )
+        .bind("tvly-direct-assigned-proxy-hint")
+        .fetch_optional(&pool)
+        .await
+        .expect("direct hint-only key exists");
+        assert!(
+            affinity_row
+                .as_ref()
+                .is_some_and(|row| row.0.is_none() && row.1.is_none()),
+            "direct validation hints should not become durable affinity rows"
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -6183,6 +6498,11 @@ mod tests {
         let today_start = local_day_start(now);
         let yesterday_start = local_previous_day_start(now);
         let month_start = local_month_start(now);
+        let current_utc_ts = Local::now().with_timezone(&Utc).timestamp();
+        let today_window_anchor = (current_utc_ts - 5).max(today_start + 30);
+        let today_log_start = (today_window_anchor - 9).max(today_start);
+        let yesterday_window_anchor = today_window_anchor - 86_400;
+        let yesterday_log_start = (yesterday_window_anchor - 3).max(yesterday_start);
 
         let options = SqliteConnectOptions::new()
             .filename(&db_str)
@@ -6195,6 +6515,27 @@ mod tests {
             .connect_with(options)
             .await
             .expect("open db pool");
+
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (
+                id,
+                api_key,
+                status,
+                created_at,
+                status_changed_at,
+                deleted_at
+            ) VALUES (?, ?, 'disabled', ?, ?, ?)
+            "#,
+        )
+        .bind("summary-window-deleted")
+        .bind("tvly-summary-window-deleted")
+        .bind(today_start + 120)
+        .bind(today_start + 120)
+        .bind(today_start + 180)
+        .execute(&pool)
+        .await
+        .expect("insert deleted key created this month");
 
         sqlx::query(
             r#"
@@ -6244,7 +6585,7 @@ mod tests {
                 "#,
             )
             .bind(&key_id)
-            .bind(today_start + 60 + offset)
+            .bind(today_log_start + offset)
             .execute(&pool)
             .await
             .expect("insert today success log");
@@ -6276,20 +6617,34 @@ mod tests {
             "#,
         )
         .bind(&key_id)
-        .bind(today_start + 3600)
+        .bind(today_window_anchor - 1)
         .bind(&key_id)
-        .bind(today_start + 7200)
+        .bind(today_window_anchor)
         .bind(&key_id)
-        .bind(yesterday_start + 60)
+        .bind(yesterday_log_start)
         .bind(&key_id)
-        .bind(yesterday_start + 61)
+        .bind(yesterday_log_start + 1)
         .bind(&key_id)
-        .bind(yesterday_start + 62)
+        .bind(yesterday_log_start + 2)
         .bind(&key_id)
-        .bind(yesterday_start + 3600)
+        .bind(yesterday_window_anchor)
         .execute(&pool)
         .await
         .expect("insert summary window logs");
+
+        sqlx::query(
+            r#"
+            INSERT INTO api_key_quarantines (
+                id, key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at
+            ) VALUES (?, ?, 'usage', 'quota_exhausted', 'quota exhausted', 'month quarantine', ?, NULL)
+            "#,
+        )
+        .bind("summary-window-quarantine")
+        .bind(&key_id)
+        .bind(today_start + 30)
+        .execute(&pool)
+        .await
+        .expect("insert summary window quarantine");
 
         let admin_password = "summary-window-admin-password";
         let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
@@ -6330,6 +6685,354 @@ mod tests {
         assert_eq!(
             body.pointer("/month/total_requests").and_then(|v| v.as_i64()),
             Some(month_expected)
+        );
+        assert_eq!(
+            body.pointer("/month/new_keys").and_then(|v| v.as_i64()),
+            Some(2)
+        );
+        assert_eq!(
+            body.pointer("/month/new_quarantines")
+                .and_then(|v| v.as_i64()),
+            Some(1)
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_schema_upgrade_backfills_created_at_best_effort() {
+        let db_path = temp_db_path("api-keys-created-at-upgrade");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE api_keys (
+                id TEXT PRIMARY KEY,
+                api_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'active',
+                status_changed_at INTEGER,
+                last_used_at INTEGER NOT NULL DEFAULT 0,
+                quota_limit INTEGER,
+                quota_remaining INTEGER,
+                quota_synced_at INTEGER,
+                deleted_at INTEGER
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy api_keys");
+
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (
+                id, api_key, status, status_changed_at, last_used_at, quota_limit, quota_remaining, quota_synced_at, deleted_at
+            ) VALUES (?, ?, 'active', ?, ?, NULL, NULL, ?, NULL)
+            "#,
+        )
+        .bind("k123")
+        .bind("tvly-created-at-legacy")
+        .bind(360_i64)
+        .bind(420_i64)
+        .bind(540_i64)
+        .execute(&pool)
+        .await
+        .expect("insert legacy api key");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_id TEXT NOT NULL,
+                auth_token_id TEXT,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                query TEXT,
+                status_code INTEGER,
+                tavily_status_code INTEGER,
+                error_message TEXT,
+                result_status TEXT NOT NULL DEFAULT 'unknown',
+                request_body BLOB,
+                response_body BLOB,
+                forwarded_headers TEXT,
+                dropped_headers TEXT,
+                created_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy request_logs");
+
+        sqlx::query(
+            r#"
+            INSERT INTO request_logs (
+                api_key_id, auth_token_id, method, path, query, status_code, tavily_status_code,
+                error_message, result_status, request_body, response_body, forwarded_headers,
+                dropped_headers, created_at
+            ) VALUES (?, NULL, 'POST', '/search', NULL, 200, 200, NULL, 'success', NULL, NULL, '', '', ?)
+            "#,
+        )
+        .bind("k123")
+        .bind(180_i64)
+        .execute(&pool)
+        .await
+        .expect("insert legacy request log");
+        drop(pool);
+
+        let _proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-created-at-upgrade".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("upgrade proxy");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let upgraded_pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open upgraded db pool");
+
+        let created_at = sqlx::query_scalar::<_, i64>(
+            "SELECT created_at FROM api_keys WHERE id = ? LIMIT 1",
+        )
+        .bind("k123")
+        .fetch_one(&upgraded_pool)
+        .await
+        .expect("read created_at");
+
+        assert_eq!(created_at, 180);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_dashboard_sse_snapshot_includes_overview_segments() {
+        let db_path = temp_db_path("admin-dashboard-snapshot-overview");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-admin-dashboard-overview".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let admin_password = "admin-dashboard-overview-password";
+        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build client");
+
+        let login_resp = client
+            .post(format!("http://{}/api/admin/login", admin_addr))
+            .json(&serde_json::json!({ "password": admin_password }))
+            .send()
+            .await
+            .expect("admin login");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let admin_cookie = find_cookie_pair(login_resp.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+            .expect("admin session cookie");
+
+        let mut events_resp = client
+            .get(format!("http://{}/api/events", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .send()
+            .await
+            .expect("admin events request");
+        assert_eq!(events_resp.status(), reqwest::StatusCode::OK);
+
+        let mut first_text = String::new();
+        while !first_text.contains("\n\n") {
+            let chunk = events_resp
+                .chunk()
+                .await
+                .expect("read event chunk")
+                .expect("snapshot chunk exists");
+            first_text.push_str(std::str::from_utf8(&chunk).expect("snapshot chunk utf8"));
+        }
+
+        let snapshot_event = first_text
+            .split("\n\n")
+            .find(|chunk| chunk.contains("event: snapshot"))
+            .expect("snapshot event");
+        let snapshot_line = snapshot_event
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("snapshot data line");
+        let snapshot_json: serde_json::Value =
+            serde_json::from_str(snapshot_line).expect("snapshot payload json");
+
+        assert!(snapshot_json.get("summary").is_some(), "summary should exist");
+        assert!(
+            snapshot_json.get("summaryWindows").is_some(),
+            "summaryWindows should exist"
+        );
+        assert!(snapshot_json.get("siteStatus").is_some(), "siteStatus should exist");
+        assert!(
+            snapshot_json.get("forwardProxy").is_some(),
+            "forwardProxy should exist"
+        );
+        assert_eq!(
+            snapshot_json
+                .pointer("/summaryWindows/month/new_keys")
+                .and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot_json
+                .pointer("/siteStatus/totalProxyNodes")
+                .and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot_json
+                .pointer("/forwardProxy/availableNodes")
+                .and_then(|value| value.as_i64()),
+            Some(1)
+        );
+
+        drop(events_resp);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_keys_created_at_backfill_only_runs_once() {
+        let db_path = temp_db_path("api-keys-created-at-backfill-once");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE api_keys (
+                id TEXT PRIMARY KEY,
+                api_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'active',
+                status_changed_at INTEGER,
+                last_used_at INTEGER NOT NULL DEFAULT 0,
+                quota_limit INTEGER,
+                quota_remaining INTEGER,
+                quota_synced_at INTEGER,
+                deleted_at INTEGER
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy api_keys");
+
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (
+                id, api_key, status, status_changed_at, last_used_at, quota_limit, quota_remaining, quota_synced_at, deleted_at
+            ) VALUES (?, ?, 'active', NULL, 0, NULL, NULL, NULL, NULL)
+            "#,
+        )
+        .bind("k-once")
+        .bind("tvly-created-at-once")
+        .execute(&pool)
+        .await
+        .expect("insert legacy api key");
+        drop(pool);
+
+        let _proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-created-at-once-upgrade".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("first upgrade");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let upgraded_pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open upgraded db pool");
+
+        sqlx::query(
+            r#"
+            INSERT INTO request_logs (
+                api_key_id, auth_token_id, method, path, query, status_code, tavily_status_code,
+                error_message, result_status, request_body, response_body, forwarded_headers,
+                dropped_headers, created_at
+            ) VALUES (?, NULL, 'POST', '/search', NULL, 200, 200, NULL, 'success', NULL, NULL, '', '', ?)
+            "#,
+        )
+        .bind("k-once")
+        .bind(1_234_i64)
+        .execute(&upgraded_pool)
+        .await
+        .expect("insert late request log");
+        drop(upgraded_pool);
+
+        let _proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-created-at-once-second".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("second upgrade");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let verify_pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open verify db pool");
+
+        let created_at = sqlx::query_scalar::<_, i64>(
+            "SELECT created_at FROM api_keys WHERE id = ? LIMIT 1",
+        )
+        .bind("k-once")
+        .fetch_one(&verify_pool)
+        .await
+        .expect("read created_at");
+
+        assert_eq!(
+            created_at, 0,
+            "keys without evidence during the one-time migration must not be retroactively reclassified on later restarts"
         );
 
         let _ = std::fs::remove_file(db_path);
@@ -6402,11 +7105,163 @@ mod tests {
             .await
             .expect("compute signatures");
         let sig = sig.expect("summary signature");
-        assert_eq!(sig.4, 1);
-        assert_eq!(sig.5, 0);
-        assert_eq!(sig.6, 1);
+        assert_eq!(sig.summary.4, 1);
+        assert_eq!(sig.summary.5, 0);
+        assert_eq!(sig.summary.6, 1);
         assert!(latest_id.is_none());
 
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_dashboard_sse_snapshot_refreshes_when_quota_totals_change() {
+        let db_path = temp_db_path("admin-dashboard-snapshot-quota-change");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-admin-dashboard-quota".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let key_id = proxy
+            .list_api_key_metrics()
+            .await
+            .expect("list api key metrics")
+            .into_iter()
+            .next()
+            .expect("seeded key exists")
+            .id;
+
+        let admin_password = "admin-dashboard-quota-password";
+        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build client");
+
+        let login_resp = client
+            .post(format!("http://{}/api/admin/login", admin_addr))
+            .json(&serde_json::json!({ "password": admin_password }))
+            .send()
+            .await
+            .expect("admin login");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let admin_cookie = find_cookie_pair(login_resp.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+            .expect("admin session cookie");
+
+        let mut events_resp = client
+            .get(format!("http://{}/api/events", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .send()
+            .await
+            .expect("admin events request");
+        assert_eq!(events_resp.status(), reqwest::StatusCode::OK);
+
+        let mut first_text = String::new();
+        while !first_text.contains("\n\n") {
+            let chunk = events_resp
+                .chunk()
+                .await
+                .expect("read initial event chunk")
+                .expect("initial snapshot chunk exists");
+            first_text.push_str(std::str::from_utf8(&chunk).expect("initial snapshot chunk utf8"));
+        }
+
+        let initial_snapshot = first_text
+            .split("\n\n")
+            .find(|chunk| chunk.contains("event: snapshot"))
+            .expect("initial snapshot event");
+        let initial_data = initial_snapshot
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("initial snapshot data");
+        let initial_json: serde_json::Value =
+            serde_json::from_str(initial_data).expect("initial snapshot payload json");
+        assert_eq!(
+            initial_json
+                .pointer("/siteStatus/remainingQuota")
+                .and_then(|value| value.as_i64()),
+            Some(0)
+        );
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        sqlx::query(
+            "UPDATE api_keys SET quota_limit = ?, quota_remaining = ?, quota_synced_at = ? WHERE id = ?",
+        )
+        .bind(2_000_i64)
+        .bind(1_234_i64)
+        .bind(Utc::now().timestamp())
+        .bind(&key_id)
+        .execute(&pool)
+        .await
+        .expect("update quota totals");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let mut buffer = String::new();
+        let mut refreshed_snapshot: Option<serde_json::Value> = None;
+        while tokio::time::Instant::now() < deadline {
+            let chunk = tokio::time::timeout(Duration::from_secs(3), events_resp.chunk())
+                .await
+                .expect("await refreshed event chunk in time")
+                .expect("read refreshed event chunk")
+                .expect("refreshed event chunk exists");
+            buffer.push_str(std::str::from_utf8(&chunk).expect("refreshed event chunk utf8"));
+            while let Some((event_chunk, rest)) = buffer.split_once("\n\n") {
+                let event_chunk = event_chunk.to_string();
+                buffer = rest.to_string();
+                if !event_chunk.contains("event: snapshot") {
+                    continue;
+                }
+                let Some(data) = event_chunk
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                else {
+                    continue;
+                };
+                let payload: serde_json::Value =
+                    serde_json::from_str(data).expect("refreshed snapshot payload json");
+                if payload
+                    .pointer("/siteStatus/remainingQuota")
+                    .and_then(|value| value.as_i64())
+                    == Some(1_234)
+                {
+                    refreshed_snapshot = Some(payload);
+                    break;
+                }
+            }
+            if refreshed_snapshot.is_some() {
+                break;
+            }
+        }
+
+        let refreshed_snapshot = refreshed_snapshot.expect("quota snapshot refresh");
+        assert_eq!(
+            refreshed_snapshot
+                .pointer("/siteStatus/remainingQuota")
+                .and_then(|value| value.as_i64()),
+            Some(1_234)
+        );
+        assert_eq!(
+            refreshed_snapshot
+                .pointer("/siteStatus/totalQuotaLimit")
+                .and_then(|value| value.as_i64()),
+            Some(2_000)
+        );
+
+        drop(events_resp);
         let _ = std::fs::remove_file(db_path);
     }
 
@@ -12628,6 +13483,102 @@ mod tests {
             "stats should include at least one node",
         );
 
+        let summary = client
+            .get(format!("http://{addr}/api/stats/forward-proxy/summary"))
+            .send()
+            .await
+            .expect("get dashboard summary");
+        assert_eq!(summary.status(), StatusCode::OK);
+        let summary_body = summary
+            .json::<serde_json::Value>()
+            .await
+            .expect("decode dashboard summary");
+        assert!(
+            summary_body["totalNodes"].as_i64().is_some_and(|value| value >= 1),
+            "dashboard summary should expose total node count",
+        );
+        assert!(
+            summary_body["availableNodes"]
+                .as_i64()
+                .is_some_and(|value| value >= 0),
+            "dashboard summary should expose available node count",
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_forward_proxy_settings_and_stats_expose_persisted_geo_metadata() {
+        let db_path = temp_db_path("admin-forward-proxy-geo-metadata");
+        let db_str = db_path.to_string_lossy().to_string();
+        let upstream_addr = spawn_forward_proxy_probe_upstream().await;
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let fake_proxy_addr = spawn_fake_forward_proxy_with_body(
+            StatusCode::OK,
+            "ip=1.1.1.1\nloc=US\ncolo=LAX\n".to_string(),
+        )
+        .await;
+        let _geo_origin_guard =
+            EnvVarGuard::set("API_KEY_IP_GEO_ORIGIN", &format!("http://{geo_addr}/geo"));
+        let upstream = format!("http://{}/mcp", upstream_addr);
+        let usage_base = format!("http://{}", upstream_addr);
+        let proxy = TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+            .await
+            .expect("create proxy");
+        let addr = spawn_admin_forward_proxy_server_with_geo_origin(
+            proxy,
+            usage_base,
+            true,
+            "https://api.country.is".to_string(),
+        )
+        .await;
+
+        let client = Client::new();
+        let updated = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&serde_json::json!({
+                "proxyUrls": [format!("http://{}", fake_proxy_addr)],
+                "subscriptionUrls": [],
+                "subscriptionUpdateIntervalSecs": 3600,
+                "insertDirect": false,
+                "skipBootstrapProbe": true,
+            }))
+            .send()
+            .await
+            .expect("update settings");
+        assert_eq!(updated.status(), StatusCode::OK);
+        let updated_body = updated
+            .json::<serde_json::Value>()
+            .await
+            .expect("decode updated settings");
+        assert_eq!(
+            updated_body["nodes"][0]["resolvedIps"][0].as_str(),
+            Some("1.1.1.1")
+        );
+        assert_eq!(
+            updated_body["nodes"][0]["resolvedRegions"][0].as_str(),
+            Some("US Westfield (MA)")
+        );
+
+        let stats = client
+            .get(format!("http://{addr}/api/stats/forward-proxy"))
+            .send()
+            .await
+            .expect("get stats");
+        assert_eq!(stats.status(), StatusCode::OK);
+        let stats_body = stats
+            .json::<serde_json::Value>()
+            .await
+            .expect("decode stats");
+        assert_eq!(
+            stats_body["nodes"][0]["resolvedIps"][0].as_str(),
+            Some("1.1.1.1")
+        );
+        assert_eq!(
+            stats_body["nodes"][0]["resolvedRegions"][0].as_str(),
+            Some("US Westfield (MA)")
+        );
+
         let _ = std::fs::remove_file(db_path);
     }
 
@@ -13175,6 +14126,345 @@ mod tests {
             body.contains("Skipped after recent validation"),
             "expected skipped bootstrap detail, got: {body}"
         );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_forward_proxy_incremental_subscription_add_only_refreshes_new_sources() {
+        let db_path = temp_db_path("admin-forward-proxy-incremental-add");
+        let db_str = db_path.to_string_lossy().to_string();
+        let upstream_addr = spawn_forward_proxy_probe_upstream().await;
+        let sub1_proxy_hits = Arc::new(AtomicUsize::new(0));
+        let sub2_proxy_hits = Arc::new(AtomicUsize::new(0));
+        let sub1_proxy_addr = spawn_counted_fake_forward_proxy(
+            StatusCode::NOT_FOUND,
+            Duration::from_millis(0),
+            sub1_proxy_hits.clone(),
+        )
+        .await;
+        let sub2_proxy_addr = spawn_counted_fake_forward_proxy(
+            StatusCode::NOT_FOUND,
+            Duration::from_millis(0),
+            sub2_proxy_hits.clone(),
+        )
+        .await;
+        let sub1_hits = Arc::new(AtomicUsize::new(0));
+        let sub2_hits = Arc::new(AtomicUsize::new(0));
+        let sub1_state = Arc::new(Mutex::new((
+            StatusCode::OK,
+            format!("http://{}\n", sub1_proxy_addr),
+        )));
+        let sub2_state = Arc::new(Mutex::new((
+            StatusCode::OK,
+            format!("http://{}\n", sub2_proxy_addr),
+        )));
+        let sub1_addr =
+            spawn_counted_forward_proxy_subscription_server(sub1_state, sub1_hits.clone()).await;
+        let sub2_addr =
+            spawn_counted_forward_proxy_subscription_server(sub2_state, sub2_hits.clone()).await;
+        let upstream = format!("http://{}/mcp", upstream_addr);
+        let usage_base = format!("http://{}", upstream_addr);
+        let proxy = TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+            .await
+            .expect("create proxy");
+        let addr = spawn_admin_forward_proxy_server(proxy, usage_base, true).await;
+
+        let client = Client::new();
+        let first = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&serde_json::json!({
+                "proxyUrls": [],
+                "subscriptionUrls": [format!("http://{}/subscription", sub1_addr)],
+                "subscriptionUpdateIntervalSecs": 3600,
+                "insertDirect": false,
+            }))
+            .send()
+            .await
+            .expect("seed first subscription");
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(sub1_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(sub2_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(sub1_proxy_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(sub2_proxy_hits.load(Ordering::SeqCst), 0);
+
+        let second = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&serde_json::json!({
+                "proxyUrls": [],
+                "subscriptionUrls": [
+                    format!("http://{}/subscription", sub1_addr),
+                    format!("http://{}/subscription", sub2_addr),
+                ],
+                "subscriptionUpdateIntervalSecs": 3600,
+                "insertDirect": false,
+            }))
+            .send()
+            .await
+            .expect("append second subscription");
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            sub1_hits.load(Ordering::SeqCst),
+            1,
+            "unchanged subscription should not be refetched on add",
+        );
+        assert_eq!(sub2_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sub1_proxy_hits.load(Ordering::SeqCst),
+            1,
+            "existing nodes should not be re-probed on add",
+        );
+        assert_eq!(sub2_proxy_hits.load(Ordering::SeqCst), 1);
+
+        let stats = client
+            .get(format!("http://{addr}/api/stats/forward-proxy"))
+            .send()
+            .await
+            .expect("get stats");
+        assert_eq!(stats.status(), StatusCode::OK);
+        let body = stats
+            .json::<serde_json::Value>()
+            .await
+            .expect("decode stats");
+        let nodes = body["nodes"].as_array().expect("stats nodes");
+        assert!(
+            nodes.iter().any(|node| node["endpointUrl"].as_str() == Some(&format!("http://{sub1_proxy_addr}/"))),
+            "first subscription node should remain active",
+        );
+        assert!(
+            nodes.iter().any(|node| node["endpointUrl"].as_str() == Some(&format!("http://{sub2_proxy_addr}/"))),
+            "new subscription node should become active immediately",
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_forward_proxy_interval_only_save_does_not_refresh_subscriptions() {
+        let db_path = temp_db_path("admin-forward-proxy-interval-only");
+        let db_str = db_path.to_string_lossy().to_string();
+        let upstream_addr = spawn_forward_proxy_probe_upstream().await;
+        let proxy_hits = Arc::new(AtomicUsize::new(0));
+        let fake_proxy_addr = spawn_counted_fake_forward_proxy(
+            StatusCode::NOT_FOUND,
+            Duration::from_millis(0),
+            proxy_hits.clone(),
+        )
+        .await;
+        let subscription_hits = Arc::new(AtomicUsize::new(0));
+        let subscription_state = Arc::new(Mutex::new((
+            StatusCode::OK,
+            format!("http://{}\n", fake_proxy_addr),
+        )));
+        let subscription_addr = spawn_counted_forward_proxy_subscription_server(
+            subscription_state,
+            subscription_hits.clone(),
+        )
+        .await;
+        let upstream = format!("http://{}/mcp", upstream_addr);
+        let usage_base = format!("http://{}", upstream_addr);
+        let proxy = TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+            .await
+            .expect("create proxy");
+        let addr = spawn_admin_forward_proxy_server(proxy, usage_base, true).await;
+
+        let client = Client::new();
+        let payload = serde_json::json!({
+            "proxyUrls": [],
+            "subscriptionUrls": [format!("http://{}/subscription", subscription_addr)],
+            "subscriptionUpdateIntervalSecs": 3600,
+            "insertDirect": false,
+        });
+        let first = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&payload)
+            .send()
+            .await
+            .expect("seed subscription");
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(subscription_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
+
+        let second = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&serde_json::json!({
+                "proxyUrls": [],
+                "subscriptionUrls": [format!("http://{}/subscription", subscription_addr)],
+                "subscriptionUpdateIntervalSecs": 60,
+                "insertDirect": false,
+            }))
+            .send()
+            .await
+            .expect("update interval only");
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(subscription_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_forward_proxy_removing_subscription_drops_only_removed_nodes() {
+        let db_path = temp_db_path("admin-forward-proxy-remove-subscription");
+        let db_str = db_path.to_string_lossy().to_string();
+        let upstream_addr = spawn_forward_proxy_probe_upstream().await;
+        let sub1_proxy_addr = spawn_fake_forward_proxy(StatusCode::NOT_FOUND).await;
+        let sub2_proxy_addr = spawn_fake_forward_proxy(StatusCode::NOT_FOUND).await;
+        let sub1_hits = Arc::new(AtomicUsize::new(0));
+        let sub2_hits = Arc::new(AtomicUsize::new(0));
+        let sub1_state = Arc::new(Mutex::new((
+            StatusCode::OK,
+            format!("http://{}\n", sub1_proxy_addr),
+        )));
+        let sub2_state = Arc::new(Mutex::new((
+            StatusCode::OK,
+            format!("http://{}\n", sub2_proxy_addr),
+        )));
+        let sub1_addr =
+            spawn_counted_forward_proxy_subscription_server(sub1_state, sub1_hits.clone()).await;
+        let sub2_addr =
+            spawn_counted_forward_proxy_subscription_server(sub2_state, sub2_hits.clone()).await;
+        let upstream = format!("http://{}/mcp", upstream_addr);
+        let usage_base = format!("http://{}", upstream_addr);
+        let proxy = TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+            .await
+            .expect("create proxy");
+        let addr = spawn_admin_forward_proxy_server(proxy, usage_base, true).await;
+
+        let client = Client::new();
+        let first = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&serde_json::json!({
+                "proxyUrls": [],
+                "subscriptionUrls": [
+                    format!("http://{}/subscription", sub1_addr),
+                    format!("http://{}/subscription", sub2_addr),
+                ],
+                "subscriptionUpdateIntervalSecs": 3600,
+                "insertDirect": false,
+            }))
+            .send()
+            .await
+            .expect("seed subscriptions");
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(sub1_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(sub2_hits.load(Ordering::SeqCst), 1);
+
+        let second = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&serde_json::json!({
+                "proxyUrls": [],
+                "subscriptionUrls": [format!("http://{}/subscription", sub2_addr)],
+                "subscriptionUpdateIntervalSecs": 3600,
+                "insertDirect": false,
+            }))
+            .send()
+            .await
+            .expect("remove first subscription");
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(sub1_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(sub2_hits.load(Ordering::SeqCst), 1);
+
+        let stats = client
+            .get(format!("http://{addr}/api/stats/forward-proxy"))
+            .send()
+            .await
+            .expect("get stats");
+        assert_eq!(stats.status(), StatusCode::OK);
+        let body = stats
+            .json::<serde_json::Value>()
+            .await
+            .expect("decode stats");
+        let nodes = body["nodes"].as_array().expect("stats nodes");
+        assert!(
+            nodes.iter().all(|node| node["endpointUrl"].as_str() != Some(&format!("http://{sub1_proxy_addr}/"))),
+            "removed subscription nodes should disappear immediately",
+        );
+        assert!(
+            nodes.iter().any(|node| node["endpointUrl"].as_str() == Some(&format!("http://{sub2_proxy_addr}/"))),
+            "unchanged subscription nodes should remain active",
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_forward_proxy_revalidate_refreshes_all_subscriptions_and_probes_all_nodes() {
+        let db_path = temp_db_path("admin-forward-proxy-revalidate");
+        let db_str = db_path.to_string_lossy().to_string();
+        let upstream_addr = spawn_forward_proxy_probe_upstream().await;
+        let subscription_proxy_hits = Arc::new(AtomicUsize::new(0));
+        let manual_proxy_hits = Arc::new(AtomicUsize::new(0));
+        let subscription_proxy_addr = spawn_counted_fake_forward_proxy(
+            StatusCode::NOT_FOUND,
+            Duration::from_millis(0),
+            subscription_proxy_hits.clone(),
+        )
+        .await;
+        let manual_proxy_addr = spawn_counted_fake_forward_proxy(
+            StatusCode::NOT_FOUND,
+            Duration::from_millis(0),
+            manual_proxy_hits.clone(),
+        )
+        .await;
+        let subscription_hits = Arc::new(AtomicUsize::new(0));
+        let subscription_state = Arc::new(Mutex::new((
+            StatusCode::OK,
+            format!("http://{}\n", subscription_proxy_addr),
+        )));
+        let subscription_addr = spawn_counted_forward_proxy_subscription_server(
+            subscription_state,
+            subscription_hits.clone(),
+        )
+        .await;
+        let upstream = format!("http://{}/mcp", upstream_addr);
+        let usage_base = format!("http://{}", upstream_addr);
+        let proxy = TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+            .await
+            .expect("create proxy");
+        let addr = spawn_admin_forward_proxy_server(proxy, usage_base, true).await;
+
+        let client = Client::new();
+        let first = client
+            .put(format!("http://{addr}/api/settings/forward-proxy"))
+            .json(&serde_json::json!({
+                "proxyUrls": [format!("http://{}", manual_proxy_addr)],
+                "subscriptionUrls": [format!("http://{}/subscription", subscription_addr)],
+                "subscriptionUpdateIntervalSecs": 3600,
+                "insertDirect": false,
+            }))
+            .send()
+            .await
+            .expect("seed proxy pool");
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(subscription_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(subscription_proxy_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(manual_proxy_hits.load(Ordering::SeqCst), 1);
+
+        let response = client
+            .post(format!("http://{addr}/api/settings/forward-proxy/revalidate"))
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("revalidate settings");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("read sse body");
+        assert!(
+            body.contains("\"type\":\"phase\",\"operation\":\"revalidate\",\"phaseKey\":\"refresh_subscription\""),
+            "expected refresh_subscription phase, got: {body}"
+        );
+        assert!(
+            body.contains("\"type\":\"phase\",\"operation\":\"revalidate\",\"phaseKey\":\"probe_nodes\""),
+            "expected probe_nodes phase, got: {body}"
+        );
+        assert!(
+            body.contains("\"type\":\"complete\",\"operation\":\"revalidate\""),
+            "expected revalidate completion event, got: {body}"
+        );
+        assert_eq!(subscription_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(subscription_proxy_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(manual_proxy_hits.load(Ordering::SeqCst), 2);
 
         let _ = std::fs::remove_file(db_path);
     }

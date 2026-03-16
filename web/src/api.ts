@@ -18,12 +18,43 @@ export interface SummaryWindowMetrics {
   success_count: number
   error_count: number
   quota_exhausted_count: number
+  new_keys: number
+  new_quarantines: number
 }
 
 export interface SummaryWindowsResponse {
   today: SummaryWindowMetrics
   yesterday: SummaryWindowMetrics
   month: SummaryWindowMetrics
+}
+
+export interface DashboardSiteStatusSnapshot {
+  remainingQuota: number
+  totalQuotaLimit: number
+  activeKeys: number
+  quarantinedKeys: number
+  exhaustedKeys: number
+  availableProxyNodes: number | null
+  totalProxyNodes: number | null
+}
+
+export interface DashboardForwardProxySnapshot {
+  availableNodes: number | null
+  totalNodes: number | null
+}
+
+export interface ForwardProxyDashboardSummaryResponse {
+  availableNodes: number
+  totalNodes: number
+}
+
+export interface DashboardSnapshotEvent {
+  summary: Summary
+  summaryWindows: SummaryWindowsResponse
+  siteStatus: DashboardSiteStatusSnapshot
+  forwardProxy: DashboardForwardProxySnapshot
+  keys: ApiKeyStats[]
+  logs: RequestLog[]
 }
 
 export interface PublicMetrics {
@@ -213,7 +244,7 @@ async function requestJsonWithToken<T>(
   return requestJson<T>(input, { ...init, headers })
 }
 
-export type ForwardProxyProgressOperation = 'save' | 'validate'
+export type ForwardProxyProgressOperation = 'save' | 'validate' | 'revalidate'
 export type ForwardProxyProgressPhaseKey =
   | 'save_settings'
   | 'refresh_subscription'
@@ -1005,6 +1036,8 @@ export interface ValidateKeysSummary {
   error: number
 }
 
+export type ValidateAssignedProxyMatchKind = 'registration_ip' | 'same_region' | 'other'
+
 export interface ValidateKeyResult {
   api_key: string
   status: string
@@ -1012,6 +1045,7 @@ export interface ValidateKeyResult {
   registration_region?: string | null
   assigned_proxy_key?: string | null
   assigned_proxy_label?: string | null
+  assigned_proxy_match_kind?: ValidateAssignedProxyMatchKind | null
   quota_limit?: number
   quota_remaining?: number
   detail?: string
@@ -1346,6 +1380,8 @@ export interface ForwardProxyNode {
   source: string
   displayName: string
   endpointUrl: string | null
+  resolvedIps: string[]
+  resolvedRegions: string[]
   weight: number
   available: boolean
   lastError?: string | null
@@ -1506,6 +1542,27 @@ export function validateForwardProxyCandidateWithProgress(
   )
 }
 
+export function revalidateForwardProxyWithProgress(
+  onEvent?: (event: ForwardProxyProgressEvent) => void,
+): Promise<ForwardProxySettings> {
+  return requestForwardProxyProgress<ForwardProxySettings>(
+    '/api/settings/forward-proxy/revalidate',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+    'revalidate',
+    onEvent,
+  )
+}
+
 export function fetchForwardProxyStats(signal?: AbortSignal): Promise<ForwardProxyStatsResponse> {
   return requestJson('/api/stats/forward-proxy', { signal })
+}
+
+export function fetchForwardProxyDashboardSummary(
+  signal?: AbortSignal,
+): Promise<ForwardProxyDashboardSummaryResponse> {
+  return requestJson('/api/stats/forward-proxy/summary', { signal })
 }
