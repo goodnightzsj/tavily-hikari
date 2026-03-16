@@ -2100,47 +2100,35 @@
   opacity: 0.86;
 }
 
-.sticky-window-bubbles {
+.sticky-window-values {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-.sticky-window-bubble {
-  display: inline-flex;
-  align-items: center;
-  min-height: 1.7rem;
-  min-width: 2.75rem;
-  justify-content: center;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid hsl(var(--border) / 0.84);
-  background: hsl(var(--muted) / 0.5);
-  line-height: 1;
-}
-
-.sticky-window-bubble-divider {
+.sticky-window-value-divider {
   color: hsl(var(--muted-foreground) / 0.5);
   font-size: 0.84rem;
   font-weight: 700;
 }
 
-.sticky-window-bubble-success {
-  border-color: hsl(var(--success) / 0.34);
-  background: hsl(var(--success) / 0.14);
+.sticky-window-value {
+  display: inline;
+  line-height: 1.2;
+}
+
+.sticky-window-value-success {
   color: hsl(var(--success));
 }
 
-.sticky-window-bubble-failure {
-  border-color: hsl(var(--destructive) / 0.34);
-  background: hsl(var(--destructive) / 0.12);
+.sticky-window-value-failure {
   color: hsl(var(--destructive));
 }
 
-.sticky-window-bubble-value {
+.sticky-window-value-success,
+.sticky-window-value-failure {
   font-size: 0.82rem;
   font-weight: 700;
-  color: inherit;
 }
 
 .token-usage-header-context-line {
