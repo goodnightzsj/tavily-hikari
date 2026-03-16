@@ -43,3 +43,16 @@
 - `cargo test -q admin_forward_proxy_ -- --nocapture`
 - `bun test web/src/admin/ForwardProxySettingsModule.test.ts web/src/admin/ForwardProxySettingsModule.render.test.ts`
 - `cd web && bun run build`
+
+## Visual Evidence (PR)
+
+- source_type: `storybook_canvas`
+  target_program: `mock-only`
+  capture_scope: `browser-viewport`
+  sensitive_exclusion: `N/A`
+  submission_gate: `pending-owner-approval`
+  story_id_or_title: `Admin/ForwardProxySettingsModule/Revalidate Progress Bubble`
+  state: `running`
+  evidence_note: 验证页面级全量验证气泡、按钮禁用态，以及 `refresh_subscription -> probe_nodes -> refresh_ui` 的阶段可见性。
+  image:
+  ![Revalidate progress bubble canvas](./assets/storybook-revalidate-progress-bubble-story.png)
