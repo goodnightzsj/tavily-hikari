@@ -13479,6 +13479,11 @@ mod tests {
         let db_str = db_path.to_string_lossy().to_string();
         let upstream_addr = spawn_forward_proxy_probe_upstream().await;
         let geo_addr = spawn_api_key_geo_mock_server().await;
+        let fake_proxy_addr = spawn_fake_forward_proxy_with_body(
+            StatusCode::OK,
+            "ip=1.1.1.1\nloc=US\ncolo=LAX\n".to_string(),
+        )
+        .await;
         let _geo_origin_guard =
             EnvVarGuard::set("API_KEY_IP_GEO_ORIGIN", &format!("http://{geo_addr}/geo"));
         let upstream = format!("http://{}/mcp", upstream_addr);
@@ -13498,7 +13503,7 @@ mod tests {
         let updated = client
             .put(format!("http://{addr}/api/settings/forward-proxy"))
             .json(&serde_json::json!({
-                "proxyUrls": ["http://1.1.1.1:8080"],
+                "proxyUrls": [format!("http://{}", fake_proxy_addr)],
                 "subscriptionUrls": [],
                 "subscriptionUpdateIntervalSecs": 3600,
                 "insertDirect": false,

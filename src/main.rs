@@ -174,6 +174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         xray_runtime_dir: cli.xray_runtime_dir.unwrap_or_else(|| {
             TavilyProxyOptions::from_database_path(&cli.db_path).xray_runtime_dir
         }),
+        forward_proxy_trace_url: TavilyProxyOptions::from_database_path(&cli.db_path)
+            .forward_proxy_trace_url,
     };
     let proxy =
         TavilyProxy::with_options(cli.keys, &cli.upstream, &cli.db_path, proxy_options).await?;

@@ -1308,6 +1308,9 @@ pub struct TavilyProxy {
     forward_proxy_clients: forward_proxy::ForwardProxyClientPool,
     forward_proxy: Arc<Mutex<forward_proxy::ForwardProxyManager>>,
     forward_proxy_affinity: Arc<Mutex<HashMap<String, CachedForwardProxyAffinityRecord>>>,
+    forward_proxy_trace_url: Url,
+    #[cfg(test)]
+    forward_proxy_trace_overrides: Arc<Mutex<HashMap<String, (String, String)>>>,
     xray_supervisor: Arc<Mutex<forward_proxy::XraySupervisor>>,
     upstream: Url,
     key_store: Arc<KeyStore>,
@@ -1328,6 +1331,7 @@ pub struct TavilyProxy {
 pub struct TavilyProxyOptions {
     pub xray_binary: String,
     pub xray_runtime_dir: std::path::PathBuf,
+    pub forward_proxy_trace_url: Url,
 }
 
 impl TavilyProxyOptions {
@@ -1335,6 +1339,7 @@ impl TavilyProxyOptions {
         Self {
             xray_binary: forward_proxy::default_xray_binary(),
             xray_runtime_dir: forward_proxy::default_xray_runtime_dir(database_path),
+            forward_proxy_trace_url: default_forward_proxy_trace_url(),
         }
     }
 }
@@ -1515,6 +1520,15 @@ const FORWARD_PROXY_LABEL_GENERATE_RESULT: &str = "Preparing result";
 const FORWARD_PROXY_TRACE_URL: &str = "http://cloudflare.com/cdn-cgi/trace";
 const FORWARD_PROXY_TRACE_TIMEOUT_MS: u64 = 900;
 
+fn default_forward_proxy_trace_url() -> Url {
+    std::env::var("FORWARD_PROXY_TRACE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| Url::parse(&value).ok())
+        .unwrap_or_else(|| Url::parse(FORWARD_PROXY_TRACE_URL).expect("valid trace url"))
+}
+
 impl TavilyProxy {
     pub async fn new<I, S>(keys: I, database_path: &str) -> Result<Self, ProxyError>
     where
@@ -1590,6 +1604,9 @@ impl TavilyProxy {
             forward_proxy_clients,
             forward_proxy,
             forward_proxy_affinity: Arc::new(Mutex::new(HashMap::new())),
+            forward_proxy_trace_url: options.forward_proxy_trace_url,
+            #[cfg(test)]
+            forward_proxy_trace_overrides: Arc::new(Mutex::new(HashMap::new())),
             xray_supervisor: Arc::new(Mutex::new(forward_proxy::XraySupervisor::new(
                 options.xray_binary,
                 options.xray_runtime_dir,
@@ -2545,7 +2562,11 @@ impl TavilyProxy {
         if ensure_forward_proxy_not_cancelled(cancellation).is_err() {
             return None;
         }
-        let trace_url = Url::parse(FORWARD_PROXY_TRACE_URL).ok()?;
+        #[cfg(test)]
+        if let Some(trace) = self.forward_proxy_trace_for_test(endpoint).await {
+            return Some(trace);
+        }
+        let trace_url = self.forward_proxy_trace_url.clone();
         let (resolved, temporary_xray_key) = self
             .resolve_forward_proxy_validation_endpoint(endpoint)
             .await
@@ -2574,6 +2595,29 @@ impl TavilyProxy {
         self.cleanup_forward_proxy_validation_endpoint(temporary_xray_key)
             .await;
         result
+    }
+
+    #[cfg(test)]
+    async fn forward_proxy_trace_for_test(
+        &self,
+        endpoint: &forward_proxy::ForwardProxyEndpoint,
+    ) -> Option<(String, String)> {
+        if let Some(trace) = self
+            .forward_proxy_trace_overrides
+            .lock()
+            .await
+            .get(&endpoint.key)
+            .cloned()
+        {
+            return Some(trace);
+        }
+        forward_proxy::endpoint_host(endpoint)
+            .and_then(|host| normalize_ip_string(&host))
+            .filter(|ip| is_global_geo_ip(ip))
+            .map(|ip| {
+                let location = format!("TEST / {ip}");
+                (ip, location)
+            })
     }
 
     async fn probe_and_record_forward_proxy_endpoint(
@@ -2990,26 +3034,6 @@ impl TavilyProxy {
         Ok(())
     }
 
-    async fn resolve_forward_proxy_host_ips(host: &str) -> Vec<String> {
-        if let Some(ip) = normalize_ip_string(host) {
-            return vec![ip];
-        }
-
-        let resolved = match tokio::net::lookup_host((host, 80)).await {
-            Ok(addrs) => addrs,
-            Err(_) => return Vec::new(),
-        };
-        let mut seen = HashSet::new();
-        let mut ips = Vec::new();
-        for addr in resolved {
-            let ip = addr.ip().to_string();
-            if seen.insert(ip.clone()) {
-                ips.push(ip);
-            }
-        }
-        ips
-    }
-
     async fn persist_forward_proxy_geo_candidates(
         &self,
         candidates: &[ForwardProxyGeoCandidate],
@@ -3048,16 +3072,16 @@ impl TavilyProxy {
             |endpoint: &forward_proxy::ForwardProxyEndpoint,
              resolved_ips: &[String],
              regions: &[String]| {
-                if !regions.is_empty() {
+                if endpoint.is_direct() {
                     return true;
                 }
                 if resolved_ips.is_empty() {
                     return false;
                 }
-                if endpoint.requires_xray() {
+                if regions.is_empty() {
                     return false;
                 }
-                !resolved_ips.iter().any(|ip| is_global_geo_ip(ip))
+                resolved_ips.iter().any(|ip| is_global_geo_ip(ip))
             };
         let cached = {
             let manager = self.forward_proxy.lock().await;
@@ -3077,7 +3101,6 @@ impl TavilyProxy {
                 .collect::<HashMap<_, _>>()
         };
 
-        let mut host_ips = HashMap::<String, Vec<String>>::new();
         let mut missing = Vec::new();
         for endpoint in &endpoints {
             let (cached_ips, cached_regions) = cached
@@ -3089,42 +3112,40 @@ impl TavilyProxy {
             if cache_complete {
                 continue;
             }
-            let Some(host) = forward_proxy::endpoint_host(endpoint) else {
-                missing.push(endpoint.clone());
+            if endpoint.is_direct() {
                 continue;
             };
-            missing.push(endpoint.clone());
-            if host_ips.contains_key(&host) {
-                continue;
-            }
-            host_ips.insert(
-                host.clone(),
-                if cached_ips.is_empty()
-                    || (endpoint.requires_xray()
-                        && cached_regions.is_empty()
-                        && !cached_ips.iter().any(|ip| is_global_geo_ip(ip)))
-                {
-                    Self::resolve_forward_proxy_host_ips(&host).await
-                } else {
-                    cached_ips
-                },
-            );
+            missing.push((endpoint.clone(), cached_ips));
         }
 
-        let geo_lookup_ips = host_ips
-            .values()
-            .flatten()
+        let trace_timeout = Duration::from_millis(FORWARD_PROXY_TRACE_TIMEOUT_MS);
+        let resolved_missing = futures_util::stream::iter(missing.into_iter().map(
+            |(endpoint, cached_ips)| async move {
+                let traced_ips = self
+                    .fetch_forward_proxy_trace(&endpoint, trace_timeout, None)
+                    .await
+                    .map(|(ip, _location)| vec![ip])
+                    .unwrap_or_else(|| cached_ips);
+                (endpoint, traced_ips)
+            },
+        ))
+        .buffer_unordered(3)
+        .collect::<Vec<_>>()
+        .await;
+
+        let geo_lookup_ips = resolved_missing
+            .iter()
+            .flat_map(|(_, resolved_ips)| resolved_ips)
             .filter(|ip| is_global_geo_ip(ip))
             .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         let region_by_ip = resolve_registration_regions(geo_origin, &geo_lookup_ips).await;
 
-        let resolved_missing = missing
+        let resolved_missing = resolved_missing
             .into_iter()
-            .map(|endpoint| {
-                let resolved_ips = forward_proxy::endpoint_host(&endpoint)
-                    .and_then(|host| host_ips.get(&host).cloned())
-                    .unwrap_or_default();
+            .map(|(endpoint, resolved_ips)| {
                 let mut seen_regions = HashSet::new();
                 let regions = resolved_ips
                     .iter()
@@ -17713,7 +17734,7 @@ mod tests {
     use super::*;
     use axum::{
         Json, Router,
-        routing::{get, post},
+        routing::{any, get, post},
     };
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -17769,6 +17790,21 @@ mod tests {
             }),
         );
 
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
+    async fn spawn_fake_forward_proxy_with_body(body: String) -> SocketAddr {
+        let app = Router::new().fallback(any(move || {
+            let body = body.clone();
+            async move { (StatusCode::OK, body) }
+        }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -18525,6 +18561,69 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             serde_json::from_str(&row.0).expect("decode persisted resolved ips");
         let resolved_regions: Vec<String> =
             serde_json::from_str(&row.1).expect("decode persisted resolved regions");
+        assert_eq!(resolved_ips, vec!["1.1.1.1".to_string()]);
+        assert_eq!(resolved_regions, vec!["HK".to_string()]);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn select_proxy_affinity_persists_forward_proxy_runtime_geo_metadata_from_trace_exit_ip()
+    {
+        let db_path = temp_db_path("proxy-runtime-geo-persist-trace-exit");
+        let db_str = db_path.to_string_lossy().to_string();
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let geo_origin = format!("http://{geo_addr}/geo");
+        let fake_proxy_addr =
+            spawn_fake_forward_proxy_with_body("ip=1.1.1.1\nloc=US\ncolo=LAX\n".to_string()).await;
+        let proxy_url = format!("http://{fake_proxy_addr}");
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        {
+            let mut manager = proxy.forward_proxy.lock().await;
+            manager.apply_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![proxy_url.clone()],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                }
+                .normalized(),
+            );
+        }
+
+        let (record, preview) = proxy
+            .select_proxy_affinity_preview_for_registration_with_hint(
+                "subject:persist-runtime-geo-trace-exit",
+                &geo_origin,
+                Some("1.1.1.1"),
+                Some("HK"),
+                None,
+            )
+            .await
+            .expect("registration-aware affinity from trace exit ip");
+        assert_eq!(
+            record.primary_proxy_key.as_deref(),
+            Some(proxy_url.as_str())
+        );
+        assert_eq!(
+            preview.as_ref().map(|item| item.match_kind),
+            Some(AssignedProxyMatchKind::RegistrationIp)
+        );
+
+        let row: (String, String) = sqlx::query_as(
+            "SELECT resolved_ips_json, resolved_regions_json FROM forward_proxy_runtime WHERE proxy_key = ?",
+        )
+        .bind(&proxy_url)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("load persisted trace-driven runtime geo metadata");
+        let resolved_ips: Vec<String> =
+            serde_json::from_str(&row.0).expect("decode persisted trace resolved ips");
+        let resolved_regions: Vec<String> =
+            serde_json::from_str(&row.1).expect("decode persisted trace resolved regions");
         assert_eq!(resolved_ips, vec!["1.1.1.1".to_string()]);
         assert_eq!(resolved_regions, vec!["HK".to_string()]);
 
