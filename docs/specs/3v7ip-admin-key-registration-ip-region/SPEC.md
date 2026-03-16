@@ -20,7 +20,9 @@
 - 在 `api_keys` 中持久化 `registration_ip` 与 `registration_region`，并在 key 列表 / 详情返回。
 - 导入时若校验阶段已经选中了代理节点，即使没有注册 IP / 地区，也要把该代理亲和结果持久化到 `forward_proxy_key_affinity`。
 - 代理节点自身的已解析 IP / 地区也要持久化，并在导入绑定时优先复用这些节点元数据，而不是每次都临时 lookup。
-- 对经 Xray 落地的 share-link 节点，geo 元数据必须取自 share-link 的真实远端 host，而不是本地 `127.0.0.1`/`::1` 监听地址。
+- 代理节点的出口 IP 必须通过第三方 trace 接口实测获得，不得使用 endpoint host、share-link host 或 DNS 推断来替代真实出口 IP。
+- 节点地区可以在拿到第三方 trace 的真实出口 IP 后，再通过 `country.is` 兼容接口解析并持久化。
+- 升级前遗留的 host/DNS 推断缓存即使看起来“完整”，也必须视为 stale metadata 并在后续导入/校验时刷新成 trace 来源。
 - 对升级前遗留的 Xray 节点 `resolved_ips=["127.0.0.1"]` / 空地区缓存，导入与校验选点时必须识别为 stale metadata 并自动刷新，不得把 loopback cache 视为“已完成解析”。
 - 列表支持 `registration_ip` 精确筛选与 `registration_region` 多选 facets 筛选，且保持 URL / 分页上下文。
 - 地区解析遵循 `xp` 的 `country.is` 思路：批量解析、短暂失败回退、不阻断导入。
@@ -116,7 +118,9 @@
   - `resolved_regions: string[]`
 - 语义固定：
   - 节点元数据来自持久化的 forward proxy runtime snapshot
-  - 导入/校验绑定优先复用这些已持久化节点元数据；仅在节点元数据缺失时回退到临时 host+geo 解析
+  - `resolved_ips` 只能来自第三方 trace 接口看到的真实出口 IP
+  - `resolved_regions` 由 `resolved_ips` 经 `country.is` 兼容接口解析得到
+  - 导入/校验绑定优先复用这些已持久化节点元数据；仅在节点元数据缺失或 stale 时重新发起 trace + geo 刷新
 
 ## 实现约束（Implementation Notes）
 
@@ -128,6 +132,7 @@
   - 429 / 网络错误使用短暂 retry-after / backoff，避免同批次重复打爆上游
   - 地区展示格式按 xp 的 `format_region` 语义：优先 `country + region`，若 region 像 subdivision code 且 city 存在，则显示 `country city (code)`
 - 本项目数据库只保存最终 `registration_region` 字符串，不额外拆分存 `country/region/city/operator`。
+- forward proxy 节点 runtime geo 的来源拆分为两步：先通过第三方 trace 接口获取真实出口 IP，再通过 geo provider 解析地区；任何 host/DNS 推断都只能用于建立代理连接，不能作为节点出口 IP 真相源。
 - UI 需提示注册地区解析会访问 configured `country.is`-compatible 服务。
 - 校验弹窗只给“分配代理”值文本着色；IP badge、状态 badge、地区文案与列表/详情页现有展示保持不变。
 
