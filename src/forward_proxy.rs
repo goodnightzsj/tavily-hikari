@@ -371,6 +371,20 @@ impl ForwardProxyEndpoint {
                 | ForwardProxyProtocol::Shadowsocks
         )
     }
+
+    pub fn absorb_duplicate(&mut self, mut other: ForwardProxyEndpoint) {
+        let prefer_other_fields = !self.manual_present && other.manual_present;
+        self.manual_present |= other.manual_present;
+        self.subscription_sources
+            .append(&mut other.subscription_sources);
+        if prefer_other_fields {
+            self.display_name = other.display_name;
+            self.protocol = other.protocol;
+            self.endpoint_url = other.endpoint_url;
+            self.raw_url = other.raw_url;
+        }
+        self.refresh_source();
+    }
 }
 
 pub fn endpoint_host(endpoint: &ForwardProxyEndpoint) -> Option<String> {
@@ -603,10 +617,13 @@ impl ForwardProxyManager {
 
     pub fn rebuild_endpoints(&mut self, subscription_endpoints: Vec<ForwardProxyEndpoint>) {
         let manual = normalize_proxy_endpoints_from_urls(&self.settings.proxy_urls);
-        let mut merged = Vec::new();
-        let mut seen = HashSet::new();
+        let mut merged: Vec<ForwardProxyEndpoint> = Vec::new();
+        let mut positions: HashMap<String, usize> = HashMap::new();
         for endpoint in manual.into_iter().chain(subscription_endpoints.into_iter()) {
-            if seen.insert(endpoint.key.clone()) {
+            if let Some(index) = positions.get(&endpoint.key).copied() {
+                merged[index].absorb_duplicate(endpoint);
+            } else {
+                positions.insert(endpoint.key.clone(), merged.len());
                 merged.push(endpoint);
             }
         }
@@ -721,6 +738,10 @@ impl ForwardProxyManager {
                     merged.push(endpoint);
                 }
             }
+        }
+
+        if !fetched_subscriptions.is_empty() {
+            self.last_subscription_refresh_at = Some(Utc::now().timestamp());
         }
 
         if settings.insert_direct {
@@ -3673,5 +3694,81 @@ rule-providers:
         };
 
         assert_eq!(endpoint_host(&endpoint).as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn subscription_refresh_preserves_overlapping_manual_and_subscription_sources() {
+        let subscription_url = "https://subscription.example.com/feed".to_string();
+        let endpoint_url = "http://198.51.100.8:8080".to_string();
+        let settings = ForwardProxySettings {
+            proxy_urls: vec![endpoint_url.clone()],
+            subscription_urls: vec![subscription_url.clone()],
+            subscription_update_interval_secs: 3600,
+            insert_direct: false,
+        };
+        let mut manager = ForwardProxyManager::new(settings.clone(), Vec::new());
+        let fetched = HashMap::from([(subscription_url.clone(), vec![endpoint_url.clone()])]);
+
+        manager.apply_subscription_refresh(&fetched);
+
+        let endpoint = manager
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.key == endpoint_url)
+            .expect("overlapping endpoint present");
+        assert!(endpoint.manual_present);
+        assert_eq!(
+            endpoint.subscription_sources,
+            BTreeSet::from([subscription_url.clone()])
+        );
+        assert_eq!(endpoint.source, FORWARD_PROXY_SOURCE_MANUAL);
+
+        manager.apply_incremental_settings(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                ..settings
+            },
+            &HashMap::new(),
+        );
+
+        let endpoint = manager
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.key == endpoint_url)
+            .expect("subscription-backed endpoint should remain after manual removal");
+        assert!(!endpoint.manual_present);
+        assert_eq!(
+            endpoint.subscription_sources,
+            BTreeSet::from([subscription_url])
+        );
+        assert_eq!(endpoint.source, FORWARD_PROXY_SOURCE_SUBSCRIPTION);
+    }
+
+    #[test]
+    fn incremental_subscription_save_updates_refresh_timestamp() {
+        let subscription_url = "https://subscription.example.com/feed".to_string();
+        let endpoint_url = "http://198.51.100.8:8080".to_string();
+        let mut manager = ForwardProxyManager::new(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: Vec::new(),
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+            },
+            Vec::new(),
+        );
+
+        manager.apply_incremental_settings(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: vec![subscription_url.clone()],
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+            },
+            &HashMap::from([(subscription_url, vec![endpoint_url])]),
+        );
+
+        assert!(manager.last_subscription_refresh_at.is_some());
+        assert!(!manager.should_refresh_subscriptions());
     }
 }

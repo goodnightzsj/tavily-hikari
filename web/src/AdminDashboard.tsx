@@ -169,6 +169,7 @@ import {
   type ForwardProxyDialogProgressState,
   updateDialogProgressState,
 } from './admin/forwardProxyDialogProgress'
+import { finalizeForwardProxyRevalidate } from './admin/forwardProxyRevalidate'
 
 const REFRESH_INTERVAL_MS = 30_000
 const LOGS_PER_PAGE = 20
@@ -2238,29 +2239,30 @@ function AdminDashboard(): JSX.Element {
       setForwardProxySavedAt(Date.now())
       setLastUpdated(new Date())
       forwardProxySettingsLoadedRef.current = true
-      setForwardProxyRevalidateProgress((current) => {
-        const base = current ?? createDialogProgressState(proxySettingsStrings.progress, 'subscription', 'revalidate')
-        return updateDialogProgressState(base, proxySettingsStrings.progress, {
-          type: 'phase',
-          operation: 'revalidate',
-          phaseKey: 'refresh_ui',
-          label: proxySettingsStrings.progress.steps.refresh_ui,
-        })
-      })
-      try {
-        await loadForwardProxyStatsData({ reason: 'refresh' })
-      } catch (refreshErr) {
-        console.error(refreshErr)
-      } finally {
-        setForwardProxyRevalidateProgress((current) => {
-          const base = current ?? createDialogProgressState(proxySettingsStrings.progress, 'subscription', 'revalidate')
-          return updateDialogProgressState(base, proxySettingsStrings.progress, {
-            type: 'complete',
-            operation: 'revalidate',
-            payload: null,
+      await finalizeForwardProxyRevalidate(
+        loadForwardProxyStatsData,
+        () => {
+          setForwardProxyRevalidateProgress((current) => {
+            const base = current ?? createDialogProgressState(proxySettingsStrings.progress, 'subscription', 'revalidate')
+            return updateDialogProgressState(base, proxySettingsStrings.progress, {
+              type: 'phase',
+              operation: 'revalidate',
+              phaseKey: 'refresh_ui',
+              label: proxySettingsStrings.progress.steps.refresh_ui,
+            })
           })
-        })
-      }
+        },
+        () => {
+          setForwardProxyRevalidateProgress((current) => {
+            const base = current ?? createDialogProgressState(proxySettingsStrings.progress, 'subscription', 'revalidate')
+            return updateDialogProgressState(base, proxySettingsStrings.progress, {
+              type: 'complete',
+              operation: 'revalidate',
+              payload: null,
+            })
+          })
+        },
+      )
     } catch (err) {
       console.error(err)
       const message = err instanceof Error ? err.message : proxySettingsStrings.validation.requestFailed
