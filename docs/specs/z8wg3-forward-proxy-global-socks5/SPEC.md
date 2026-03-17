@@ -93,6 +93,19 @@
 - [contracts/http-apis.md](./contracts/http-apis.md)
 - [contracts/db.md](./contracts/db.md)
 
+## Visual Evidence (PR)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  sensitive_exclusion: N/A
+  submission_gate: approved
+  story_id_or_title: `Admin/ForwardProxyEgressControl/StateGallery`
+  scenario: `aggregate review surface`
+  evidence_note: 聚合展示全局 SOCKS5 出口代理控件的字段状态、流程状态与交互验收面板，覆盖空值提醒、失焦校验失败、进行中进度、完成回看、后端失败与已开启锁定。
+
+![Forward proxy egress state gallery](./assets/forward-proxy-egress-state-gallery.png)
+
 ## 里程碑（Milestones / Delivery checklist）
 
 - [x] M1: 扩展 forward proxy settings 存储、API 类型与 SSE phase contract
