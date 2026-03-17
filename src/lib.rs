@@ -20172,6 +20172,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
