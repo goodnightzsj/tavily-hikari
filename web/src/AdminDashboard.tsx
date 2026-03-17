@@ -46,6 +46,7 @@ import ForwardProxySettingsModule, {
   type ForwardProxyDraft,
   type ForwardProxyValidationEntry,
 } from './admin/ForwardProxySettingsModule'
+import KeyStickyPanels from './admin/KeyStickyPanels'
 import ModulePlaceholder from './admin/ModulePlaceholder'
 import {
   type QueryLoadState,
@@ -130,6 +131,8 @@ import {
   type Paginated,
   fetchKeyMetrics,
   fetchKeyLogs,
+  fetchKeyStickyNodes,
+  fetchKeyStickyUsers,
   type KeySummary,
   type JobLogView,
   fetchApiKeyDetail,
@@ -156,6 +159,8 @@ import {
   type ForwardProxyStatsResponse,
   type ForwardProxyDashboardSummaryResponse,
   type ForwardProxyValidationKind,
+  type StickyNode,
+  type StickyUserRow,
   fetchForwardProxyDashboardSummary,
   type ForwardProxyProgressEvent,
   fetchForwardProxySettings,
@@ -5348,6 +5353,7 @@ function AdminDashboard(): JSX.Element {
         <KeyDetails
           key={route.id}
           id={route.id}
+          onOpenUser={(userId) => navigateUser(userId, { preserveUsersContext: true })}
           onBack={() =>
             navigateToPath(
               buildAdminKeysPath({
@@ -8642,20 +8648,29 @@ function LogDetails({ log, strings }: { log: RequestLog; strings: AdminTranslati
   )
 }
 
-function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Element {
+function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void; onOpenUser: (userId: string) => void }): JSX.Element {
   const translations = useTranslate()
   const adminStrings = translations.admin
   const keyStrings = adminStrings.keys
   const keyDetailsStrings = adminStrings.keyDetails
   const logsTableStrings = adminStrings.logs.table
   const loadingStateStrings = adminStrings.loadingStates
+  const tokenStrings = adminStrings.tokens
   const [detail, setDetail] = useState<ApiKeyStats | null>(null)
   const [period, setPeriod] = useState<'day' | 'week' | 'month'>('month')
   const [startDate, setStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10))
   const [summary, setSummary] = useState<KeySummary | null>(null)
   const [logs, setLogs] = useState<RequestLog[]>([])
+  const [stickyUsers, setStickyUsers] = useState<StickyUserRow[]>([])
+  const [stickyUsersPage, setStickyUsersPage] = useState(1)
+  const [stickyUsersTotal, setStickyUsersTotal] = useState(0)
+  const [stickyNodes, setStickyNodes] = useState<StickyNode[]>([])
   const [detailLoadState, setDetailLoadState] = useState<QueryLoadState>('initial_loading')
+  const [stickyUsersLoadState, setStickyUsersLoadState] = useState<QueryLoadState>('initial_loading')
+  const [stickyNodesLoadState, setStickyNodesLoadState] = useState<QueryLoadState>('initial_loading')
   const [error, setError] = useState<string | null>(null)
+  const [stickyUsersError, setStickyUsersError] = useState<string | null>(null)
+  const [stickyNodesError, setStickyNodesError] = useState<string | null>(null)
   const [syncState, setSyncState] = useState<'idle' | 'syncing' | 'success'>('idle')
   const [quarantineState, setQuarantineState] = useState<'idle' | 'clearing'>('idle')
   const [quarantineDetailExpanded, setQuarantineDetailExpanded] = useState(false)
@@ -8663,7 +8678,13 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
   const syncFeedbackTimerRef = useRef<number | null>(null)
   const loadAbortRef = useRef<AbortController | null>(null)
   const queryKeyRef = useRef<string | null>(null)
+  const stickyUsersAbortRef = useRef<AbortController | null>(null)
+  const stickyUsersQueryKeyRef = useRef<string | null>(null)
+  const stickyNodesAbortRef = useRef<AbortController | null>(null)
+  const stickyNodesQueryKeyRef = useRef<string | null>(null)
   const queryKey = `${id}:${period}:${startDate}`
+  const stickyUsersQueryKey = `${id}:${stickyUsersPage}`
+  const stickyUsersPerPage = 20
   const quarantineDetailId = `key-quarantine-detail-${id}`
 
   const computeSince = useCallback((): number => {
@@ -8687,11 +8708,11 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
     const controller = new AbortController()
     loadAbortRef.current = controller
     try {
-      setDetailLoadState(
+      const panelLoadState =
         reason === 'refresh'
           ? getRefreshingLoadState(queryKeyRef.current != null)
-          : getBlockingLoadState(queryKeyRef.current != null),
-      )
+          : getBlockingLoadState(queryKeyRef.current != null)
+      setDetailLoadState(panelLoadState)
       setError(null)
       if (reason !== 'refresh') {
         setDetail(null)
@@ -8718,6 +8739,62 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
     }
   }, [adminStrings.errors.loadKeyDetails, computeSince, id, period, queryKey])
 
+  const loadStickyUsers = useCallback(async (reason: 'initial' | 'switch' | 'refresh' = 'refresh') => {
+    stickyUsersAbortRef.current?.abort()
+    const controller = new AbortController()
+    stickyUsersAbortRef.current = controller
+    try {
+      const panelLoadState =
+        reason === 'refresh'
+          ? getRefreshingLoadState(stickyUsersQueryKeyRef.current != null)
+          : getBlockingLoadState(stickyUsersQueryKeyRef.current != null)
+      setStickyUsersLoadState(panelLoadState)
+      setStickyUsersError(null)
+      if (reason !== 'refresh') {
+        setStickyUsers([])
+        setStickyUsersTotal(0)
+      }
+      const result = await fetchKeyStickyUsers(id, stickyUsersPage, stickyUsersPerPage, controller.signal)
+      if (controller.signal.aborted) return
+      setStickyUsers(result.items)
+      setStickyUsersTotal(result.total)
+      setStickyUsersLoadState('ready')
+      stickyUsersQueryKeyRef.current = stickyUsersQueryKey
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      console.error(err)
+      setStickyUsersError(err instanceof Error ? err.message : adminStrings.errors.loadKeyDetails)
+      setStickyUsersLoadState('error')
+    }
+  }, [adminStrings.errors.loadKeyDetails, id, stickyUsersPage, stickyUsersPerPage, stickyUsersQueryKey])
+
+  const loadStickyNodes = useCallback(async (reason: 'initial' | 'switch' | 'refresh' = 'refresh') => {
+    stickyNodesAbortRef.current?.abort()
+    const controller = new AbortController()
+    stickyNodesAbortRef.current = controller
+    try {
+      const panelLoadState =
+        reason === 'refresh'
+          ? getRefreshingLoadState(stickyNodesQueryKeyRef.current != null)
+          : getBlockingLoadState(stickyNodesQueryKeyRef.current != null)
+      setStickyNodesLoadState(panelLoadState)
+      setStickyNodesError(null)
+      if (reason !== 'refresh') {
+        setStickyNodes([])
+      }
+      const result = await fetchKeyStickyNodes(id, controller.signal)
+      if (controller.signal.aborted) return
+      setStickyNodes(result.nodes)
+      setStickyNodesLoadState('ready')
+      stickyNodesQueryKeyRef.current = id
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      console.error(err)
+      setStickyNodesError(err instanceof Error ? err.message : adminStrings.errors.loadKeyDetails)
+      setStickyNodesLoadState('error')
+    }
+  }, [adminStrings.errors.loadKeyDetails, id])
+
   useEffect(() => {
     const reason = queryKeyRef.current == null ? 'initial' : queryKeyRef.current === queryKey ? 'refresh' : 'switch'
     void load(reason)
@@ -8725,6 +8802,32 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
       loadAbortRef.current?.abort()
     }
   }, [load, queryKey])
+
+  useEffect(() => {
+    const reason =
+      stickyUsersQueryKeyRef.current == null
+        ? 'initial'
+        : stickyUsersQueryKeyRef.current === stickyUsersQueryKey
+          ? 'refresh'
+          : 'switch'
+    void loadStickyUsers(reason)
+    return () => {
+      stickyUsersAbortRef.current?.abort()
+    }
+  }, [loadStickyUsers, stickyUsersQueryKey])
+
+  useEffect(() => {
+    const reason =
+      stickyNodesQueryKeyRef.current == null
+        ? 'initial'
+        : stickyNodesQueryKeyRef.current === id
+          ? 'refresh'
+          : 'switch'
+    void loadStickyNodes(reason)
+    return () => {
+      stickyNodesAbortRef.current?.abort()
+    }
+  }, [id, loadStickyNodes])
 
   useEffect(() => () => {
     if (syncFeedbackTimerRef.current != null) {
@@ -8734,6 +8837,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
 
   useEffect(() => {
     setQuarantineDetailExpanded(false)
+    setStickyUsersPage(1)
   }, [id])
 
   const syncUsage = useCallback(async () => {
@@ -8743,7 +8847,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
       setSyncState('syncing')
       setError(null)
       await syncApiKeyUsage(id)
-      await load('refresh')
+      await Promise.all([load('refresh'), loadStickyUsers('refresh'), loadStickyNodes('refresh')])
       setSyncState('success')
       if (syncFeedbackTimerRef.current != null) {
         window.clearTimeout(syncFeedbackTimerRef.current)
@@ -8759,7 +8863,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
     } finally {
       syncInFlightRef.current = false
     }
-  }, [adminStrings.errors.syncUsage, id, load])
+  }, [adminStrings.errors.syncUsage, id, load, loadStickyNodes, loadStickyUsers])
 
   const clearQuarantine = useCallback(async () => {
     if (quarantineState === 'clearing') return
@@ -8767,14 +8871,14 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
       setQuarantineState('clearing')
       setError(null)
       await clearApiKeyQuarantine(id)
-      await load('refresh')
+      await Promise.all([load('refresh'), loadStickyUsers('refresh'), loadStickyNodes('refresh')])
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : adminStrings.errors.clearQuarantine)
     } finally {
       setQuarantineState('idle')
     }
-  }, [adminStrings.errors.clearQuarantine, id, load, quarantineState])
+  }, [adminStrings.errors.clearQuarantine, id, load, loadStickyNodes, loadStickyUsers, quarantineState])
 
   const metricCards = useMemo(() => {
     if (!summary) return []
@@ -8792,6 +8896,7 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
   const detailBlocking = isBlockingLoadState(detailLoadState)
   const detailRefreshing = isRefreshingLoadState(detailLoadState)
   const detailLoadingLabel = detailRefreshing ? loadingStateStrings.refreshing : loadingStateStrings.switching
+  const stickyUsersTotalPages = Math.max(1, Math.ceil(stickyUsersTotal / stickyUsersPerPage))
   const quarantineRawDetail = detail?.quarantine?.reasonDetail?.trim() ?? ''
   const hasQuarantineRawDetail = quarantineRawDetail.length > 0
 
@@ -9027,6 +9132,21 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
           </section>
         </AdminLoadingRegion>
       </section>
+
+      <KeyStickyPanels
+        stickyUsers={stickyUsers}
+        stickyUsersLoadState={stickyUsersLoadState}
+        stickyUsersError={stickyUsersError}
+        stickyUsersPage={stickyUsersPage}
+        stickyUsersTotal={stickyUsersTotal}
+        stickyUsersPerPage={stickyUsersPerPage}
+        onStickyUsersPrevious={() => setStickyUsersPage((current) => Math.max(1, current - 1))}
+        onStickyUsersNext={() => setStickyUsersPage((current) => Math.min(stickyUsersTotalPages, current + 1))}
+        stickyNodes={stickyNodes}
+        stickyNodesLoadState={stickyNodesLoadState}
+        stickyNodesError={stickyNodesError}
+        onOpenUser={onOpenUser}
+      />
 
       <section className="surface panel">
         <div className="panel-header">

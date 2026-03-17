@@ -40,12 +40,19 @@ import { LanguageProvider, useTranslate, type AdminTranslations } from '../i18n'
 import AdminShell, { type AdminNavItem } from './AdminShell'
 import DashboardOverview, { type DashboardMetricCard } from './DashboardOverview'
 import ForwardProxySettingsModule from './ForwardProxySettingsModule'
+import KeyStickyPanels from './KeyStickyPanels'
 import ModulePlaceholder from './ModulePlaceholder'
 import {
   forwardProxyStorySavedAt,
   forwardProxyStorySettings,
   forwardProxyStoryStats,
 } from './forwardProxyStoryData'
+import {
+  stickyNodesStoryData,
+  stickyUsersStoryData,
+  stickyUsersStoryPerPage,
+  stickyUsersStoryTotal,
+} from './keyStickyStoryData'
 import {
   buildQuotaSliderTrack,
   clampQuotaSliderStageIndex,
@@ -1519,11 +1526,13 @@ function KeysPageCanvas({
   selectedKeyId,
   initialRegistrationIp = '',
   initialRegions = [],
+  showStickyPanels = false,
 }: {
   keys?: ApiKeyStats[]
   selectedKeyId?: string
   initialRegistrationIp?: string
   initialRegions?: string[]
+  showStickyPanels?: boolean
 } = {}): JSX.Element {
   const admin = useTranslate().admin
   const keyStrings = admin.keys
@@ -2017,6 +2026,20 @@ function KeysPageCanvas({
             </div>
           ) : null}
         </section>
+      ) : null}
+
+      {selectedKey && showStickyPanels ? (
+        <div style={{ marginTop: 16 }}>
+          <KeyStickyPanels
+            stickyUsers={stickyUsersStoryData}
+            stickyUsersLoadState="ready"
+            stickyUsersPage={1}
+            stickyUsersTotal={stickyUsersStoryTotal}
+            stickyUsersPerPage={stickyUsersStoryPerPage}
+            stickyNodes={stickyNodesStoryData}
+            stickyNodesLoadState="ready"
+          />
+        </div>
       ) : null}
     </AdminPageFrame>
   )
@@ -3040,6 +3063,13 @@ export const KeysRegistrationFilters: Story = {
 
 export const KeysRegistrationMetadata: Story = {
   render: () => <KeysPageCanvas selectedKeyId="MZli" />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const KeysStickyDetails: Story = {
+  render: () => <KeysPageCanvas selectedKeyId="MZli" showStickyPanels />,
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
   },

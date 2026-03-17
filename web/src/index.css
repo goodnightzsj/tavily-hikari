@@ -2100,6 +2100,37 @@
   opacity: 0.86;
 }
 
+.sticky-window-values {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sticky-window-value-divider {
+  color: hsl(var(--muted-foreground) / 0.5);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.sticky-window-value {
+  display: inline;
+  line-height: 1.2;
+}
+
+.sticky-window-value-success {
+  color: hsl(var(--success));
+}
+
+.sticky-window-value-failure {
+  color: hsl(var(--destructive));
+}
+
+.sticky-window-value-success,
+.sticky-window-value-failure {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .token-usage-header-context-line {
   display: none;
   align-items: center;
