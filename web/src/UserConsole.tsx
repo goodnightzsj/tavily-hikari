@@ -21,6 +21,7 @@ import {
   probeApiTavilyResearchResult,
   probeApiTavilySearch,
   probeMcpPing,
+  probeMcpToolsCall,
   probeMcpToolsList,
   fetchUserDashboard,
   fetchUserTokenDetail,
@@ -105,7 +106,13 @@ const GUIDE_KEY_ORDER: GuideKey[] = [
 interface McpProbeStepDefinition {
   id: string
   label: string
-  run: (token: string) => Promise<string | null>
+  billable?: boolean
+  run: (token: string) => Promise<McpProbeStepResult | null>
+}
+
+interface McpProbeStepResult {
+  detail?: string | null
+  discoveredTools?: string[]
 }
 
 interface ApiProbeStepDefinition {
@@ -121,6 +128,10 @@ interface McpProbeText {
   steps: {
     mcpPing: string
     mcpToolsList: string
+    mcpToolCall: string
+  }
+  errors: {
+    missingAdvertisedTools: string
   }
 }
 
@@ -216,6 +227,48 @@ function envelopeError(payload: unknown): string | null {
   return getProbeEnvelopeError(payload)
 }
 
+function normalizeMcpToolName(toolName: string): string {
+  return toolName.trim().toLowerCase().replaceAll('_', '-')
+}
+
+function mcpToolProbeArguments(toolName: string): Record<string, unknown> {
+  switch (normalizeMcpToolName(toolName)) {
+    case 'tavily-search':
+      return {
+        query: 'health check',
+        search_depth: 'basic',
+      }
+    case 'tavily-extract':
+      return {
+        urls: ['https://example.com'],
+      }
+    case 'tavily-crawl':
+    case 'tavily-map':
+      return {
+        url: 'https://example.com',
+        max_depth: 1,
+        limit: 1,
+      }
+    case 'tavily-research':
+      return {
+        query: 'health check',
+      }
+    default:
+      return {}
+  }
+}
+
+function extractAdvertisedMcpTools(payload: unknown): string[] {
+  const result = asRecord(asRecord(payload)?.result)
+  const tools = Array.isArray(result?.tools) ? result.tools : []
+  const names = tools
+    .map((tool) => asRecord(tool)?.name)
+    .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
+    .map((name) => name.trim())
+
+  return Array.from(new Set(names))
+}
+
 function buildMcpProbeStepDefinitions(
   probeText: McpProbeText,
 ): McpProbeStepDefinition[] {
@@ -223,7 +276,8 @@ function buildMcpProbeStepDefinitions(
     {
       id: 'mcp-ping',
       label: probeText.steps.mcpPing,
-      run: async (token: string): Promise<string | null> => {
+      billable: true,
+      run: async (token: string): Promise<McpProbeStepResult | null> => {
         const payload = await probeMcpPing(token)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
@@ -233,14 +287,35 @@ function buildMcpProbeStepDefinitions(
     {
       id: 'mcp-tools-list',
       label: probeText.steps.mcpToolsList,
-      run: async (token: string): Promise<string | null> => {
+      run: async (token: string): Promise<McpProbeStepResult | null> => {
         const payload = await probeMcpToolsList(token)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
-        return null
+        const discoveredTools = extractAdvertisedMcpTools(payload)
+        if (discoveredTools.length === 0) {
+          throw new Error(probeText.errors.missingAdvertisedTools)
+        }
+        return { discoveredTools }
       },
     },
   ]
+}
+
+function buildMcpToolCallProbeStepDefinitions(
+  probeText: McpProbeText,
+  toolNames: string[],
+): McpProbeStepDefinition[] {
+  return toolNames.map((toolName) => ({
+    id: `mcp-tool-call:${toolName}`,
+    label: formatTemplate(probeText.steps.mcpToolCall, { tool: toolName }),
+    billable: true,
+    run: async (token: string): Promise<McpProbeStepResult | null> => {
+      const payload = await probeMcpToolsCall(token, toolName, mcpToolProbeArguments(toolName))
+      const error = envelopeError(payload)
+      if (error) throw new Error(error)
+      return null
+    },
+  }))
 }
 
 function buildApiProbeStepDefinitions(
@@ -966,7 +1041,7 @@ export default function UserConsole(): JSX.Element {
     const isActiveRun = () => probeRunIdRef.current === runId
     const probeText = text.detail.probe
 
-    const stepDefinitions = buildMcpProbeStepDefinitions(probeText)
+    const stepDefinitions = [...buildMcpProbeStepDefinitions(probeText)]
 
     setMcpProbe({
       state: 'running',
@@ -1033,7 +1108,7 @@ export default function UserConsole(): JSX.Element {
         items: [...completedItems, runningItem],
       })
 
-      if (current.id === 'mcp-ping' && quotaBlockedWindow) {
+      if (current.billable && quotaBlockedWindow) {
         completedItems.push({
           ...runningItem,
           status: 'blocked',
@@ -1042,19 +1117,24 @@ export default function UserConsole(): JSX.Element {
         stepStates.push('blocked')
       } else {
         try {
-          await current.run(token)
+          const result = await current.run(token)
           if (!isActiveRun()) return
+          if (result?.discoveredTools?.length) {
+            stepDefinitions.push(...buildMcpToolCallProbeStepDefinitions(probeText, result.discoveredTools))
+          }
           completedItems.push({
             ...runningItem,
             status: 'success',
+            detail: result?.detail ?? undefined,
           })
           stepStates.push('success')
         } catch (err) {
           if (!isActiveRun()) return
-          const quotaWindow = current.id === 'mcp-ping' && err instanceof McpProbeRequestError
+          const quotaWindow = current.billable && err instanceof McpProbeRequestError
             ? getQuotaExceededWindow(err.payload)
             : null
           if (quotaWindow) {
+            quotaBlockedWindow = quotaWindow
             try {
               const refreshedDetail = await fetchUserTokenDetail(route.id)
               if (!isActiveRun()) return
@@ -1811,6 +1891,8 @@ export default function UserConsole(): JSX.Element {
 export const __testables = {
   buildApiProbeStepDefinitions,
   buildMcpProbeStepDefinitions,
+  buildMcpToolCallProbeStepDefinitions,
+  extractAdvertisedMcpTools,
   resolveGuideToken,
   shouldRenderLandingGuide,
 }
@@ -2212,6 +2294,7 @@ const EN = {
       steps: {
         mcpPing: 'MCP service connectivity',
         mcpToolsList: 'MCP tool discovery',
+        mcpToolCall: 'MCP tool call · {tool}',
         apiSearch: 'Web search capability',
         apiExtract: 'Page extract capability',
         apiCrawl: 'Site crawl capability',
@@ -2220,6 +2303,7 @@ const EN = {
         apiResearchResult: 'Research result query',
       },
       errors: {
+        missingAdvertisedTools: 'MCP tools/list returned no tools',
         missingRequestId: 'Research request_id is missing',
         researchFailed: 'Research task failed',
         researchUnexpectedStatus: 'Research returned unsupported status: {status}',
@@ -2362,6 +2446,7 @@ const ZH = {
       steps: {
         mcpPing: 'MCP 服务连通',
         mcpToolsList: 'MCP 工具发现',
+        mcpToolCall: 'MCP 工具调用 · {tool}',
         apiSearch: '网页搜索能力',
         apiExtract: '页面抽取能力',
         apiCrawl: '站点抓取能力',
@@ -2370,6 +2455,7 @@ const ZH = {
         apiResearchResult: '研究结果查询',
       },
       errors: {
+        missingAdvertisedTools: 'MCP tools/list 没有返回任何工具',
         missingRequestId: 'research 响应缺少 request_id',
         researchFailed: 'research 任务失败',
         researchUnexpectedStatus: 'research 返回了不支持的状态：{status}',

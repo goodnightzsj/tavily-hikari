@@ -8,6 +8,10 @@ const mcpProbeText: Parameters<typeof __testables.buildMcpProbeStepDefinitions>[
   steps: {
     mcpPing: 'MCP 服务连通',
     mcpToolsList: 'MCP 工具发现',
+    mcpToolCall: 'MCP 工具调用 · {tool}',
+  },
+  errors: {
+    missingAdvertisedTools: 'MCP tools/list 没有返回任何工具',
   },
 }
 
@@ -73,7 +77,17 @@ describe('UserConsole probe step definitions', () => {
         JSON.stringify({
           jsonrpc: '2.0',
           id: body.id ?? 'unknown',
-          result: body.method === 'tools/list' ? { tools: [{ name: 'tavily_search' }] } : { ok: true },
+          result: body.method === 'tools/list'
+            ? {
+                tools: [
+                  { name: 'tavily-search' },
+                  { name: 'tavily-extract' },
+                  { name: 'tavily-crawl' },
+                  { name: 'tavily-map' },
+                  { name: 'tavily-research' },
+                ],
+              }
+            : { ok: true },
         }),
         {
           status: 200,
@@ -82,14 +96,21 @@ describe('UserConsole probe step definitions', () => {
       )
     }) as typeof fetch
 
-    const steps = __testables.buildMcpProbeStepDefinitions(mcpProbeText)
-    for (const step of steps) {
-      await step.run('th-zjvc-secret')
+    const token = 'th-zjvc-secret'
+    const baseSteps = __testables.buildMcpProbeStepDefinitions(mcpProbeText)
+    await baseSteps[0]?.run(token)
+    const toolsListResult = await baseSteps[1]?.run(token)
+    const toolSteps = __testables.buildMcpToolCallProbeStepDefinitions(
+      mcpProbeText,
+      toolsListResult?.discoveredTools ?? [],
+    )
+
+    for (const step of toolSteps) {
+      await step.run(token)
     }
 
-    expect(calls).toHaveLength(2)
-    expect(calls[0]?.url).toBe('/mcp')
-    expect(calls[1]?.url).toBe('/mcp')
+    expect(calls).toHaveLength(7)
+    expect(calls.every((call) => call.url === '/mcp')).toBe(true)
 
     const firstHeaders = new Headers(calls[0]?.init?.headers ?? {})
     const secondHeaders = new Headers(calls[1]?.init?.headers ?? {})
@@ -108,6 +129,69 @@ describe('UserConsole probe step definitions', () => {
       method: 'tools/list',
       params: {},
     })
+
+    expect(calls.slice(2).map((call) => JSON.parse(String(call.init?.body ?? 'null')))).toEqual([
+      {
+        jsonrpc: '2.0',
+        id: 'probe-tool-call:tavily-search',
+        method: 'tools/call',
+        params: {
+          name: 'tavily-search',
+          arguments: {
+            query: 'health check',
+            search_depth: 'basic',
+          },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 'probe-tool-call:tavily-extract',
+        method: 'tools/call',
+        params: {
+          name: 'tavily-extract',
+          arguments: {
+            urls: ['https://example.com'],
+          },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 'probe-tool-call:tavily-crawl',
+        method: 'tools/call',
+        params: {
+          name: 'tavily-crawl',
+          arguments: {
+            url: 'https://example.com',
+            max_depth: 1,
+            limit: 1,
+          },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 'probe-tool-call:tavily-map',
+        method: 'tools/call',
+        params: {
+          name: 'tavily-map',
+          arguments: {
+            url: 'https://example.com',
+            max_depth: 1,
+            limit: 1,
+          },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 'probe-tool-call:tavily-research',
+        method: 'tools/call',
+        params: {
+          name: 'tavily-research',
+          arguments: {
+            query: 'health check',
+          },
+        },
+      },
+    ])
   })
 
   it('executes every API probe call with the expected endpoint and payload', async () => {

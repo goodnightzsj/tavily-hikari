@@ -272,7 +272,13 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
             jsonrpc: '2.0',
             id: payload?.id ?? null,
             result: {
-              tools: [{ name: 'tavily_search' }],
+              tools: [
+                { name: 'tavily-search' },
+                { name: 'tavily-extract' },
+                { name: 'tavily-crawl' },
+                { name: 'tavily-map' },
+                { name: 'tavily-research' },
+              ],
             },
           })}\n\n`,
           {
@@ -280,6 +286,17 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
             headers: { 'Content-Type': 'text/event-stream' },
           },
         )
+      }
+
+      if (method === 'tools/call') {
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: payload?.id ?? null,
+          result: {
+            ok: true,
+            tool: payload?.params?.name ?? null,
+          },
+        })
       }
 
       return jsonResponse({
