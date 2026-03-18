@@ -114,6 +114,7 @@ interface McpProbeStepDefinition {
 interface McpProbeStepResult {
   detail?: string | null
   discoveredTools?: string[]
+  stepState?: Extract<McpProbeStepState, 'success' | 'skipped'>
 }
 
 interface ApiProbeStepDefinition {
@@ -131,9 +132,9 @@ interface McpProbeText {
     mcpToolsList: string
     mcpToolCall: string
   }
+  skippedProbeFixture: string
   errors: {
     missingAdvertisedTools: string
-    missingProbeFixture: string
   }
 }
 
@@ -343,11 +344,12 @@ function buildMcpToolCallProbeStepDefinitions(
         id: `mcp-tool-call:${displayName}`,
         label: formatTemplate(probeText.steps.mcpToolCall, { tool: displayName }),
         billable: isBillableMcpProbeTool(displayName),
-        run: async (): Promise<McpProbeStepResult | null> => {
-          throw new Error(formatTemplate(probeText.errors.missingProbeFixture, {
-            tools: displayName,
-          }))
-        },
+        run: async (): Promise<McpProbeStepResult | null> => ({
+          detail: formatTemplate(probeText.skippedProbeFixture, {
+            tool: displayName,
+          }),
+          stepState: 'skipped',
+        }),
       }]
     }
 
@@ -1186,12 +1188,13 @@ export default function UserConsole(): JSX.Element {
           if (result?.discoveredTools?.length) {
             stepDefinitions.push(...buildMcpToolCallProbeStepDefinitions(probeText, result.discoveredTools))
           }
+          const stepState = result?.stepState ?? 'success'
           completedItems.push({
             ...runningItem,
-            status: 'success',
+            status: stepState,
             detail: result?.detail ?? undefined,
           })
-          stepStates.push('success')
+          stepStates.push(stepState)
         } catch (err) {
           if (!isActiveRun()) return
           const quotaWindow = current.billable && err instanceof McpProbeRequestError
@@ -2339,6 +2342,7 @@ const EN = {
         success: 'Success',
         failed: 'Failed',
         blocked: 'Blocked',
+        skipped: 'Skipped',
       },
       quotaBlocked: '{window} quota exhausted, skipping billable MCP ping.',
       quotaWindows: {
@@ -2365,9 +2369,9 @@ const EN = {
         apiResearch: 'Research task creation',
         apiResearchResult: 'Research result query',
       },
+      skippedProbeFixture: 'No local probe fixture for {tool}; skipped.',
       errors: {
         missingAdvertisedTools: 'MCP tools/list returned no tools',
-        missingProbeFixture: 'MCP probe has no fixture for: {tools}',
         missingRequestId: 'Research request_id is missing',
         researchFailed: 'Research task failed',
         researchUnexpectedStatus: 'Research returned unsupported status: {status}',
@@ -2492,6 +2496,7 @@ const ZH = {
         success: '成功',
         failed: '失败',
         blocked: '受阻',
+        skipped: '已跳过',
       },
       quotaBlocked: '{window}配额已耗尽，已跳过会消耗额度的 MCP 连通检测。',
       quotaWindows: {
@@ -2518,9 +2523,9 @@ const ZH = {
         apiResearch: '研究任务创建',
         apiResearchResult: '研究结果查询',
       },
+      skippedProbeFixture: '当前本地没有 {tool} 的检测夹具，已跳过。',
       errors: {
         missingAdvertisedTools: 'MCP tools/list 没有返回任何工具',
-        missingProbeFixture: 'MCP 检测缺少这些工具的调用夹具：{tools}',
         missingRequestId: 'research 响应缺少 request_id',
         researchFailed: 'research 任务失败',
         researchUnexpectedStatus: 'research 返回了不支持的状态：{status}',

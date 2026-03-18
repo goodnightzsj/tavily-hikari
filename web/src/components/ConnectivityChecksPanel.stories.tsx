@@ -11,6 +11,7 @@ const stepStatusText: Record<ProbeStepStatus, string> = {
   success: 'Connected',
   failed: 'Failed',
   blocked: 'Blocked',
+  skipped: 'Skipped',
 }
 
 const idleProbe: ProbeButtonModel = {

@@ -10,9 +10,9 @@ const mcpProbeText: Parameters<typeof __testables.buildMcpProbeStepDefinitions>[
     mcpToolsList: 'MCP 工具发现',
     mcpToolCall: 'MCP 工具调用 · {tool}',
   },
+  skippedProbeFixture: '当前本地没有 {tool} 的检测夹具，已跳过。',
   errors: {
     missingAdvertisedTools: 'MCP tools/list 没有返回任何工具',
-    missingProbeFixture: 'MCP 检测缺少这些工具的调用夹具：{tools}',
   },
 }
 
@@ -112,9 +112,10 @@ describe('UserConsole probe step definitions', () => {
     ])
 
     await steps[0]?.run('th-zjvc-secret')
-    await expect(steps[1]?.run('th-zjvc-secret')).rejects.toThrow(
-      'MCP 检测缺少这些工具的调用夹具：Acme_Lookup',
-    )
+    await expect(steps[1]?.run('th-zjvc-secret')).resolves.toEqual({
+      detail: '当前本地没有 Acme_Lookup 的检测夹具，已跳过。',
+      stepState: 'skipped',
+    })
 
     expect(calls.map((call) => JSON.parse(String(call.init?.body ?? 'null')).params.name)).toEqual([
       'tavily-search',

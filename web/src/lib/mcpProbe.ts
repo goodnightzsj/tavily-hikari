@@ -1,5 +1,5 @@
 export type ProbeQuotaWindow = 'hour' | 'day' | 'month'
-export type McpProbeStepState = 'success' | 'failed' | 'blocked'
+export type McpProbeStepState = 'success' | 'failed' | 'blocked' | 'skipped'
 
 export const MCP_PROBE_ACCEPT_HEADER = 'application/json, text/event-stream'
 
@@ -234,8 +234,9 @@ export async function revalidateBlockedQuotaWindow<T extends QuotaSnapshotLike |
 }
 
 export function resolveMcpProbeButtonState(stepStates: readonly McpProbeStepState[]): 'success' | 'partial' | 'failed' {
+  const failing = stepStates.filter((state) => state === 'failed' || state === 'blocked').length
   const passed = stepStates.filter((state) => state === 'success').length
-  if (passed === stepStates.length) return 'success'
+  if (failing === 0) return 'success'
   if (passed === 0) return 'failed'
   return 'partial'
 }

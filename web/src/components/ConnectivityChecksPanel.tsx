@@ -3,7 +3,7 @@ import type { CSSProperties, Ref } from 'react'
 import { Icon } from '../lib/icons'
 
 export type ProbeButtonState = 'idle' | 'running' | 'success' | 'partial' | 'failed'
-export type ProbeStepStatus = 'running' | 'success' | 'failed' | 'blocked'
+export type ProbeStepStatus = 'running' | 'success' | 'failed' | 'blocked' | 'skipped'
 export type ProbeBubbleAnchor = 'mcp' | 'api'
 
 export interface ProbeButtonModel {
@@ -62,6 +62,7 @@ function probeBubbleItemIcon(status: ProbeStepStatus): string {
   if (status === 'success') return 'mdi:check-circle-outline'
   if (status === 'failed') return 'mdi:close-circle-outline'
   if (status === 'blocked') return 'mdi:alert-circle-outline'
+  if (status === 'skipped') return 'mdi:minus-circle-outline'
   return 'mdi:loading'
 }
 
