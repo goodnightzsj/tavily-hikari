@@ -33,4 +33,12 @@ describe('ConnectivityChecksPanel Storybook gallery', () => {
       status: 'success',
     })
   })
+
+  it('adds extra vertical spacing so long probe bubbles do not overlap adjacent rows', () => {
+    expect(connectivityStories.__testables.galleryGridStyle).toMatchObject({
+      columnGap: 18,
+      rowGap: 196,
+      alignItems: 'start',
+    })
+  })
 })

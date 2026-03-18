@@ -40,6 +40,14 @@ const allMcpToolSweepItems: ProbeBubbleModel['items'] = [
   { id: 'mcp-tool-call:tavily-research', label: 'MCP tool call · tavily-research', status: 'success' },
 ]
 
+const galleryGridStyle = {
+  display: 'grid',
+  columnGap: 18,
+  rowGap: 196,
+  gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+  alignItems: 'start',
+} as const
+
 const scenarios: ConnectivityScenario[] = [
   {
     title: 'Idle',
@@ -230,12 +238,7 @@ function ConnectivityChecksGallery(): JSX.Element {
         </p>
       </section>
       <div
-        style={{
-          display: 'grid',
-          gap: 18,
-          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-          alignItems: 'start',
-        }}
+        style={galleryGridStyle}
       >
         {scenarios.map((scenario) => (
           <ConnectivityScenarioCard key={scenario.title} {...scenario} />
@@ -281,5 +284,6 @@ export const StateGallery: Story = {
 }
 
 export const __testables = {
+  galleryGridStyle,
   scenarios,
 }
