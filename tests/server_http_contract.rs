@@ -897,7 +897,7 @@ async fn mcp_tools_list_advertised_tools_can_all_be_called_via_authorization_hea
                 "limit": 1
             }),
             "tavily-research" => serde_json::json!({
-                "query": "health check"
+                "input": "health check"
             }),
             other => panic!("unexpected tool name in test fixture: {other}"),
         };
@@ -1010,7 +1010,7 @@ async fn mcp_tools_list_legacy_underscore_tools_still_apply_supported_tavily_met
                 "limit": 1
             }),
             "tavily-research" => serde_json::json!({
-                "query": "health check"
+                "input": "health check"
             }),
             other => panic!("unexpected tool name in test fixture: {other}"),
         };

@@ -289,7 +289,7 @@ function mcpToolProbeArguments(toolName: string): Record<string, unknown> | null
       }
     case 'tavily-research':
       return {
-        query: 'health check',
+        input: 'health check',
       }
     default:
       return null
@@ -380,11 +380,10 @@ function schemaExampleValue(
       const value: Record<string, unknown> = {}
       for (const key of required) {
         const childSchema = properties ? asRecord(properties[key]) : null
-        if (!childSchema) continue
+        if (!childSchema) return undefined
         const childValue = schemaExampleValue(childSchema, key, depth + 1)
-        if (childValue !== undefined) {
-          value[key] = childValue
-        }
+        if (childValue === undefined) return undefined
+        value[key] = childValue
       }
       return value
     }
@@ -402,7 +401,8 @@ function synthesizeMcpToolProbeArguments(inputSchema: Record<string, unknown> | 
 function extractAdvertisedMcpTools(payload: unknown): AdvertisedMcpTool[] {
   const result = asRecord(asRecord(payload)?.result)
   const tools = Array.isArray(result?.tools) ? result.tools : []
-  const uniqueByCanonical = new Map<string, AdvertisedMcpTool>()
+  const uniqueByRequestName = new Set<string>()
+  const discoveredTools: AdvertisedMcpTool[] = []
 
   for (const tool of tools) {
     const toolRecord = asRecord(tool)
@@ -410,15 +410,16 @@ function extractAdvertisedMcpTools(payload: unknown): AdvertisedMcpTool[] {
     if (!rawName || rawName.trim().length === 0) continue
     const trimmedName = rawName.trim()
     const canonicalName = canonicalMcpProbeToolName(trimmedName)
-    if (canonicalName.length === 0 || uniqueByCanonical.has(canonicalName)) continue
-    uniqueByCanonical.set(canonicalName, {
+    if (canonicalName.length === 0 || uniqueByRequestName.has(trimmedName)) continue
+    uniqueByRequestName.add(trimmedName)
+    discoveredTools.push({
       requestName: trimmedName,
       displayName: canonicalName,
       inputSchema: toolRecord ? extractAdvertisedMcpToolSchema(toolRecord) : null,
     })
   }
 
-  return Array.from(uniqueByCanonical.values())
+  return discoveredTools
 }
 
 function buildMcpProbeStepDefinitions(
@@ -458,15 +459,15 @@ function buildMcpToolCallProbeStepDefinitions(
   tools: Array<string | AdvertisedMcpTool>,
 ): McpProbeStepDefinition[] {
   const toolEntries: AdvertisedMcpTool[] = []
-  const seenCanonicalNames = new Set<string>()
+  const seenRequestNames = new Set<string>()
 
   for (const tool of tools) {
     const requestName = typeof tool === 'string' ? tool.trim() : tool.requestName.trim()
     const displayName = typeof tool === 'string'
       ? canonicalMcpProbeToolName(requestName)
       : canonicalMcpProbeToolName(tool.displayName)
-    if (displayName.length === 0 || seenCanonicalNames.has(displayName)) continue
-    seenCanonicalNames.add(displayName)
+    if (displayName.length === 0 || seenRequestNames.has(requestName)) continue
+    seenRequestNames.add(requestName)
     toolEntries.push({
       requestName,
       displayName,
@@ -475,22 +476,24 @@ function buildMcpToolCallProbeStepDefinitions(
   }
 
   return toolEntries.flatMap(({ requestName, displayName, inputSchema }) => {
-    const probeArguments = mcpToolProbeArguments(displayName) ?? synthesizeMcpToolProbeArguments(inputSchema)
+    const safeProbeTarget = isBillableMcpProbeTool(displayName)
+    const probeArguments = mcpToolProbeArguments(displayName)
+      ?? (safeProbeTarget ? synthesizeMcpToolProbeArguments(inputSchema) : null)
     if (probeArguments == null) {
       return [{
-        id: `mcp-tool-call:${displayName}`,
-        label: formatTemplate(probeText.steps.mcpToolCall, { tool: displayName }),
+        id: `mcp-tool-call:${requestName}`,
+        label: formatTemplate(probeText.steps.mcpToolCall, { tool: requestName }),
         billable: isBillableMcpProbeTool(displayName),
         run: async (): Promise<McpProbeStepResult | null> => ({
-          detail: formatTemplate(probeText.skippedProbeFixture, { tool: displayName }),
+          detail: formatTemplate(probeText.skippedProbeFixture, { tool: requestName }),
           stepState: 'skipped',
         }),
       }]
     }
 
     return [{
-      id: `mcp-tool-call:${displayName}`,
-      label: formatTemplate(probeText.steps.mcpToolCall, { tool: displayName }),
+      id: `mcp-tool-call:${requestName}`,
+      label: formatTemplate(probeText.steps.mcpToolCall, { tool: requestName }),
       billable: isBillableMcpProbeTool(displayName),
       run: async (token: string): Promise<McpProbeStepResult | null> => {
         const payload = await probeMcpToolsCall(token, requestName, probeArguments)

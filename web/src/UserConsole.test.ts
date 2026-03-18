@@ -78,7 +78,7 @@ describe('UserConsole probe step definitions', () => {
     expect(steps[1]?.billable).toBeUndefined()
   })
 
-  it('preserves the first advertised MCP tool name while deduplicating aliases for the sweep', () => {
+  it('preserves every advertised MCP tool name, including legacy aliases', () => {
     expect(__testables.extractAdvertisedMcpTools({
       result: {
         tools: [
@@ -90,12 +90,13 @@ describe('UserConsole probe step definitions', () => {
       },
     })).toEqual([
       { requestName: 'tavily_search', displayName: 'tavily-search', inputSchema: null },
+      { requestName: 'tavily-search', displayName: 'tavily-search', inputSchema: null },
       { requestName: 'tavily_map', displayName: 'tavily-map', inputSchema: null },
       { requestName: 'Acme_Lookup', displayName: 'Acme_Lookup', inputSchema: null },
     ])
   })
 
-  it('calls schema-backed advertised tools with synthesized probe arguments', async () => {
+  it('does not execute schema-backed non-Tavily tools during the sweep', async () => {
     const calls: Array<{ url: string, init?: RequestInit }> = []
     globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ url: requestUrl(input), init })
@@ -107,6 +108,7 @@ describe('UserConsole probe step definitions', () => {
 
     const steps = __testables.buildMcpToolCallProbeStepDefinitions(mcpProbeText, [
       ' tavily_search ',
+      'tavily-search',
       {
         requestName: 'Acme_Lookup',
         displayName: 'Acme_Lookup',
@@ -123,12 +125,17 @@ describe('UserConsole probe step definitions', () => {
     ])
 
     expect(steps.map((step) => ({ id: step.id, billable: step.billable }))).toEqual([
+      { id: 'mcp-tool-call:tavily_search', billable: true },
       { id: 'mcp-tool-call:tavily-search', billable: true },
       { id: 'mcp-tool-call:Acme_Lookup', billable: false },
     ])
 
-    await steps[0]?.run('th-zjvc-secret')
-    await steps[1]?.run('th-zjvc-secret')
+    await expect(steps[0]?.run('th-zjvc-secret')).resolves.toBeNull()
+    await expect(steps[1]?.run('th-zjvc-secret')).resolves.toBeNull()
+    await expect(steps[2]?.run('th-zjvc-secret')).resolves.toEqual({
+      detail: '当前本地没有 Acme_Lookup 的检测夹具，已跳过。',
+      stepState: 'skipped',
+    })
 
     expect(calls.map((call) => JSON.parse(String(call.init?.body ?? 'null')).params)).toEqual([
       {
@@ -139,11 +146,10 @@ describe('UserConsole probe step definitions', () => {
         },
       },
       {
-        name: 'Acme_Lookup',
+        name: 'tavily-search',
         arguments: {
           query: 'health check',
-          target_url: 'https://example.com',
-          include_images: false,
+          search_depth: 'basic',
         },
       },
     ])
@@ -332,7 +338,7 @@ describe('UserConsole probe step definitions', () => {
         params: {
           name: 'tavily_research',
           arguments: {
-            query: 'health check',
+            input: 'health check',
           },
         },
       },
@@ -376,6 +382,34 @@ describe('UserConsole probe step definitions', () => {
         },
       },
     })
+  })
+
+  it('skips Tavily tools when required schema fields cannot be synthesized safely', async () => {
+    const calls: Array<{ url: string, init?: RequestInit }> = []
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: requestUrl(input), init })
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 'ok', result: { ok: true } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    const steps = __testables.buildMcpToolCallProbeStepDefinitions(mcpProbeText, [{
+      requestName: 'tavily-new',
+      displayName: 'tavily-new',
+      inputSchema: {
+        type: 'object',
+        required: ['query'],
+      },
+    }])
+
+    expect(steps).toHaveLength(1)
+    expect(steps[0]?.billable).toBe(true)
+    await expect(steps[0]?.run('th-zjvc-secret')).resolves.toEqual({
+      detail: '当前本地没有 tavily-new 的检测夹具，已跳过。',
+      stepState: 'skipped',
+    })
+    expect(calls).toHaveLength(0)
   })
 
   it('updates the running MCP progress total after discovering tool call steps', () => {

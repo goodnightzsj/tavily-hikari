@@ -223,8 +223,8 @@ async fn proxy_handler(
     let mut billable_search_mcp_ids: HashSet<String> = HashSet::new();
     let mut has_billable_mcp_without_id = false;
     let mut has_search_mcp_without_id = false;
-    let mut reserved_billable_credits_by_id: HashMap<String, i64> = HashMap::new();
-    let mut reserved_billable_credits_without_id_total: i64 = 0;
+    let mut missing_usage_fallback_credits_by_id: HashMap<String, i64> = HashMap::new();
+    let mut missing_usage_fallback_credits_without_id_total: i64 = 0;
     let mut expected_search_credits_by_id: HashMap<String, i64> = HashMap::new();
     let mut expected_search_credits_without_id_total: i64 = 0;
     let mut invalid_mcp_request_message: Option<String> = None;
@@ -257,8 +257,8 @@ async fn proxy_handler(
                                         billable_search_mcp_ids: &mut HashSet<String>,
                                         has_billable_mcp_without_id: &mut bool,
                                         has_search_mcp_without_id: &mut bool,
-                                        reserved_billable_credits_by_id: &mut HashMap<String, i64>,
-                                        reserved_billable_credits_without_id_total: &mut i64,
+                                        missing_usage_fallback_credits_by_id: &mut HashMap<String, i64>,
+                                        missing_usage_fallback_credits_without_id_total: &mut i64,
                                         expected_search_credits_by_id: &mut HashMap<String, i64>,
                                         expected_search_credits_without_id_total: &mut i64| {
                     // tools/call is treated as billable by default unless we can prove it's
@@ -310,23 +310,26 @@ async fn proxy_handler(
                             }
 
                             let record_reserved_credits = |reserved: i64,
-                                                           id_key: Option<&String>,
-                                                           reserved_billable_total: &mut i64,
-                                                           reserved_billable_credits_by_id: &mut HashMap<String, i64>,
-                                                           reserved_billable_credits_without_id_total: &mut i64| {
+                                                           reserved_billable_total: &mut i64| {
                                 *reserved_billable_total =
                                     (*reserved_billable_total).saturating_add(reserved);
+                            };
+
+                            let record_missing_usage_fallback = |fallback: i64,
+                                                                 id_key: Option<&String>,
+                                                                 missing_usage_fallback_credits_by_id: &mut HashMap<String, i64>,
+                                                                 missing_usage_fallback_credits_without_id_total: &mut i64| {
                                 if let Some(id_key) = id_key {
-                                    reserved_billable_credits_by_id
+                                    missing_usage_fallback_credits_by_id
                                         .entry(id_key.clone())
                                         .and_modify(|current| {
-                                            *current = (*current).saturating_add(reserved)
+                                            *current = (*current).saturating_add(fallback)
                                         })
-                                        .or_insert(reserved);
+                                        .or_insert(fallback);
                                 } else {
-                                    *reserved_billable_credits_without_id_total =
-                                        (*reserved_billable_credits_without_id_total)
-                                            .saturating_add(reserved);
+                                    *missing_usage_fallback_credits_without_id_total =
+                                        (*missing_usage_fallback_credits_without_id_total)
+                                            .saturating_add(fallback);
                                 }
                             };
 
@@ -359,10 +362,7 @@ async fn proxy_handler(
                                     tavily_mcp_reserved_credits(normalized_tool.as_str(), args_entry);
                                 record_reserved_credits(
                                     reserved,
-                                    id_key.as_ref(),
                                     reserved_billable_total,
-                                    reserved_billable_credits_by_id,
-                                    reserved_billable_credits_without_id_total,
                                 );
 
                                 if normalized_tool == "tavily-search" {
@@ -388,20 +388,20 @@ async fn proxy_handler(
                                     tavily_mcp_reserved_credits(normalized_tool.as_str(), args_entry);
                                 record_reserved_credits(
                                     reserved,
-                                    id_key.as_ref(),
                                     reserved_billable_total,
-                                    reserved_billable_credits_by_id,
-                                    reserved_billable_credits_without_id_total,
+                                );
+                                record_missing_usage_fallback(
+                                    reserved,
+                                    id_key.as_ref(),
+                                    missing_usage_fallback_credits_by_id,
+                                    missing_usage_fallback_credits_without_id_total,
                                 );
                             } else {
                                 // Unknown `tavily-*` tool: keep the original arguments/body shape,
                                 // but still treat it as billable so new upstream tools cannot bypass quota.
                                 record_reserved_credits(
                                     1,
-                                    id_key.as_ref(),
                                     reserved_billable_total,
-                                    reserved_billable_credits_by_id,
-                                    reserved_billable_credits_without_id_total,
                                 );
                             }
                         } else if tool.is_empty() {
@@ -451,8 +451,8 @@ async fn proxy_handler(
                                 &mut billable_search_mcp_ids,
                                 &mut has_billable_mcp_without_id,
                                 &mut has_search_mcp_without_id,
-                                &mut reserved_billable_credits_by_id,
-                                &mut reserved_billable_credits_without_id_total,
+                                &mut missing_usage_fallback_credits_by_id,
+                                &mut missing_usage_fallback_credits_without_id_total,
                                 &mut expected_search_credits_by_id,
                                 &mut expected_search_credits_without_id_total,
                             );
@@ -506,8 +506,8 @@ async fn proxy_handler(
                                     &mut billable_search_mcp_ids,
                                     &mut has_billable_mcp_without_id,
                                     &mut has_search_mcp_without_id,
-                                    &mut reserved_billable_credits_by_id,
-                                    &mut reserved_billable_credits_without_id_total,
+                                    &mut missing_usage_fallback_credits_by_id,
+                                    &mut missing_usage_fallback_credits_without_id_total,
                                     &mut expected_search_credits_by_id,
                                     &mut expected_search_credits_without_id_total,
                                 );
@@ -743,8 +743,18 @@ async fn proxy_handler(
                 let allow_empty_body_search_fallback =
                     resp.body.is_empty() && expected_search_credits.is_some();
                 if billable_flag && resp.status.is_success() {
-                    let fallback_reserved_credits =
-                        expected_search_credits.or(reserved_billable_credits);
+                    let missing_usage_fallback_total = {
+                        let total = expected_search_credits
+                            .unwrap_or(0)
+                            .saturating_add(
+                                missing_usage_fallback_credits_by_id
+                                    .values()
+                                    .copied()
+                                    .sum::<i64>(),
+                            )
+                            .saturating_add(missing_usage_fallback_credits_without_id_total);
+                        (total > 0).then_some(total)
+                    };
                     let credits = if has_billable_mcp_without_id {
                         let mut response_has_error = mcp_response_has_any_error(&resp.body);
                         let mut response_has_success = mcp_response_has_any_success(&resp.body);
@@ -762,7 +772,7 @@ async fn proxy_handler(
                                     0
                                 } else if response_has_error {
                                     credits
-                                } else if let Some(expected) = fallback_reserved_credits {
+                                } else if let Some(expected) = missing_usage_fallback_total {
                                     credits.max(expected)
                                 } else {
                                     credits
@@ -771,7 +781,7 @@ async fn proxy_handler(
                             None => {
                                 if response_has_error || !response_has_success {
                                     0
-                                } else if let Some(expected) = fallback_reserved_credits {
+                                } else if let Some(expected) = missing_usage_fallback_total {
                                     expected
                                 } else {
                                     eprintln!(
@@ -808,17 +818,9 @@ async fn proxy_handler(
                                 continue;
                             }
 
-                            if let Some(reserved) = reserved_billable_credits_by_id.get(id) {
-                                total = total.saturating_add(*reserved);
+                            if let Some(fallback) = missing_usage_fallback_credits_by_id.get(id) {
+                                total = total.saturating_add(*fallback);
                             }
-                        }
-
-                        if has_search_mcp_without_id && expected_search_credits_without_id_total > 0 {
-                            total = total.saturating_add(expected_search_credits_without_id_total);
-                        } else if has_billable_mcp_without_id
-                            && reserved_billable_credits_without_id_total > 0
-                        {
-                            total = total.saturating_add(reserved_billable_credits_without_id_total);
                         }
 
                         total
