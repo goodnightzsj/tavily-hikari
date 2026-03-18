@@ -342,6 +342,122 @@ async fn spawn_mock_mcp_probe_upstream(
     (addr, calls)
 }
 
+async fn spawn_mock_mcp_tools_contract_upstream(
+    expected_api_key: String,
+    advertised_tools: Vec<&'static str>,
+) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new().route(
+        "/mcp",
+        any({
+            let calls = calls.clone();
+            move |Query(params): Query<HashMap<String, String>>, Json(body): Json<Value>| {
+                let calls = calls.clone();
+                let expected_api_key = expected_api_key.clone();
+                let advertised_tools = advertised_tools.clone();
+                async move {
+                    let forwarded_api_key = params.get("tavilyApiKey").cloned().unwrap_or_default();
+                    assert_eq!(
+                        forwarded_api_key, expected_api_key,
+                        "upstream /mcp should receive the Tavily API key via query string"
+                    );
+
+                    let method = body
+                        .get("method")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    calls.lock().expect("mcp tools contract calls lock poisoned").push(method.clone());
+
+                    match method.as_str() {
+                        "tools/list" => (
+                            StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": body.get("id").cloned().unwrap_or_else(|| serde_json::json!("probe-tools-list")),
+                                "result": {
+                                    "tools": advertised_tools
+                                        .iter()
+                                        .map(|name| serde_json::json!({ "name": name }))
+                                        .collect::<Vec<_>>()
+                                }
+                            })),
+                        )
+                            .into_response(),
+                        "tools/call" => {
+                            let tool_name = body
+                                .get("params")
+                                .and_then(|params| params.get("name"))
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            assert!(
+                                advertised_tools.iter().any(|name| *name == tool_name),
+                                "unexpected advertised tool call: {tool_name}"
+                            );
+
+                            let include_usage = body
+                                .get("params")
+                                .and_then(|params| params.get("arguments"))
+                                .and_then(|arguments| arguments.get("include_usage"))
+                                .and_then(|value| value.as_bool());
+                            if matches!(
+                                tool_name,
+                                "tavily-search" | "tavily-extract" | "tavily-crawl" | "tavily-map"
+                            ) {
+                                assert_eq!(
+                                    include_usage,
+                                    Some(true),
+                                    "supported Tavily tool {tool_name} should inject include_usage=true"
+                                );
+                            } else {
+                                assert_eq!(
+                                    include_usage,
+                                    None,
+                                    "unsupported Tavily tool {tool_name} should not inject include_usage"
+                                );
+                            }
+
+                            calls
+                                .lock()
+                                .expect("mcp tools contract calls lock poisoned")
+                                .push(format!("tools/call:{tool_name}"));
+
+                            (
+                                StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": body.get("id").cloned().unwrap_or_else(|| serde_json::json!("tool-call")),
+                                    "result": {
+                                        "structuredContent": {
+                                            "status": 200,
+                                            "usage": { "credits": 1 }
+                                        }
+                                    }
+                                })),
+                            )
+                                .into_response()
+                        }
+                        other => (
+                            StatusCode::BAD_REQUEST,
+                            Body::from(format!("unexpected MCP method: {other}")),
+                        )
+                            .into_response(),
+                    }
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+    (addr, calls)
+}
+
 async fn spawn_mock_api_probe_upstream(
     expected_api_key: String,
 ) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
@@ -709,6 +825,119 @@ async fn mcp_probe_requests_with_authorization_header_reach_upstream() {
         upstream_calls,
         vec!["ping".to_string(), "tools/list".to_string()]
     );
+}
+
+#[tokio::test]
+async fn mcp_tools_list_advertised_tools_can_all_be_called_via_authorization_header() {
+    let advertised_tools = vec![
+        "tavily-search",
+        "tavily-extract",
+        "tavily-crawl",
+        "tavily-map",
+        "tavily-research",
+    ];
+    let (upstream_addr, calls) = spawn_mock_mcp_tools_contract_upstream(
+        "tvly-test-key".to_string(),
+        advertised_tools.clone(),
+    )
+    .await;
+
+    let db_path = temp_db_path("server-http-contract-mcp-tools");
+    let (_backend, port) = spawn_backend_ready(upstream_addr, db_path.clone(), false).await;
+    insert_auth_token(&db_path, "zjvc", "abcdefghijkl").await;
+
+    let client = Client::new();
+    let token = "th-zjvc-abcdefghijkl";
+    let mcp_url = format!("http://127.0.0.1:{port}/mcp");
+
+    let tools_list = client
+        .post(&mcp_url)
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "probe-tools-list",
+            "method": "tools/list",
+            "params": {}
+        }))
+        .send()
+        .await
+        .expect("mcp tools/list request");
+    assert_eq!(tools_list.status(), reqwest::StatusCode::OK);
+
+    let tools_list_body: Value = tools_list.json().await.expect("parse tools/list response");
+    let tools = tools_list_body
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(Value::as_array)
+        .expect("tools/list should return tools array");
+    let discovered_tool_names = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(discovered_tool_names, advertised_tools);
+
+    for tool_name in &discovered_tool_names {
+        let arguments = match *tool_name {
+            "tavily-search" => serde_json::json!({
+                "query": "health check",
+                "search_depth": "basic"
+            }),
+            "tavily-extract" => serde_json::json!({
+                "urls": ["https://example.com"]
+            }),
+            "tavily-crawl" => serde_json::json!({
+                "url": "https://example.com",
+                "max_depth": 1,
+                "limit": 1
+            }),
+            "tavily-map" => serde_json::json!({
+                "url": "https://example.com",
+                "max_depth": 1,
+                "limit": 1
+            }),
+            "tavily-research" => serde_json::json!({
+                "query": "health check"
+            }),
+            other => panic!("unexpected tool name in test fixture: {other}"),
+        };
+
+        let response = client
+            .post(&mcp_url)
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": format!("call-{tool_name}"),
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments
+                }
+            }))
+            .send()
+            .await
+            .expect("mcp tools/call request");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "expected tools/call to succeed for advertised tool {tool_name}"
+        );
+    }
+
+    let upstream_calls = calls
+        .lock()
+        .expect("mcp tools contract calls lock poisoned")
+        .clone();
+    assert!(
+        upstream_calls.iter().any(|call| call == "tools/list"),
+        "expected a tools/list discovery call"
+    );
+    for tool_name in &advertised_tools {
+        let expected_call = format!("tools/call:{tool_name}");
+        assert!(
+            upstream_calls.iter().any(|call| call == &expected_call),
+            "expected advertised tool {tool_name} to be exercised through /mcp tools/call"
+        );
+    }
 }
 
 #[tokio::test]
