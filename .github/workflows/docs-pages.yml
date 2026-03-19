@@ -131,10 +131,8 @@ jobs:
           test -f .tmp/pages-site/index.html
           test -f .tmp/pages-site/storybook/index.html
           test -f .tmp/pages-site/storybook.html
-          test -f .tmp/pages-site/storybook-guide.html
           grep -q '/storybook.html' .tmp/pages-site/index.html
           grep -q 'Redirecting to Storybook' .tmp/pages-site/storybook.html
-          grep -q '/docs/public-publichome--docs' .tmp/pages-site/storybook-guide.html
           grep -q './sb-manager/runtime.js' .tmp/pages-site/storybook/index.html
 
       - name: Upload assembled Pages artifact

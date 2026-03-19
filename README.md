@@ -14,7 +14,7 @@ Tavily Hikari is a Rust + Axum proxy for Tavily's MCP endpoint. It multiplexes m
 ## Docs & Storybook
 
 - Public docs site: [ivanli-cn.github.io/tavily-hikari](https://ivanli-cn.github.io/tavily-hikari/)
-- Storybook guide: [ivanli-cn.github.io/tavily-hikari/storybook-guide.html](https://ivanli-cn.github.io/tavily-hikari/storybook-guide.html)
+- Storybook: [ivanli-cn.github.io/tavily-hikari/storybook.html](https://ivanli-cn.github.io/tavily-hikari/storybook.html)
 - Local docs-site: `cd docs-site && bun install --frozen-lockfile && bun run dev`
 - Local Storybook: `cd web && bun install --frozen-lockfile && bun run storybook`
 

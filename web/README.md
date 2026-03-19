@@ -37,4 +37,4 @@ Open `http://127.0.0.1:56007`.
 - `VITE_STORYBOOK_DEV_ORIGIN` lets the docs-site redirect page target a non-default Storybook dev
   origin.
 - Static Storybook output is assembled into the public docs-site under `/storybook/`, with entry
-  pages exposed at `/storybook.html` and `/storybook-guide.html`.
+  page exposed at `/storybook.html`.

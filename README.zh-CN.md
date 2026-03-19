@@ -11,7 +11,7 @@ Tavily Hikari 是一个面向 MCP (Model Context Protocol) 的 Tavily 代理层�
 ## 文档站与 Storybook
 
 - 公开文档站：[ivanli-cn.github.io/tavily-hikari](https://ivanli-cn.github.io/tavily-hikari/)
-- Storybook 导览：[ivanli-cn.github.io/tavily-hikari/storybook-guide.html](https://ivanli-cn.github.io/tavily-hikari/storybook-guide.html)
+- Storybook：[ivanli-cn.github.io/tavily-hikari/storybook.html](https://ivanli-cn.github.io/tavily-hikari/storybook.html)
 - 本地 docs-site：`cd docs-site && bun install --frozen-lockfile && bun run dev`
 - 本地 Storybook：`cd web && bun install --frozen-lockfile && bun run storybook`
 
