@@ -1,0 +1,1261 @@
+use crate::models::*;
+use crate::*;
+
+pub(crate) fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
+    if !status.is_success() {
+        return AttemptAnalysis {
+            status: OUTCOME_ERROR,
+            tavily_status_code: Some(status.as_u16() as i64),
+            key_health_action: classify_quarantine_reason(Some(status.as_u16() as i64), body)
+                .map(KeyHealthAction::Quarantine)
+                .unwrap_or(KeyHealthAction::None),
+            api_key_id: None,
+        };
+    }
+
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => {
+            return AttemptAnalysis {
+                status: OUTCOME_UNKNOWN,
+                tavily_status_code: None,
+                key_health_action: KeyHealthAction::None,
+                api_key_id: None,
+            };
+        }
+    };
+
+    let mut any_success = false;
+    let mut any_error = false;
+    let mut detected_code = None;
+    let mut messages = extract_sse_json_messages(text);
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        match value {
+            // JSON-RPC batch responses return an array of message envelopes. Treat each element
+            // as its own message so we can correctly detect success/error and enforce billing.
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    for message in messages {
+        if let Some((outcome, code)) = analyze_json_message(&message) {
+            if detected_code.is_none() {
+                detected_code = code;
+            }
+            match outcome {
+                MessageOutcome::QuotaExhausted => {
+                    return AttemptAnalysis {
+                        status: OUTCOME_QUOTA_EXHAUSTED,
+                        tavily_status_code: code.or(detected_code),
+                        key_health_action: KeyHealthAction::MarkExhausted,
+                        api_key_id: None,
+                    };
+                }
+                MessageOutcome::Error => {
+                    any_error = true;
+                }
+                MessageOutcome::Success => any_success = true,
+            }
+        }
+    }
+
+    if any_error {
+        return AttemptAnalysis {
+            status: OUTCOME_ERROR,
+            tavily_status_code: detected_code,
+            key_health_action: classify_quarantine_reason(detected_code, body)
+                .map(KeyHealthAction::Quarantine)
+                .unwrap_or(KeyHealthAction::None),
+            api_key_id: None,
+        };
+    }
+
+    if any_success {
+        return AttemptAnalysis {
+            status: OUTCOME_SUCCESS,
+            tavily_status_code: detected_code,
+            key_health_action: KeyHealthAction::None,
+            api_key_id: None,
+        };
+    }
+
+    AttemptAnalysis {
+        status: OUTCOME_UNKNOWN,
+        tavily_status_code: detected_code,
+        key_health_action: KeyHealthAction::None,
+        api_key_id: None,
+    }
+}
+
+/// Analyze a single Tavily HTTP JSON response (e.g. `/search`) using HTTP status and
+/// optional structured `status` field from the body.
+pub fn analyze_http_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
+    let http_code = status.as_u16() as i64;
+
+    let parsed = serde_json::from_slice::<Value>(body).ok();
+    let structured = parsed.as_ref().and_then(extract_status_code);
+    let structured_outcome = parsed
+        .as_ref()
+        .and_then(extract_status_text)
+        .and_then(classify_status_text);
+
+    let effective = structured.unwrap_or(http_code);
+    let mut outcome = if let Some(code) = structured {
+        let code_outcome = classify_status_code(code);
+        if matches!(code_outcome, MessageOutcome::Success) {
+            structured_outcome.unwrap_or(code_outcome)
+        } else {
+            code_outcome
+        }
+    } else {
+        structured_outcome.unwrap_or_else(|| classify_status_code(effective))
+    };
+
+    // If HTTP status itself is an error, never treat the outcome as success.
+    if !status.is_success() && matches!(outcome, MessageOutcome::Success) {
+        outcome = if effective == 432 {
+            MessageOutcome::QuotaExhausted
+        } else {
+            MessageOutcome::Error
+        };
+    }
+
+    let (status_str, key_health_action) = match outcome {
+        MessageOutcome::Success => (OUTCOME_SUCCESS, KeyHealthAction::None),
+        MessageOutcome::Error => (
+            OUTCOME_ERROR,
+            classify_quarantine_reason(Some(effective), body)
+                .map(KeyHealthAction::Quarantine)
+                .unwrap_or(KeyHealthAction::None),
+        ),
+        MessageOutcome::QuotaExhausted => (OUTCOME_QUOTA_EXHAUSTED, KeyHealthAction::MarkExhausted),
+    };
+
+    AttemptAnalysis {
+        status: status_str,
+        tavily_status_code: Some(effective),
+        key_health_action,
+        api_key_id: None,
+    }
+}
+
+/// Analyze a Tavily MCP JSON-RPC response (e.g. `/mcp tools/call`) using the same heuristics
+/// as the core proxy request logger (supports JSON-RPC envelopes and SSE message streams).
+pub fn analyze_mcp_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
+    analyze_attempt(status, body)
+}
+
+/// Best-effort detection of whether a Tavily MCP response contains *any* error.
+///
+/// This is used by downstream billing code to avoid over-charging when a JSON-RPC batch
+/// contains partial failures (e.g. some items succeed but others error/quota-exhaust).
+///
+/// Conservative behavior: if we cannot confidently parse the response, treat it as "has error"
+/// so we never apply the "expected credits" billing fallback on ambiguous payloads.
+pub fn mcp_response_has_any_error(body: &[u8]) -> bool {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return true,
+    };
+
+    let mut messages = extract_sse_json_messages(text);
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    if messages.is_empty() {
+        return true;
+    }
+
+    for message in messages {
+        let Some((outcome, _code)) = analyze_json_message(&message) else {
+            return true;
+        };
+        if outcome != MessageOutcome::Success {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Best-effort detection of whether a Tavily MCP response contains at least one successful item.
+pub fn mcp_response_has_any_success(body: &[u8]) -> bool {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return false,
+    };
+
+    let mut messages = extract_sse_json_messages(text);
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    if messages.is_empty() {
+        return false;
+    }
+
+    for message in messages {
+        if let Some((outcome, _code)) = analyze_json_message(&message)
+            && outcome == MessageOutcome::Success
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub(crate) fn sanitize_headers_inner(
+    headers: &HeaderMap,
+    upstream: &Url,
+    upstream_origin: &str,
+) -> SanitizedHeaders {
+    let mut sanitized = HeaderMap::new();
+    let mut forwarded = Vec::new();
+    let mut dropped = Vec::new();
+    for (name, value) in headers.iter() {
+        let key = name.as_str().to_ascii_lowercase();
+        if !should_forward_header(name) {
+            dropped.push(key);
+            continue;
+        }
+        if let Some(transformed) = transform_header_value(name, value, upstream, upstream_origin) {
+            sanitized.insert(name.clone(), transformed);
+            forwarded.push(key);
+        } else {
+            dropped.push(key);
+        }
+    }
+    SanitizedHeaders {
+        headers: sanitized,
+        forwarded,
+        dropped,
+    }
+}
+
+pub(crate) fn should_forward_header(name: &reqwest::header::HeaderName) -> bool {
+    let lower = name.as_str().to_ascii_lowercase();
+    if BLOCKED_HEADERS.iter().any(|blocked| lower == *blocked) {
+        return false;
+    }
+    if ALLOWED_HEADERS.iter().any(|allowed| lower == *allowed) {
+        return true;
+    }
+    if ALLOWED_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        return true;
+    }
+    if lower.starts_with("x-") && !lower.starts_with("x-forwarded-") && lower != "x-real-ip" {
+        return true;
+    }
+    false
+}
+
+pub(crate) fn transform_header_value(
+    name: &reqwest::header::HeaderName,
+    value: &HeaderValue,
+    upstream: &Url,
+    upstream_origin: &str,
+) -> Option<HeaderValue> {
+    let lower = name.as_str().to_ascii_lowercase();
+    match lower.as_str() {
+        "origin" => HeaderValue::from_str(upstream_origin).ok(),
+        "referer" => match value.to_str() {
+            Ok(raw) => {
+                if let Ok(mut url) = Url::parse(raw) {
+                    url.set_scheme(upstream.scheme()).ok()?;
+                    url.set_host(upstream.host_str()).ok()?;
+                    if let Some(port) = upstream.port() {
+                        url.set_port(Some(port)).ok()?;
+                    } else {
+                        url.set_port(None).ok()?;
+                    }
+                    if url.path().is_empty() {
+                        url.set_path("/");
+                    }
+                    HeaderValue::from_str(url.as_str()).ok()
+                } else {
+                    HeaderValue::from_str(upstream_origin).ok()
+                }
+            }
+            Err(_) => HeaderValue::from_str(upstream_origin).ok(),
+        },
+        "sec-fetch-site" => Some(HeaderValue::from_static("same-origin")),
+        _ => Some(value.clone()),
+    }
+}
+
+pub(crate) fn origin_from_url(url: &Url) -> String {
+    let mut origin = match url.host_str() {
+        Some(host) => format!("{}://{}", url.scheme(), host),
+        None => url.as_str().to_string(),
+    };
+
+    match (url.port(), url.port_or_known_default()) {
+        (Some(port), Some(default)) if default != port => {
+            origin.push(':');
+            origin.push_str(&port.to_string());
+        }
+        (Some(port), None) => {
+            origin.push(':');
+            origin.push_str(&port.to_string());
+        }
+        _ => {}
+    }
+
+    origin
+}
+
+pub(crate) fn parse_header_list(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn analyze_json_message(value: &Value) -> Option<(MessageOutcome, Option<i64>)> {
+    if value.get("error").is_some_and(|v| !v.is_null()) {
+        return Some((MessageOutcome::Error, None));
+    }
+
+    if let Some(result) = value.get("result") {
+        return analyze_result_payload(result);
+    }
+
+    None
+}
+
+pub(crate) fn analyze_result_payload(result: &Value) -> Option<(MessageOutcome, Option<i64>)> {
+    if let Some(outcome) = analyze_structured_content(result) {
+        return Some(outcome);
+    }
+
+    if let Some(content) = result.get("content").and_then(|v| v.as_array()) {
+        for item in content {
+            if let Some(kind) = item.get("type").and_then(|v| v.as_str())
+                && kind.eq_ignore_ascii_case("error")
+            {
+                return Some((MessageOutcome::Error, None));
+            }
+            if let Some(text) = item.get("text").and_then(|v| v.as_str())
+                && let Some(code) = parse_embedded_status(text)
+            {
+                return Some((classify_status_code(code), Some(code)));
+            }
+        }
+    }
+
+    if result.get("error").is_some_and(|v| !v.is_null()) {
+        return Some((MessageOutcome::Error, None));
+    }
+
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some((MessageOutcome::Error, None));
+    }
+
+    Some((MessageOutcome::Success, None))
+}
+
+pub(crate) fn analyze_structured_content(result: &Value) -> Option<(MessageOutcome, Option<i64>)> {
+    let structured = result.get("structuredContent")?;
+
+    if let Some(code) = extract_status_code(structured) {
+        let code_outcome = classify_status_code(code);
+        if matches!(code_outcome, MessageOutcome::Success)
+            && let Some(text_outcome) =
+                extract_status_text(structured).and_then(classify_status_text)
+        {
+            return Some((text_outcome, Some(code)));
+        }
+        return Some((code_outcome, Some(code)));
+    }
+
+    if let Some(text_outcome) = extract_status_text(structured).and_then(classify_status_text) {
+        return Some((text_outcome, None));
+    }
+
+    if structured
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some((MessageOutcome::Error, None));
+    }
+
+    structured
+        .get("content")
+        .and_then(|v| v.as_array())
+        .and_then(|items| {
+            for item in items {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str())
+                    && let Some(code) = parse_embedded_status(text)
+                {
+                    return Some((classify_status_code(code), Some(code)));
+                }
+            }
+            None
+        })
+        .or(Some((MessageOutcome::Success, None)))
+}
+
+pub(crate) fn extract_status_code(value: &Value) -> Option<i64> {
+    if let Some(code) = value.get("status").and_then(|v| v.as_i64()) {
+        return Some(code);
+    }
+
+    if let Some(detail) = value.get("detail")
+        && let Some(code) = detail.get("status").and_then(|v| v.as_i64())
+    {
+        return Some(code);
+    }
+
+    None
+}
+
+pub(crate) fn classify_quarantine_reason(
+    status_code: Option<i64>,
+    body: &[u8],
+) -> Option<QuarantineDecision> {
+    if let Some(code) = status_code
+        && code != 401
+        && code != 403
+    {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(body);
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let status_label = status_code
+        .map(|code| format!("HTTP {code}"))
+        .unwrap_or_else(|| "MCP error".to_string());
+    let (reason_code, reason_summary) = if normalized.contains("deactivated") {
+        (
+            "account_deactivated",
+            format!("Tavily account deactivated ({status_label})"),
+        )
+    } else if normalized.contains("revoked") {
+        (
+            "key_revoked",
+            format!("Tavily key revoked ({status_label})"),
+        )
+    } else if normalized.contains("invalid api key")
+        || normalized.contains("invalid_token")
+        || normalized.contains("api key is invalid")
+    {
+        (
+            "invalid_api_key",
+            format!("Tavily rejected the API key as invalid ({status_label})"),
+        )
+    } else {
+        return None;
+    };
+
+    Some(QuarantineDecision {
+        reason_code: reason_code.to_string(),
+        reason_summary,
+        reason_detail: truncate_text(trimmed, QUARANTINE_REASON_DETAIL_MAX_LEN),
+    })
+}
+
+pub(crate) fn truncate_text(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let mut truncated = input.chars().take(max_chars).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+pub(crate) fn extract_status_text(value: &Value) -> Option<&str> {
+    if let Some(status) = value.get("status").and_then(|v| v.as_str()) {
+        return Some(status);
+    }
+
+    if let Some(detail) = value.get("detail")
+        && let Some(status) = detail.get("status").and_then(|v| v.as_str())
+    {
+        return Some(status);
+    }
+
+    None
+}
+
+pub(crate) fn extract_research_request_id_from_path(path: &str) -> Option<String> {
+    let encoded_request_id = path.strip_prefix("/research/")?;
+    if encoded_request_id.is_empty() {
+        return None;
+    }
+    urlencoding::decode(encoded_request_id)
+        .map(|decoded| decoded.into_owned())
+        .ok()
+}
+
+pub(crate) fn extract_research_request_id(body: &[u8]) -> Option<String> {
+    let parsed = serde_json::from_slice::<Value>(body).ok()?;
+    let request_id = parsed
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| parsed.get("requestId").and_then(|v| v.as_str()))?;
+    let trimmed = request_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+pub(crate) fn request_kind_key(protocol: &str, value: &str) -> String {
+    format!("{protocol}:{value}")
+}
+
+pub(crate) fn request_kind_label(protocol: &str, value: &str) -> String {
+    format!("{protocol} | {value}")
+}
+
+pub(crate) fn build_api_request_kind_named(key: &str, label: &str) -> TokenRequestKind {
+    TokenRequestKind::new(
+        request_kind_key("api", key),
+        request_kind_label("API", label),
+        None,
+    )
+}
+
+pub(crate) fn build_api_request_kind(value: &str) -> TokenRequestKind {
+    build_api_request_kind_named(value, value)
+}
+
+pub(crate) fn build_mcp_request_kind_named(key: &str, label: &str) -> TokenRequestKind {
+    TokenRequestKind::new(
+        request_kind_key("mcp", key),
+        request_kind_label("MCP", label),
+        None,
+    )
+}
+
+pub(crate) fn build_mcp_request_kind(value: &str) -> TokenRequestKind {
+    build_mcp_request_kind_named(value, value)
+}
+
+pub(crate) fn build_mcp_request_kind_with_detail(
+    key: &str,
+    label: &str,
+    detail: Option<String>,
+) -> TokenRequestKind {
+    TokenRequestKind::new(
+        request_kind_key("mcp", key),
+        request_kind_label("MCP", label),
+        detail,
+    )
+}
+
+pub(crate) fn raw_mcp_request_kind(path: &str) -> TokenRequestKind {
+    build_mcp_request_kind_named(&format!("raw:{path}"), path)
+}
+
+pub(crate) fn normalize_tavily_tool_name(tool: &str) -> Option<String> {
+    let normalized = tool.trim().to_ascii_lowercase().replace('_', "-");
+    let mapped = match normalized.as_str() {
+        "tavily-search" => "search",
+        "tavily-extract" => "extract",
+        "tavily-crawl" => "crawl",
+        "tavily-map" => "map",
+        "tavily-research" => "research",
+        _ => return None,
+    };
+    Some(mapped.to_string())
+}
+
+pub(crate) fn normalize_request_kind_slug(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_separator = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+            continue;
+        }
+
+        if !previous_was_separator {
+            normalized.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    let slug = normalized.trim_matches('-');
+    if slug.is_empty() {
+        return None;
+    }
+
+    Some(slug.to_string())
+}
+
+pub(crate) fn request_kind_label_penalty(label: &str) -> (usize, usize, usize, String) {
+    let display = label.split('|').nth(1).unwrap_or(label).trim();
+    let underscore_count = display.chars().filter(|ch| *ch == '_').count();
+    let dash_count = display.chars().filter(|ch| *ch == '-').count();
+    let lowercase_only = usize::from(
+        display.chars().any(|ch| ch.is_ascii_alphabetic())
+            && !display.chars().any(|ch| ch.is_ascii_uppercase()),
+    );
+    (
+        underscore_count,
+        dash_count,
+        lowercase_only,
+        display.to_string(),
+    )
+}
+
+pub(crate) fn prefer_request_kind_label(current: &str, candidate: &str) -> bool {
+    request_kind_label_penalty(candidate) < request_kind_label_penalty(current)
+}
+
+pub(crate) fn classify_mcp_request_kind_from_message(value: &Value) -> Option<TokenRequestKind> {
+    let method = value
+        .get("method")
+        .and_then(|raw| raw.as_str())
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())?;
+
+    if matches!(method, "initialize" | "ping" | "tools/list")
+        || method.starts_with("resources/")
+        || method.starts_with("prompts/")
+        || method.starts_with("notifications/")
+    {
+        return Some(build_mcp_request_kind(method));
+    }
+
+    if method == "tools/call" {
+        let tool = value
+            .get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(|raw| raw.as_str())
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty());
+        return match tool {
+            Some(tool) => match normalize_tavily_tool_name(tool) {
+                Some(kind) => Some(build_mcp_request_kind(&kind)),
+                None => {
+                    let key = normalize_request_kind_slug(tool)
+                        .map(|slug| format!("tool:{slug}"))
+                        .unwrap_or_else(|| "tools/call".to_string());
+                    Some(build_mcp_request_kind_named(&key, tool))
+                }
+            },
+            None => Some(build_mcp_request_kind("tools/call")),
+        };
+    }
+
+    Some(build_mcp_request_kind(method))
+}
+
+pub(crate) fn classify_mcp_request_kind(path: &str, body: Option<&[u8]>) -> TokenRequestKind {
+    let Some(body) = body else {
+        return raw_mcp_request_kind(path);
+    };
+    if body.is_empty() {
+        return raw_mcp_request_kind(path);
+    }
+
+    let parsed = match serde_json::from_slice::<Value>(body) {
+        Ok(value) => value,
+        Err(_) => return raw_mcp_request_kind(path),
+    };
+
+    match parsed {
+        Value::Array(items) => {
+            let mut kinds: Vec<TokenRequestKind> = items
+                .iter()
+                .filter_map(classify_mcp_request_kind_from_message)
+                .collect();
+            if kinds.is_empty() {
+                return raw_mcp_request_kind(path);
+            }
+            let first_key = kinds[0].key.clone();
+            if kinds.iter().all(|kind| kind.key == first_key) {
+                return kinds.remove(0);
+            }
+            let mut labels: Vec<String> = Vec::new();
+            for kind in kinds {
+                if let Some(label) = kind.label.strip_prefix("MCP | ")
+                    && !labels.iter().any(|item| item == label)
+                {
+                    labels.push(label.to_string());
+                }
+            }
+            build_mcp_request_kind_with_detail(
+                "batch",
+                "batch",
+                (!labels.is_empty()).then(|| labels.join(", ")),
+            )
+        }
+        Value::Object(_) => classify_mcp_request_kind_from_message(&parsed)
+            .unwrap_or_else(|| raw_mcp_request_kind(path)),
+        _ => raw_mcp_request_kind(path),
+    }
+}
+
+pub fn classify_token_request_kind(path: &str, body: Option<&[u8]>) -> TokenRequestKind {
+    match path {
+        "/api/tavily/search" => build_api_request_kind("search"),
+        "/api/tavily/extract" => build_api_request_kind("extract"),
+        "/api/tavily/crawl" => build_api_request_kind("crawl"),
+        "/api/tavily/map" => build_api_request_kind("map"),
+        "/api/tavily/research" => build_api_request_kind("research"),
+        "/api/tavily/usage" => build_api_request_kind("usage"),
+        _ if path.starts_with("/api/tavily/research/") => {
+            build_api_request_kind_named("research-result", "research result")
+        }
+        _ if path.starts_with("/mcp") => classify_mcp_request_kind(path, body),
+        _ => build_api_request_kind_named(&format!("raw:{path}"), path),
+    }
+}
+
+pub(crate) fn token_request_kind_fallback_key_sql() -> &'static str {
+    r#"
+    CASE
+        WHEN path = '/api/tavily/search' THEN 'api:search'
+        WHEN path = '/api/tavily/extract' THEN 'api:extract'
+        WHEN path = '/api/tavily/crawl' THEN 'api:crawl'
+        WHEN path = '/api/tavily/map' THEN 'api:map'
+        WHEN path = '/api/tavily/research' THEN 'api:research'
+        WHEN path = '/api/tavily/usage' THEN 'api:usage'
+        WHEN path LIKE '/api/tavily/research/%' THEN 'api:research-result'
+        WHEN path LIKE '/mcp%' THEN 'mcp:raw:' || path
+        ELSE 'api:raw:' || path
+    END
+    "#
+}
+
+pub(crate) fn token_request_kind_fallback_label_sql() -> &'static str {
+    r#"
+    CASE
+        WHEN path = '/api/tavily/search' THEN 'API | search'
+        WHEN path = '/api/tavily/extract' THEN 'API | extract'
+        WHEN path = '/api/tavily/crawl' THEN 'API | crawl'
+        WHEN path = '/api/tavily/map' THEN 'API | map'
+        WHEN path = '/api/tavily/research' THEN 'API | research'
+        WHEN path = '/api/tavily/usage' THEN 'API | usage'
+        WHEN path LIKE '/api/tavily/research/%' THEN 'API | research result'
+        WHEN path LIKE '/mcp%' THEN 'MCP | ' || path
+        ELSE 'API | ' || path
+    END
+    "#
+}
+
+pub(crate) fn token_request_kind_needs_fallback_sql() -> &'static str {
+    r#"
+    request_kind_key IS NULL
+    OR TRIM(request_kind_key) = ''
+    OR request_kind_label IS NULL
+    OR TRIM(request_kind_label) = ''
+    OR (
+        path LIKE '/mcp/%'
+        AND (
+            request_kind_key = 'mcp:raw:/mcp'
+            OR request_kind_label = 'MCP | /mcp'
+        )
+    )
+    "#
+}
+
+pub(crate) fn token_request_kind_protocol_group(key: &str) -> &'static str {
+    if key.trim().starts_with("mcp:") {
+        "mcp"
+    } else {
+        "api"
+    }
+}
+
+pub(crate) fn token_request_kind_billing_group(key: &str) -> &'static str {
+    let normalized = key.trim();
+    if normalized == "api:research-result"
+        || normalized == "api:usage"
+        || normalized.starts_with("mcp:initialize")
+        || normalized.starts_with("mcp:ping")
+        || normalized.starts_with("mcp:tools/list")
+        || (normalized.starts_with("mcp:tool:") && !normalized.starts_with("mcp:tool:tavily-"))
+        || normalized.starts_with("mcp:resources/")
+        || normalized.starts_with("mcp:prompts/")
+        || normalized.starts_with("mcp:notifications/")
+    {
+        "non_billable"
+    } else {
+        "billable"
+    }
+}
+
+pub(crate) fn token_request_kind_option_billing_group(
+    key: &str,
+    has_billable: bool,
+    has_non_billable: bool,
+) -> &'static str {
+    let normalized = key.trim();
+    if normalized == "mcp:batch" && !has_billable && has_non_billable {
+        "non_billable"
+    } else {
+        token_request_kind_billing_group(normalized)
+    }
+}
+
+pub(crate) fn derive_token_request_kind_fallback(
+    _method: &str,
+    path: &str,
+    _query: Option<&str>,
+) -> TokenRequestKind {
+    classify_token_request_kind(path, None)
+}
+
+pub(crate) fn is_stale_root_mcp_raw_request_kind(path: &str, key: &str, label: &str) -> bool {
+    path.starts_with("/mcp/") && (key.trim() == "mcp:raw:/mcp" || label.trim() == "MCP | /mcp")
+}
+
+pub(crate) fn finalize_token_request_kind(
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    key: Option<String>,
+    label: Option<String>,
+    detail: Option<String>,
+) -> TokenRequestKind {
+    match (
+        key.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }),
+        label.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }),
+    ) {
+        (Some(key), Some(label)) if !is_stale_root_mcp_raw_request_kind(path, &key, &label) => {
+            TokenRequestKind::new(key, label, detail)
+        }
+        _ => derive_token_request_kind_fallback(method, path, query),
+    }
+}
+
+/// Best-effort extraction of Tavily `usage.credits` from an upstream JSON response body.
+///
+/// - Returns `None` when the body isn't JSON or the field is missing.
+/// - Handles nested MCP envelopes by recursively scanning for an object containing `{ "usage": { "credits": ... } }`.
+/// - If credits is a float, rounds up to avoid under-charging.
+pub fn extract_usage_credits_from_json_bytes(body: &[u8]) -> Option<i64> {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body) {
+        return extract_usage_credits_from_value(&parsed);
+    }
+    extract_usage_credits_from_sse_bytes(body)
+}
+
+/// Best-effort extraction of Tavily `usage.credits` from an upstream JSON response body,
+/// summing across JSON-RPC batch responses (top-level arrays).
+///
+/// For non-batch responses, this matches `extract_usage_credits_from_json_bytes()`.
+pub fn extract_usage_credits_total_from_json_bytes(body: &[u8]) -> Option<i64> {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body) {
+        return extract_usage_credits_total_from_value(&parsed);
+    }
+    extract_usage_credits_total_from_sse_bytes(body)
+}
+
+/// Best-effort extraction of `usage.credits` from an MCP response, keyed by JSON-RPC `id`.
+///
+/// This is primarily used by the `/mcp` proxy to avoid accidentally charging credits from
+/// non-Tavily tool calls in a mixed JSON-RPC batch.
+pub fn extract_mcp_usage_credits_by_id_from_bytes(body: &[u8]) -> HashMap<String, i64> {
+    let mut messages: Vec<Value> = Vec::new();
+
+    if let Ok(text) = std::str::from_utf8(body) {
+        messages = extract_sse_json_messages(text);
+        if messages.is_empty()
+            && let Ok(value) = serde_json::from_str::<Value>(text)
+        {
+            match value {
+                Value::Array(items) => messages.extend(items),
+                other => messages.push(other),
+            }
+        }
+    }
+
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_slice::<Value>(body)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    fn ingest(value: &Value, out: &mut HashMap<String, i64>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    ingest(item, out);
+                }
+            }
+            Value::Object(map) => {
+                let Some(id) = map.get("id").filter(|v| !v.is_null()) else {
+                    return;
+                };
+                let Some(credits) = extract_usage_credits_from_value(value) else {
+                    return;
+                };
+                let key = id.to_string();
+                out.entry(key)
+                    .and_modify(|current| *current = (*current).max(credits))
+                    .or_insert(credits);
+            }
+            _ => {}
+        }
+    }
+
+    let mut out: HashMap<String, i64> = HashMap::new();
+    for message in messages {
+        ingest(&message, &mut out);
+    }
+    out
+}
+
+/// Best-effort extraction of whether an MCP response message contains an error, keyed by JSON-RPC `id`.
+///
+/// Values are `true` when we see any non-success outcome for that id (including quota exhausted).
+/// This is used to scope billing fallbacks (like expected credits) to only the billable calls.
+pub fn extract_mcp_has_error_by_id_from_bytes(body: &[u8]) -> HashMap<String, bool> {
+    let mut messages: Vec<Value> = Vec::new();
+
+    if let Ok(text) = std::str::from_utf8(body) {
+        messages = extract_sse_json_messages(text);
+        if messages.is_empty()
+            && let Ok(value) = serde_json::from_str::<Value>(text)
+        {
+            match value {
+                Value::Array(items) => messages.extend(items),
+                other => messages.push(other),
+            }
+        }
+    }
+
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_slice::<Value>(body)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    fn ingest(value: &Value, out: &mut HashMap<String, bool>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    ingest(item, out);
+                }
+            }
+            Value::Object(map) => {
+                let Some(id) = map.get("id").filter(|v| !v.is_null()) else {
+                    return;
+                };
+
+                let is_error = analyze_json_message(value)
+                    .map(|(outcome, _code)| outcome != MessageOutcome::Success)
+                    .unwrap_or(true);
+
+                let key = id.to_string();
+                out.entry(key)
+                    .and_modify(|current| *current = *current || is_error)
+                    .or_insert(is_error);
+            }
+            _ => {}
+        }
+    }
+
+    let mut out: HashMap<String, bool> = HashMap::new();
+    for message in messages {
+        ingest(&message, &mut out);
+    }
+    out
+}
+
+pub(crate) fn extract_usage_credits_total_from_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Array(items) => {
+            let mut total = 0i64;
+            let mut found = false;
+            for item in items {
+                if let Some(credits) = extract_usage_credits_from_value(item) {
+                    total = total.saturating_add(credits);
+                    found = true;
+                }
+            }
+            found.then_some(total)
+        }
+        other => extract_usage_credits_from_value(other),
+    }
+}
+
+pub(crate) fn extract_usage_credits_from_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Object(map) => {
+            if let Some(credits) = map
+                .get("usage")
+                .and_then(extract_usage_credits_from_usage_value)
+            {
+                return Some(credits);
+            }
+            // MCP responses can be wrapped in arbitrary envelopes. Scan all nested values.
+            for nested in map.values() {
+                if let Some(credits) = extract_usage_credits_from_value(nested) {
+                    return Some(credits);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(extract_usage_credits_from_value),
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_usage_credits_from_usage_value(value: &Value) -> Option<i64> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+
+    for key in [
+        "credits",
+        // Some Tavily responses report fractional usage via an exact field instead of the
+        // integer `credits` counter. We round up to avoid under-billing when only the exact
+        // field is present.
+        "total_credits_exact",
+    ] {
+        if let Some(credits) = map.get(key).and_then(parse_credits_value) {
+            return Some(credits);
+        }
+    }
+
+    None
+}
+
+pub(crate) fn parse_credits_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => {
+            if let Some(v) = number.as_i64()
+                && v >= 0
+            {
+                return Some(v);
+            }
+            number.as_f64().map(|v| v.ceil() as i64).filter(|v| *v >= 0)
+        }
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if let Ok(v) = trimmed.parse::<i64>()
+                && v >= 0
+            {
+                return Some(v);
+            }
+            trimmed
+                .parse::<f64>()
+                .ok()
+                .map(|v| v.ceil() as i64)
+                .filter(|v| *v >= 0)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_usage_credits_from_sse_bytes(body: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(body).ok()?;
+    let messages = extract_sse_json_messages(text);
+    let mut best: Option<i64> = None;
+    for message in messages {
+        if let Some(credits) = extract_usage_credits_from_value(&message) {
+            best = Some(best.map_or(credits, |current| current.max(credits)));
+        }
+    }
+    best
+}
+
+pub(crate) fn extract_usage_credits_total_from_sse_bytes(body: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(body).ok()?;
+    let messages = extract_sse_json_messages(text);
+    if messages.is_empty() {
+        return None;
+    }
+
+    // SSE streams can contain multiple messages for the same JSON-RPC `id` (e.g. progress updates).
+    // To avoid double-charging, we take the maximum observed credits per id and then sum.
+    let mut per_id_max: HashMap<String, i64> = HashMap::new();
+    let mut found = false;
+
+    for message in messages {
+        let Some(credits) = extract_usage_credits_total_from_value(&message) else {
+            continue;
+        };
+        found = true;
+
+        let id_key = match &message {
+            Value::Object(map) => map
+                .get("id")
+                .filter(|v| !v.is_null())
+                .map(|v| v.to_string()),
+            _ => None,
+        }
+        .unwrap_or_else(|| "__no_id__".to_string());
+
+        per_id_max
+            .entry(id_key)
+            .and_modify(|current| *current = (*current).max(credits))
+            .or_insert(credits);
+    }
+
+    found.then(|| per_id_max.values().copied().sum())
+}
+
+pub(crate) fn classify_status_text(status: &str) -> Option<MessageOutcome> {
+    let normalized = status.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "failed" | "failure" | "error" | "errored" | "cancelled" | "canceled"
+    ) {
+        return Some(MessageOutcome::Error);
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "pending"
+            | "processing"
+            | "running"
+            | "in_progress"
+            | "queued"
+            | "completed"
+            | "success"
+            | "succeeded"
+            | "done"
+    ) {
+        return Some(MessageOutcome::Success);
+    }
+
+    None
+}
+
+pub(crate) fn classify_status_code(code: i64) -> MessageOutcome {
+    if code == 432 {
+        MessageOutcome::QuotaExhausted
+    } else if code >= 400 {
+        MessageOutcome::Error
+    } else {
+        MessageOutcome::Success
+    }
+}
+
+pub(crate) fn parse_embedded_status(text: &str) -> Option<i64> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|value| {
+            extract_status_code(&value).or_else(|| value.get("status").and_then(|v| v.as_i64()))
+        })
+}
+
+pub(crate) fn extract_sse_json_messages(text: &str) -> Vec<Value> {
+    let mut messages = Vec::new();
+    let mut current = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            if !current.is_empty() {
+                if let Ok(value) = serde_json::from_str::<Value>(&current) {
+                    messages.push(value);
+                }
+                current.clear();
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("data:") {
+            let content = rest.trim_start();
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(content);
+        }
+    }
+
+    if !current.is_empty()
+        && let Ok(value) = serde_json::from_str::<Value>(&current)
+    {
+        messages.push(value);
+    }
+
+    messages
+}
+
+/// Recursively replace any `api_key` field values in JSON with a fixed placeholder.
+pub(crate) fn redact_api_key_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if k.eq_ignore_ascii_case("api_key") {
+                    *v = Value::String("***redacted***".to_string());
+                } else {
+                    redact_api_key_fields(v);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_api_key_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Best-effort redaction helper for request/response bodies written to persistent logs.
+/// If the payload is valid JSON, any `api_key` fields are replaced; on parse failure,
+/// an empty payload is returned to avoid leaking secrets in ambiguous formats.
+pub(crate) fn redact_api_key_bytes(bytes: &[u8]) -> Vec<u8> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(mut value) => {
+            redact_api_key_fields(&mut value);
+            serde_json::to_vec(&value).unwrap_or_else(|_| Vec::new())
+        }
+        Err(_) => Vec::new(),
+    }
+}

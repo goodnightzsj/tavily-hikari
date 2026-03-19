@@ -11554,6 +11554,9 @@ colo=LAX
         let db_path = temp_db_path("http-research-result-key-affinity");
         let db_str = db_path.to_string_lossy().to_string();
 
+        // Avoid cross-test env var interference (research create uses predicted min cost enforcement).
+        let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
+
         let proxy = TavilyProxy::with_endpoint(
             vec![
                 "tvly-http-research-key-a".to_string(),
@@ -11983,6 +11986,9 @@ colo=LAX
             "tvly-http-research-key-restart-a".to_string(),
             "tvly-http-research-key-restart-b".to_string(),
         ];
+
+        // Avoid cross-test env var interference (research create uses predicted min cost enforcement).
+        let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
 
         let proxy = TavilyProxy::with_endpoint(keys.clone(), DEFAULT_UPSTREAM, &db_str)
             .await

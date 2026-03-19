@@ -24,7 +24,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use crate::{KeyStore, ProxyError};
+use crate::{ProxyError, store::KeyStore};
 
 pub const DEFAULT_XRAY_BINARY: &str = "xray";
 pub const DEFAULT_XRAY_RUNTIME_DIR: &str = "data/xray-runtime";
