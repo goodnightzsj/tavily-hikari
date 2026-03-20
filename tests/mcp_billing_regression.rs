@@ -9,12 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::{
-    Json, Router,
-    extract::Query,
-    http::StatusCode,
-    routing::any,
-};
+use axum::{Json, Router, extract::Query, http::StatusCode, routing::any};
 use nanoid::nanoid;
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -112,34 +107,51 @@ async fn create_test_token(base_url: &str) -> Value {
         .expect("decode token payload")
 }
 
-async fn fetch_latest_log(pool: &sqlx::SqlitePool, token_id: &str) -> (Option<i64>, Value) {
+fn token_id_from_secret(token: &str) -> &str {
+    token
+        .strip_prefix("th-")
+        .and_then(|rest| rest.split_once('-').map(|(token_id, _)| token_id))
+        .expect("token id embedded in secret")
+}
+
+async fn fetch_latest_token_log_credits(pool: &sqlx::SqlitePool, token_id: &str) -> Option<i64> {
     let row = sqlx::query(
-        "SELECT business_credits, request_body FROM auth_token_logs WHERE auth_token_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT business_credits FROM auth_token_logs WHERE token_id = ? ORDER BY id DESC LIMIT 1",
     )
     .bind(token_id)
     .fetch_one(pool)
     .await
     .expect("fetch latest token log");
 
-    let credits = row
-        .try_get::<Option<i64>, _>("business_credits")
-        .expect("read business_credits");
+    row.try_get::<Option<i64>, _>("business_credits")
+        .expect("read business_credits")
+}
+
+async fn fetch_latest_request_body(pool: &sqlx::SqlitePool, token_id: &str) -> Value {
+    let row = sqlx::query(
+        "SELECT request_body FROM request_logs WHERE auth_token_id = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(token_id)
+    .fetch_one(pool)
+    .await
+    .expect("fetch latest request log");
+
     let request_body = row
         .try_get::<Vec<u8>, _>("request_body")
         .expect("read request_body");
-    let request_json = serde_json::from_slice::<Value>(&request_body).expect("decode request body json");
-
-    (credits, request_json)
+    serde_json::from_slice::<Value>(&request_body).expect("decode request body json")
 }
 
 async fn fetch_token_monthly_used(pool: &sqlx::SqlitePool, token_id: &str) -> i64 {
-    sqlx::query("SELECT quota_monthly_used FROM auth_tokens WHERE id = ?")
+    sqlx::query(
+        "SELECT COALESCE((SELECT month_count FROM auth_token_quota WHERE token_id = ? LIMIT 1), 0) AS month_count",
+    )
         .bind(token_id)
         .fetch_one(pool)
         .await
         .expect("fetch token quota row")
-        .try_get::<i64, _>("quota_monthly_used")
-        .expect("read quota_monthly_used")
+        .try_get::<i64, _>("month_count")
+        .expect("read month_count")
 }
 
 async fn spawn_mock_mcp_upstream_for_tool(
@@ -152,7 +164,8 @@ async fn spawn_mock_mcp_upstream_for_tool(
         "/mcp",
         any({
             let hits = hits.clone();
-            move |Query(params): Query<std::collections::HashMap<String, String>>, Json(body): Json<Value>| {
+            move |Query(params): Query<std::collections::HashMap<String, String>>,
+                  Json(body): Json<Value>| {
                 let expected_api_key = expected_api_key.clone();
                 let hits = hits.clone();
                 async move {
@@ -199,10 +212,7 @@ async fn spawn_mock_mcp_upstream_for_tool(
                         } else {
                             1
                         };
-                        structured_content.insert(
-                            "usage".into(),
-                            json!({ "credits": credits }),
-                        );
+                        structured_content.insert("usage".into(), json!({ "credits": credits }));
                     }
 
                     (
@@ -220,7 +230,9 @@ async fn spawn_mock_mcp_upstream_for_tool(
         }),
     );
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock upstream");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock upstream");
     let addr = listener.local_addr().expect("mock upstream addr");
     tokio::spawn(async move {
         axum::serve(listener, app.into_make_service())
@@ -244,7 +256,7 @@ async fn mcp_search_with_underscore_tool_injects_usage_and_bills() {
     let base_url = format!("http://127.0.0.1:{port}");
     let token_payload = create_test_token(&base_url).await;
     let token = token_payload["token"].as_str().expect("token secret");
-    let token_id = token_payload["id"].as_str().expect("token id");
+    let token_id = token_id_from_secret(token);
 
     let response = Client::new()
         .post(format!("{base_url}/mcp"))
@@ -277,7 +289,8 @@ async fn mcp_search_with_underscore_tool_injects_usage_and_bills() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     let pool = connect_sqlite_test_pool(&db_str).await;
-    let (credits, request_body) = fetch_latest_log(&pool, token_id).await;
+    let credits = fetch_latest_token_log_credits(&pool, token_id).await;
+    let request_body = fetch_latest_request_body(&pool, token_id).await;
     assert_eq!(credits, Some(2));
     assert_eq!(
         request_body["params"]["name"].as_str(),
@@ -306,7 +319,7 @@ async fn mcp_search_with_underscore_tool_uses_missing_usage_fallback() {
     let base_url = format!("http://127.0.0.1:{port}");
     let token_payload = create_test_token(&base_url).await;
     let token = token_payload["token"].as_str().expect("token secret");
-    let token_id = token_payload["id"].as_str().expect("token id");
+    let token_id = token_id_from_secret(token);
 
     Client::new()
         .post(format!("{base_url}/mcp"))
@@ -332,7 +345,8 @@ async fn mcp_search_with_underscore_tool_uses_missing_usage_fallback() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     let pool = connect_sqlite_test_pool(&db_str).await;
-    let (credits, request_body) = fetch_latest_log(&pool, token_id).await;
+    let credits = fetch_latest_token_log_credits(&pool, token_id).await;
+    let request_body = fetch_latest_request_body(&pool, token_id).await;
     assert_eq!(credits, Some(2));
     assert_eq!(
         request_body["params"]["arguments"]["include_usage"],
@@ -348,7 +362,8 @@ async fn mcp_extract_with_underscore_tool_injects_usage_but_skips_missing_usage_
     let db_path = temp_db_path("mcp-extract-underscore-fallback");
     let db_str = db_path.to_string_lossy().to_string();
     let (upstream_addr, hits) =
-        spawn_mock_mcp_upstream_for_tool("tvly-test-key".to_string(), "tavily_extract", false).await;
+        spawn_mock_mcp_upstream_for_tool("tvly-test-key".to_string(), "tavily_extract", false)
+            .await;
     let port = reserve_local_port();
     let upstream = format!("http://{upstream_addr}/mcp");
     let _proxy = spawn_proxy_process(&db_str, &upstream, port);
@@ -357,7 +372,7 @@ async fn mcp_extract_with_underscore_tool_injects_usage_but_skips_missing_usage_
     let base_url = format!("http://127.0.0.1:{port}");
     let token_payload = create_test_token(&base_url).await;
     let token = token_payload["token"].as_str().expect("token secret");
-    let token_id = token_payload["id"].as_str().expect("token id");
+    let token_id = token_id_from_secret(token);
 
     Client::new()
         .post(format!("{base_url}/mcp"))
@@ -382,7 +397,8 @@ async fn mcp_extract_with_underscore_tool_injects_usage_but_skips_missing_usage_
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     let pool = connect_sqlite_test_pool(&db_str).await;
-    let (credits, request_body) = fetch_latest_log(&pool, token_id).await;
+    let credits = fetch_latest_token_log_credits(&pool, token_id).await;
+    let request_body = fetch_latest_request_body(&pool, token_id).await;
     assert_eq!(credits, None);
     assert_eq!(
         request_body["params"]["name"].as_str(),
