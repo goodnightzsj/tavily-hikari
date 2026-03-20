@@ -260,7 +260,7 @@ jobs:
 
           mkdir -p "${DATA_DIR}"
 
-          ./target/debug/mock_tavily --bind "127.0.0.1:${MOCK_PORT}" >"${MOCK_LOG}" 2>&1 &
+          ./target/debug/mock_tavily --bind "0.0.0.0:${MOCK_PORT}" >"${MOCK_LOG}" 2>&1 &
           MOCK_PID=$!
 
           for _ in {1..50}; do
