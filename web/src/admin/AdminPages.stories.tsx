@@ -39,6 +39,7 @@ import {
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu'
 import { Input } from '../components/ui/input'
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip'
 import { Card } from '../components/ui/card'
 import { Badge } from '../components/ui/badge'
 import { Switch } from '../components/ui/switch'
@@ -1184,20 +1185,30 @@ function StoryAdminUsersSortableHeader({
   const SortIndicatorIcon = !isActive ? ArrowUpDown : activeOrder === 'asc' ? ArrowUp : ArrowDown
   const visibleLabel = displayLabel ?? label
   const bubbleLabel = tooltipLabel ?? label
+  const hasTooltip = bubbleLabel.trim() !== visibleLabel.trim()
+  const trigger = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className={`admin-table-sort-button${isActive ? ' is-active' : ''}`}
+      onClick={() => onToggle(field)}
+      aria-label={hasTooltip ? bubbleLabel : undefined}
+    >
+      <span className="admin-table-sort-label">{visibleLabel}</span>
+      <SortIndicatorIcon className="admin-table-sort-indicator" aria-hidden="true" />
+    </Button>
+  )
   return (
     <th aria-sort={ariaSort}>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className={`tooltip admin-table-sort-button${isActive ? ' is-active' : ''}`}
-        onClick={() => onToggle(field)}
-        aria-label={bubbleLabel}
-        data-tip={bubbleLabel}
-      >
-        <span className="admin-table-sort-label">{visibleLabel}</span>
-        <SortIndicatorIcon className="admin-table-sort-indicator" aria-hidden="true" />
-      </Button>
+      {hasTooltip ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+          <TooltipContent side="top">{bubbleLabel}</TooltipContent>
+        </Tooltip>
+      ) : (
+        trigger
+      )}
     </th>
   )
 }
@@ -2511,15 +2522,18 @@ function RequestsPageCanvas(): JSX.Element {
                         )}
                       </td>
                       <td>
-                        <span className="tooltip" data-tip={requestStatusTip(log, admin)}>
-                          <button
-                            type="button"
-                            className="status-pair-trigger"
-                            aria-label={requestStatusTip(log, admin)}
-                          >
-                            {requestStatusPair(log)}
-                          </button>
-                        </span>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="status-pair-trigger"
+                              aria-label={requestStatusTip(log, admin)}
+                            >
+                              {requestStatusPair(log)}
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">{requestStatusTip(log, admin)}</TooltipContent>
+                        </Tooltip>
                       </td>
                       <td>
                         <StatusBadge tone={logResultTone(log.result_status)}>
@@ -3250,6 +3264,103 @@ function UsersUsagePageCanvas(): JSX.Element {
   )
 }
 
+function UsersUsageTooltipProofCanvas(): JSX.Element {
+  const { language } = useLanguage()
+  const users = useTranslate().admin.users
+  const dailySuccessLabel = language === 'zh' ? users.usage.table.dailySuccessRate : 'Daily'
+  const monthlySuccessLabel = language === 'zh' ? users.usage.table.monthlySuccessRate : 'Monthly'
+  const dailySuccessTooltip = language === 'zh' ? '按最近 24 小时成功率排序' : 'Sort by 24h success rate'
+  const monthlySuccessTooltip = language === 'zh' ? '按最近 30 天成功率排序' : 'Sort by 30d success rate'
+  const dailyFailureText = language === 'zh' ? '失败 1' : '1 failed'
+  const monthlyFailureText = language === 'zh' ? '失败 147' : '147 failed'
+
+  return (
+    <div style={{ display: 'grid', gap: 20, maxWidth: 840, margin: '0 auto' }}>
+      <section className="surface panel">
+        <div className="panel-header">
+          <div>
+            <h2>Users usage tooltip proof</h2>
+            <p className="panel-description">
+              The table shell is intentionally clipped to reproduce the original overlap bug. Shared tooltips must
+              render above the sticky header and scroll frame.
+            </p>
+          </div>
+        </div>
+        <div
+          style={{
+            overflow: 'hidden',
+            maxHeight: 260,
+            borderRadius: 28,
+            border: '1px dashed hsl(var(--accent) / 0.42)',
+            background: 'linear-gradient(180deg, hsl(var(--card) / 0.98), hsl(var(--muted) / 0.24))',
+            padding: 18,
+          }}
+        >
+          <div className="table-wrapper jobs-table-wrapper" style={{ maxHeight: 180, overflow: 'auto' }}>
+            <table className="jobs-table admin-users-table admin-users-usage-table">
+              <thead>
+                <tr>
+                  <th>{users.usage.table.user}</th>
+                  <th>{users.usage.table.status}</th>
+                  <th aria-sort="descending">
+                    <Tooltip open>
+                      <TooltipTrigger asChild>
+                        <Button type="button" variant="ghost" size="sm" className="admin-table-sort-button is-active">
+                          <span className="admin-table-sort-label">{dailySuccessLabel}</span>
+                          <ArrowDown className="admin-table-sort-indicator" aria-hidden="true" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">{dailySuccessTooltip}</TooltipContent>
+                    </Tooltip>
+                  </th>
+                  <th aria-sort="descending">
+                    <Tooltip open>
+                      <TooltipTrigger asChild>
+                        <Button type="button" variant="ghost" size="sm" className="admin-table-sort-button is-active">
+                          <span className="admin-table-sort-label">{monthlySuccessLabel}</span>
+                          <ArrowDown className="admin-table-sort-indicator" aria-hidden="true" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">{monthlySuccessTooltip}</TooltipContent>
+                    </Tooltip>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <div className="admin-users-identity-cell">
+                      <strong>unclejimao</strong>
+                    </div>
+                  </td>
+                  <td>
+                    <StatusBadge tone="success">{users.status.active}</StatusBadge>
+                  </td>
+                  <td>
+                    <div className="admin-table-value-stack">
+                      <span className="admin-table-value-primary">97.5%</span>
+                      <span className="admin-table-value-secondary">{dailyFailureText}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="admin-table-value-stack">
+                      <span className="admin-table-value-primary">94.1%</span>
+                      <span className="admin-table-value-secondary">{monthlyFailureText}</span>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td colSpan={4} style={{ height: 120 }} />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function UserTagsPageCanvas({ editorMode = 'view' }: { editorMode?: StoryTagCardMode }): JSX.Element {
   const users = useTranslate().admin.users
   const cards: Array<AdminUserTag | null> = editorMode === 'new' ? [null, ...MOCK_TAG_CATALOG] : MOCK_TAG_CATALOG
@@ -3819,6 +3930,13 @@ export const Users: Story = {
 
 export const UsersUsage: Story = {
   render: () => <UsersUsagePageCanvas />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const UsersUsageTooltipProof: Story = {
+  render: () => <UsersUsageTooltipProofCanvas />,
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
   },
