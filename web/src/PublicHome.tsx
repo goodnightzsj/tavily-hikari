@@ -48,6 +48,13 @@ interface GuideReference {
   url: string
 }
 
+interface GuideSample {
+  title: string
+  language?: GuideLanguage
+  snippet: string
+  reference?: GuideReference
+}
+
 interface GuideContent {
   title: string
   steps: ReactNode[]
@@ -55,13 +62,15 @@ interface GuideContent {
   snippetLanguage?: GuideLanguage
   snippet?: string
   reference?: GuideReference
+  samples?: GuideSample[]
 }
 
 const CODEX_DOC_URL = 'https://github.com/openai/codex/blob/main/docs/config.md'
 const CLAUDE_DOC_URL = 'https://code.claude.com/docs/en/mcp'
+const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
+const TAVILY_SEARCH_DOC_URL = 'https://docs.tavily.com/documentation/api-reference/endpoint/search'
 const VSCODE_DOC_URL = 'https://code.visualstudio.com/docs/copilot/customization/mcp-servers'
 const NOCODB_DOC_URL = 'https://nocodb.com/docs/product-docs/mcp'
-const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
 const REPO_URL = 'https://github.com/IvanLi-CN/tavily-hikari'
 const STORAGE_LAST_TOKEN = 'tavily-hikari-last-token'
 const STORAGE_TOKEN_MAP = 'tavily-hikari-token-map'
@@ -77,7 +86,7 @@ const GUIDE_KEY_ORDER: GuideKey[] = [
   'claudeDesktop',
   'cursor',
   'windsurf',
-   'cherryStudio',
+  'cherryStudio',
   'other',
 ]
 
@@ -109,6 +118,7 @@ function PublicHome(): JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
   const [activeGuide, setActiveGuide] = useState<GuideKey>('codex')
+  const [revealedGuideToken, setRevealedGuideToken] = useState<string | null>(null)
   const updateBanner = useUpdateAvailable()
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const pageRef = useRef<HTMLElement>(null)
@@ -269,13 +279,15 @@ function PublicHome(): JSX.Element {
   const showLinuxDoLogin = isLoggedOut
   const showRegistrationPausedNotice = isLoggedOut && profile?.allowRegistration === false
   const hasTokenInfo = token.trim().length > 0
+  const canRevealGuideToken = isFullToken(token)
+  const guideTokenVisible = shouldRevealPublicGuideToken(token, revealedGuideToken)
   const hasValidTokenForLogs = isFullToken(token) && !invalidToken
   const hideTokenPanels = !hasTokenInfo && (loading || isLoggedOut)
   const availableKeys = summary?.active_keys ?? null
   const exhaustedKeys = summary?.exhausted_keys ?? null
   const totalKeys = availableKeys != null && exhaustedKeys != null ? availableKeys + exhaustedKeys : null
 
-  const exampleToken = isFullToken(token) ? token : publicStrings.accessToken.placeholder
+  const exampleToken = resolvePublicGuideToken(token, publicStrings.accessToken.placeholder, guideTokenVisible)
 
   const guideDescription = useMemo<GuideContent>(() => {
     const baseUrl = window.location.origin
@@ -753,33 +765,56 @@ function PublicHome(): JSX.Element {
         </div>
         )}
         <div className="guide-panel">
-          <h3>{guideDescription.title}</h3>
+          <div className="guide-panel-header">
+            <h3>{guideDescription.title}</h3>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="guide-token-toggle"
+              disabled={!canRevealGuideToken}
+              aria-pressed={guideTokenVisible}
+              onClick={() => setRevealedGuideToken(guideTokenVisible ? null : token)}
+            >
+              <Icon
+                icon={guideTokenVisible ? 'mdi:eye-off-outline' : 'mdi:eye-outline'}
+                width={16}
+                height={16}
+                aria-hidden="true"
+              />
+              <span>
+                {guideTokenVisible
+                  ? publicStrings.guide.tokenVisibility.hide
+                  : publicStrings.guide.tokenVisibility.show}
+              </span>
+            </Button>
+          </div>
           <ol>
             {guideDescription.steps.map((step, index) => (
               <li key={index}>{step}</li>
             ))}
           </ol>
-          {guideDescription.sampleTitle && guideDescription.snippet && (
-            <div className="guide-sample">
-              <p className="guide-sample-title">{guideDescription.sampleTitle}</p>
+          {resolveGuideSamples(guideDescription).map((sample) => (
+            <div className="guide-sample" key={`${guideDescription.title}-${sample.title}`}>
+              <p className="guide-sample-title">{sample.title}</p>
               <div className="mockup-code relative guide-code-shell">
                 <span className="guide-lang-badge badge badge-outline badge-sm">
-                  {(guideDescription.snippetLanguage ?? 'code').toUpperCase()}
+                  {(sample.language ?? 'code').toUpperCase()}
                 </span>
                 <pre>
-                  <code dangerouslySetInnerHTML={{ __html: guideDescription.snippet }} />
+                  <code dangerouslySetInnerHTML={{ __html: sample.snippet }} />
                 </pre>
               </div>
+              {sample.reference ? (
+                <p className="guide-reference">
+                  {publicStrings.guide.dataSourceLabel}
+                  <a href={sample.reference.url} target="_blank" rel="noreferrer">
+                    {sample.reference.label}
+                  </a>
+                </p>
+              ) : null}
             </div>
-          )}
-          {guideDescription.reference && (
-            <p className="guide-reference">
-              {publicStrings.guide.dataSourceLabel}
-              <a href={guideDescription.reference.url} target="_blank" rel="noreferrer">
-                {guideDescription.reference.label}
-              </a>
-            </p>
-          )}
+          ))}
         </div>
         {activeGuide === 'cherryStudio' && <CherryStudioMock apiKeyExample={exampleToken} />}
       </section>
@@ -873,6 +908,13 @@ function PublicHome(): JSX.Element {
 
 export default PublicHome
 
+export const __testables = {
+  resolvePublicGuideToken,
+  resolveGuideSamples,
+  shouldRevealPublicGuideToken,
+  buildGuideContent,
+}
+
 function MobileGuideDropdown({
   active,
   onChange,
@@ -926,8 +968,8 @@ function buildGuideContent(language: Language, baseUrl: string, prettyToken: str
   const codexSnippet = buildCodexSnippet(baseUrl)
   const claudeSnippet = buildClaudeSnippet(baseUrl, prettyToken, language)
   const genericJsonSnippet = buildGenericJsonSnippet(baseUrl, prettyToken)
-  const curlSnippet = buildCurlSnippet(baseUrl, prettyToken)
-
+  const genericMcpSnippet = buildGenericMcpSnippet(baseUrl, prettyToken)
+  const apiSearchSnippet = buildApiSearchSnippet(baseUrl, prettyToken)
   return {
     codex: {
       title: 'Codex CLI',
@@ -1081,25 +1123,38 @@ function buildGuideContent(language: Language, baseUrl: string, prettyToken: str
           ],
     },
     other: {
-      title: isEnglish ? 'Other clients' : '其他 MCP 客户端',
+      title: isEnglish ? 'Other clients' : '其他客户端',
       steps: isEnglish
         ? [
-            <>Endpoint: <code>{baseUrl}/mcp</code> (Streamable HTTP).</>,
-            <>Auth: HTTP header <code>Authorization: Bearer {prettyToken}</code>.</>,
-            <>Any MCP-compatible client can target this URL with the header attached.</>,
+            <>If your client supports remote MCP, point it to <code>{baseUrl}/mcp</code> and attach <code>Authorization: Bearer {prettyToken}</code>.</>,
+            <>If your client talks to Tavily's HTTP API instead of MCP, use the façade base URL <code>{baseUrl}/api/tavily</code> and call endpoints such as <code>/search</code>, <code>/extract</code>, <code>/crawl</code>, <code>/map</code>, or <code>/research</code>.</>,
+            <>For HTTP API clients, prefer the same bearer token in the header; if headers are unavailable, send it as JSON field <code>api_key</code>.</>,
           ]
         : [
-            <>端点：<code>{baseUrl}/mcp</code>（Streamable HTTP）。</>,
-            <>认证：HTTP Header <code>Authorization: Bearer {prettyToken}</code>。</>,
-            <>适用于任意兼容客户端，直接指向该 URL 并附带上述头部即可。</>,
+            <>如果客户端支持远程 MCP，就把地址指向 <code>{baseUrl}/mcp</code>，并附带 <code>Authorization: Bearer {prettyToken}</code>。</>,
+            <>如果客户端走的是 Tavily 风格 HTTP API，而不是 MCP，就使用基础地址 <code>{baseUrl}/api/tavily</code>，再继续调用 <code>/search</code>、<code>/extract</code>、<code>/crawl</code>、<code>/map</code>、<code>/research</code> 等端点。</>,
+            <>对于 HTTP API 客户端，推荐继续使用同一个 Bearer Token；如果没法自定义 Header，也可以把令牌写入 JSON 请求体字段 <code>api_key</code>。</>,
           ],
-      sampleTitle: isEnglish ? 'Example: generic request' : '示例：通用请求',
-      snippetLanguage: 'bash',
-      snippet: curlSnippet,
-      reference: {
-        label: 'Model Context Protocol spec',
-        url: MCP_SPEC_URL,
-      },
+      samples: [
+        {
+          title: isEnglish ? 'Example 1: generic MCP client config' : '示例 1：通用 MCP 客户端配置',
+          language: 'json',
+          snippet: genericMcpSnippet,
+          reference: {
+            label: 'Model Context Protocol spec',
+            url: MCP_SPEC_URL,
+          },
+        },
+        {
+          title: isEnglish ? 'Example 2: POST /api/tavily/search' : '示例 2：POST /api/tavily/search',
+          language: 'bash',
+          snippet: apiSearchSnippet,
+          reference: {
+            label: 'Tavily Search API docs',
+            url: TAVILY_SEARCH_DOC_URL,
+          },
+        },
+      ],
     },
   }
 }
@@ -1162,11 +1217,48 @@ function buildGenericJsonSnippet(baseUrl: string, prettyToken: string): string {
 }`
 }
 
-function buildCurlSnippet(baseUrl: string, prettyToken: string): string {
-  return `curl -X POST \\
+function buildGenericMcpSnippet(baseUrl: string, prettyToken: string): string {
+  return `{
+  <span class="hl-key">"type"</span>: <span class="hl-string">"http"</span>,
+  <span class="hl-key">"url"</span>: <span class="hl-string">"${baseUrl}/mcp"</span>,
+  <span class="hl-key">"headers"</span>: {
+    <span class="hl-key">"Authorization"</span>: <span class="hl-string">"Bearer ${prettyToken}"</span>
+  }
+}`
+}
+
+function buildApiSearchSnippet(baseUrl: string, prettyToken: string): string {
+  return `curl -X POST "${baseUrl}/api/tavily/search" \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${prettyToken}" \\
-  ${baseUrl}/mcp`
+  -d '{
+    "query": "latest AI agent news",
+    "topic": "general",
+    "search_depth": "basic",
+    "include_answer": true,
+    "max_results": 5
+  }'`
+}
+
+function resolveGuideSamples(content: GuideContent): GuideSample[] {
+  if (content.samples && content.samples.length > 0) return content.samples
+  if (content.sampleTitle && content.snippet) {
+    return [{
+      title: content.sampleTitle,
+      language: content.snippetLanguage,
+      snippet: content.snippet,
+      reference: content.reference,
+    }]
+  }
+  return []
+}
+
+function resolvePublicGuideToken(token: string, placeholder: string, revealed: boolean): string {
+  return revealed && isFullToken(token) ? token : placeholder
+}
+
+function shouldRevealPublicGuideToken(token: string, revealedToken: string | null): boolean {
+  return isFullToken(token) && revealedToken === token
 }
 
 function normalizeTokenHash(value: string): string {

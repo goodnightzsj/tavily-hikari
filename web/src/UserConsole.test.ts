@@ -66,6 +66,60 @@ describe('UserConsole landing guide helpers', () => {
       [{ tokenId: 'a1b2' } as any, { tokenId: 'c3d4' } as any],
     )).toBe('th-xxxx-xxxxxxxxxxxx')
   })
+
+  it('returns the revealable guide token id only for token detail or single-token landing routes', () => {
+    expect(__testables.resolveGuideTokenId({ name: 'token', id: 'a1b2' }, [])).toBe('a1b2')
+    expect(__testables.resolveGuideTokenId(
+      { name: 'landing', section: 'tokens' },
+      [{ tokenId: 'c3d4' } as any],
+    )).toBe('c3d4')
+    expect(__testables.resolveGuideTokenId(
+      { name: 'landing', section: 'dashboard' },
+      [{ tokenId: 'a1b2' } as any, { tokenId: 'c3d4' } as any],
+    )).toBeNull()
+  })
+
+  it('derives a distinct guide reveal context for each route and visible token set', () => {
+    expect(__testables.resolveGuideRevealContextKey({ name: 'token', id: 'a1b2' }, [])).toBe('token:a1b2')
+    expect(__testables.resolveGuideRevealContextKey(
+      { name: 'landing', section: 'tokens' },
+      [{ tokenId: 'c3d4' } as any],
+    )).toBe('landing:tokens:c3d4')
+    expect(__testables.resolveGuideRevealContextKey(
+      { name: 'landing', section: 'dashboard' },
+      [{ tokenId: 'a1b2' } as any, { tokenId: 'c3d4' } as any],
+    )).toBeNull()
+  })
+
+  it('renders a revealed guide token only while the reveal context still matches', () => {
+    expect(__testables.isActiveGuideRevealContext('landing:tokens:a1b2', 'landing:tokens:a1b2')).toBe(true)
+    expect(__testables.isActiveGuideRevealContext('landing:tokens:a1b2', 'landing:tokens:b2c3')).toBe(false)
+    expect(__testables.isActiveGuideRevealContext('token:a1b2', null)).toBe(false)
+  })
+
+  it('normalizes guide samples so the other tab can render both MCP and API examples', () => {
+    expect(__testables.resolveGuideSamples({
+      title: 'Legacy',
+      steps: [],
+      sampleTitle: 'Example',
+      snippetLanguage: 'bash',
+      snippet: 'echo ok',
+      reference: { label: 'Docs', url: 'https://example.com' },
+    })).toEqual([
+      {
+        title: 'Example',
+        language: 'bash',
+        snippet: 'echo ok',
+        reference: { label: 'Docs', url: 'https://example.com' },
+      },
+    ])
+
+    const samples = [
+      { title: 'MCP', language: 'json', snippet: '{}' },
+      { title: 'API', language: 'bash', snippet: 'curl ...' },
+    ]
+    expect(__testables.resolveGuideSamples({ title: 'Other', steps: [], samples })).toBe(samples)
+  })
 })
 
 describe('UserConsole probe step definitions', () => {

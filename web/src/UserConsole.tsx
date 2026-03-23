@@ -71,9 +71,10 @@ import {
 
 const CODEX_DOC_URL = 'https://github.com/openai/codex/blob/main/docs/config.md'
 const CLAUDE_DOC_URL = 'https://code.claude.com/docs/en/mcp'
+const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
+const TAVILY_SEARCH_DOC_URL = 'https://docs.tavily.com/documentation/api-reference/endpoint/search'
 const VSCODE_DOC_URL = 'https://code.visualstudio.com/docs/copilot/customization/mcp-servers'
 const NOCODB_DOC_URL = 'https://nocodb.com/docs/product-docs/mcp'
-const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
 const USER_CONSOLE_SECRET_CACHE_TTL_MS = 2_000
 const USER_CONSOLE_SECRET_PREWARM_DELAY_MS = 120
 
@@ -85,6 +86,13 @@ interface GuideReference {
   url: string
 }
 
+interface GuideSample {
+  title: string
+  language?: GuideLanguage
+  snippet: string
+  reference?: GuideReference
+}
+
 interface GuideContent {
   title: string
   steps: ReactNode[]
@@ -92,6 +100,7 @@ interface GuideContent {
   snippetLanguage?: GuideLanguage
   snippet?: string
   reference?: GuideReference
+  samples?: GuideSample[]
 }
 
 interface ManualCopyBubbleState {
@@ -209,14 +218,32 @@ function shouldRenderLandingGuide(route: ConsoleRoute, tokenCount: number): bool
   return route.name === 'landing' && tokenCount === 1
 }
 
-function resolveGuideToken(route: ConsoleRoute, tokens: UserTokenSummary[]): string {
+function resolveGuideTokenId(route: ConsoleRoute, tokens: UserTokenSummary[]): string | null {
   if (route.name === 'token') {
-    return tokenLabel(route.id)
+    return route.id
   }
   if (tokens.length === 1) {
-    return tokenLabel(tokens[0].tokenId)
+    return tokens[0].tokenId
   }
-  return 'th-xxxx-xxxxxxxxxxxx'
+  return null
+}
+
+function resolveGuideToken(route: ConsoleRoute, tokens: UserTokenSummary[]): string {
+  const guideTokenId = resolveGuideTokenId(route, tokens)
+  return guideTokenId ? tokenLabel(guideTokenId) : 'th-xxxx-xxxxxxxxxxxx'
+}
+
+function resolveGuideRevealContextKey(route: ConsoleRoute, tokens: UserTokenSummary[]): string | null {
+  const guideTokenId = resolveGuideTokenId(route, tokens)
+  if (!guideTokenId) return null
+  if (route.name === 'token') {
+    return `token:${route.id}`
+  }
+  return `landing:${route.section ?? 'landing'}:${tokens.map((token) => token.tokenId).join(',')}`
+}
+
+function isActiveGuideRevealContext(revealedContextKey: string | null, currentContextKey: string | null): boolean {
+  return revealedContextKey != null && currentContextKey != null && revealedContextKey === currentContextKey
 }
 
 function createProbeButtonModel(total: number): ProbeButtonModel {
@@ -721,6 +748,10 @@ export default function UserConsole(): JSX.Element {
   const [apiProbe, setApiProbe] = useState<ProbeButtonModel>(() => createProbeButtonModel(6))
   const [probeBubble, setProbeBubble] = useState<ProbeBubbleModel | null>(null)
   const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
+  const [revealedGuideContextKey, setRevealedGuideContextKey] = useState<string | null>(null)
+  const [guideTokenValue, setGuideTokenValue] = useState<string | null>(null)
+  const [guideTokenLoading, setGuideTokenLoading] = useState(false)
+  const [guideTokenError, setGuideTokenError] = useState<string | null>(null)
   const tokenSecretCacheRef = useRef<Map<string, string>>(new Map())
   const tokenSecretCacheTimerRef = useRef<Map<string, number>>(new Map())
   const tokenSecretWarmTimerRef = useRef<Map<string, number>>(new Map())
@@ -729,6 +760,7 @@ export default function UserConsole(): JSX.Element {
   const tokenSecretRequestAbortRef = useRef<Map<string, AbortController>>(new Map())
   const probeRunIdRef = useRef(0)
   const tokenSecretRunIdRef = useRef(0)
+  const guideTokenRunIdRef = useRef(0)
   const pageRef = useRef<HTMLElement>(null)
   const dashboardSectionRef = useRef<HTMLElement | null>(null)
   const tokensSectionRef = useRef<HTMLElement | null>(null)
@@ -910,6 +942,17 @@ export default function UserConsole(): JSX.Element {
       abortAllPendingTokenSecretRequests()
     }
   }, [abortAllPendingTokenSecretRequests])
+
+  useEffect(() => {
+    guideTokenRunIdRef.current += 1
+    setRevealedGuideContextKey(null)
+    setGuideTokenValue(null)
+    setGuideTokenLoading(false)
+    setGuideTokenError(null)
+  }, [
+    consoleAvailability,
+    route.name === 'token' ? route.id : `${route.section ?? 'landing'}:${tokens.map((token) => token.tokenId).join(',')}`,
+  ])
 
   const clearCachedTokenSecret = useCallback((tokenId: string) => {
     const cacheTimer = tokenSecretCacheTimerRef.current.get(tokenId)
@@ -1125,6 +1168,59 @@ export default function UserConsole(): JSX.Element {
     }
   }, [route, text.detail.tokenSecret.revealFailed, tokenSecretLoading, tokenSecretVisible])
 
+  const guideTokenId = useMemo(() => resolveGuideTokenId(route, tokens), [route, tokens])
+  const maskedGuideToken = useMemo(() => resolveGuideToken(route, tokens), [route, tokens])
+  const guideRevealContextKey = useMemo(() => resolveGuideRevealContextKey(route, tokens), [route, tokens])
+  const guideTokenVisible =
+    consoleAvailability === 'enabled'
+    && guideTokenValue != null
+    && isActiveGuideRevealContext(revealedGuideContextKey, guideRevealContextKey)
+
+  const toggleGuideTokenVisibility = useCallback(async () => {
+    if (!guideTokenId) return
+    if (guideTokenVisible) {
+      guideTokenRunIdRef.current += 1
+      setRevealedGuideContextKey(null)
+      setGuideTokenValue(null)
+      setGuideTokenLoading(false)
+      setGuideTokenError(null)
+      return
+    }
+    if (guideTokenLoading) return
+
+    const runId = guideTokenRunIdRef.current + 1
+    guideTokenRunIdRef.current = runId
+    setRevealedGuideContextKey(null)
+    setGuideTokenValue(null)
+    setGuideTokenLoading(true)
+    setGuideTokenError(null)
+
+    try {
+      const secret = await resolveTokenSecret(guideTokenId)
+      if (guideTokenRunIdRef.current !== runId) return
+      setGuideTokenValue(secret)
+      setRevealedGuideContextKey(guideRevealContextKey)
+    } catch (err) {
+      if (guideTokenRunIdRef.current !== runId) return
+      setRevealedGuideContextKey(null)
+      setGuideTokenValue(null)
+      setGuideTokenError(formatTemplate(text.detail.guideToken.revealFailed, {
+        message: getProbeErrorMessage(err),
+      }))
+    } finally {
+      if (guideTokenRunIdRef.current === runId) {
+        setGuideTokenLoading(false)
+      }
+    }
+  }, [
+    guideRevealContextKey,
+    guideTokenId,
+    guideTokenLoading,
+    guideTokenVisible,
+    resolveTokenSecret,
+    text.detail.guideToken.revealFailed,
+  ])
+
   const subtitle = useMemo(() => {
     const user = profile?.userDisplayName?.trim()
     if (user && user.length > 0) {
@@ -1133,7 +1229,7 @@ export default function UserConsole(): JSX.Element {
     return text.subtitle
   }, [profile?.userDisplayName, text.subtitle])
 
-  const guideToken = useMemo(() => resolveGuideToken(route, tokens), [route, tokens])
+  const guideToken = guideTokenVisible ? guideTokenValue ?? maskedGuideToken : maskedGuideToken
 
   const detailTokenCopyState = route.name === 'token' ? copyState[route.id] ?? 'idle' : 'idle'
   const detailTokenMatchesRoute = route.name === 'token' && tokenSecretTokenId === route.id
@@ -1519,37 +1615,83 @@ export default function UserConsole(): JSX.Element {
         </div>
       )}
       <div className="guide-panel">
-        <h3>{guideDescription.title}</h3>
+        <div className="guide-panel-header">
+          <h3>{guideDescription.title}</h3>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="guide-token-toggle"
+            disabled={!guideTokenId || guideTokenLoading}
+            aria-pressed={guideTokenVisible}
+            aria-busy={guideTokenLoading}
+            onClick={() => void toggleGuideTokenVisibility()}
+          >
+            <Icon
+              icon={guideTokenLoading ? 'mdi:loading' : guideTokenVisible ? 'mdi:eye-off-outline' : 'mdi:eye-outline'}
+              width={16}
+              height={16}
+              aria-hidden="true"
+              className={guideTokenLoading ? 'guide-token-toggle-icon-spin' : undefined}
+            />
+            <span>
+              {guideTokenLoading
+                ? text.detail.guideToken.loading
+                : guideTokenVisible
+                  ? text.detail.guideToken.hide
+                  : text.detail.guideToken.show}
+            </span>
+          </Button>
+        </div>
+        {guideTokenError ? (
+          <p className="guide-token-error" role="status" aria-live="polite">{guideTokenError}</p>
+        ) : null}
         <ol>
           {guideDescription.steps.map((step, index) => (
             <li key={index}>{step}</li>
           ))}
         </ol>
-        {guideDescription.sampleTitle && guideDescription.snippet && (
-          <div className="guide-sample">
-            <p className="guide-sample-title">{guideDescription.sampleTitle}</p>
+        {resolveGuideSamples(guideDescription).map((sample) => (
+          <div className="guide-sample" key={`${guideDescription.title}-${sample.title}`}>
+            <p className="guide-sample-title">{sample.title}</p>
             <div className="mockup-code relative guide-code-shell">
               <span className="guide-lang-badge badge badge-outline badge-sm">
-                {(guideDescription.snippetLanguage ?? 'code').toUpperCase()}
+                {(sample.language ?? 'code').toUpperCase()}
               </span>
               <pre>
-                <code dangerouslySetInnerHTML={{ __html: guideDescription.snippet }} />
+                <code dangerouslySetInnerHTML={{ __html: sample.snippet }} />
               </pre>
             </div>
+            {sample.reference ? (
+              <p className="guide-reference">
+                {publicStrings.guide.dataSourceLabel}
+                <a href={sample.reference.url} target="_blank" rel="noreferrer">
+                  {sample.reference.label}
+                </a>
+              </p>
+            ) : null}
           </div>
-        )}
-        {guideDescription.reference && (
-          <p className="guide-reference">
-            {publicStrings.guide.dataSourceLabel}
-            <a href={guideDescription.reference.url} target="_blank" rel="noreferrer">
-              {guideDescription.reference.label}
-            </a>
-          </p>
-        )}
+        ))}
       </div>
       {activeGuide === 'cherryStudio' && <CherryStudioMock apiKeyExample={guideToken} />}
     </section>
-  ), [activeGuide, guideDescription, guideTabs, guideToken, isCompactLayout, publicStrings.guide.dataSourceLabel, publicStrings.guide.title])
+  ), [
+    activeGuide,
+    guideDescription,
+    guideTabs,
+    guideToken,
+    guideTokenError,
+    guideTokenId,
+    guideTokenLoading,
+    guideTokenVisible,
+    isCompactLayout,
+    publicStrings.guide.dataSourceLabel,
+    publicStrings.guide.title,
+    text.detail.guideToken.hide,
+    text.detail.guideToken.loading,
+    text.detail.guideToken.show,
+    toggleGuideTokenVisibility,
+  ])
 
   return (
     <main
@@ -2061,9 +2203,13 @@ export const __testables = {
   buildMcpToolCallProbeStepDefinitions,
   canonicalMcpProbeToolName,
   extractAdvertisedMcpTools,
+  isActiveGuideRevealContext,
   isBillableMcpProbeTool,
   nextRunningMcpProbeModel,
+  resolveGuideSamples,
+  resolveGuideRevealContextKey,
   resolveGuideToken,
+  resolveGuideTokenId,
   shouldRenderLandingGuide,
 }
 
@@ -2121,8 +2267,8 @@ function buildGuideContent(language: Language, baseUrl: string, prettyToken: str
   const codexSnippet = buildCodexSnippet(baseUrl)
   const claudeSnippet = buildClaudeSnippet(baseUrl, prettyToken, language)
   const genericJsonSnippet = buildGenericJsonSnippet(baseUrl, prettyToken)
-  const curlSnippet = buildCurlSnippet(baseUrl, prettyToken)
-
+  const genericMcpSnippet = buildGenericMcpSnippet(baseUrl, prettyToken)
+  const apiSearchSnippet = buildApiSearchSnippet(baseUrl, prettyToken)
   return {
     codex: {
       title: 'Codex CLI',
@@ -2276,25 +2422,38 @@ function buildGuideContent(language: Language, baseUrl: string, prettyToken: str
           ],
     },
     other: {
-      title: isEnglish ? 'Other clients' : '其他 MCP 客户端',
+      title: isEnglish ? 'Other clients' : '其他客户端',
       steps: isEnglish
         ? [
-            <>Endpoint: <code>{baseUrl}/mcp</code> (Streamable HTTP).</>,
-            <>Auth: HTTP header <code>Authorization: Bearer {prettyToken}</code>.</>,
-            <>Any MCP-compatible client can target this URL with the header attached.</>,
+            <>If your client supports remote MCP, point it to <code>{baseUrl}/mcp</code> and attach <code>Authorization: Bearer {prettyToken}</code>.</>,
+            <>If your client talks to Tavily's HTTP API instead of MCP, use the façade base URL <code>{baseUrl}/api/tavily</code> and call endpoints such as <code>/search</code>, <code>/extract</code>, <code>/crawl</code>, <code>/map</code>, or <code>/research</code>.</>,
+            <>For HTTP API clients, prefer the same bearer token in the header; if headers are unavailable, send it as JSON field <code>api_key</code>.</>,
           ]
         : [
-            <>端点：<code>{baseUrl}/mcp</code>（Streamable HTTP）。</>,
-            <>认证：HTTP Header <code>Authorization: Bearer {prettyToken}</code>。</>,
-            <>适用于任意兼容客户端，直接指向该 URL 并附带上述头部即可。</>,
+            <>如果客户端支持远程 MCP，就把地址指向 <code>{baseUrl}/mcp</code>，并附带 <code>Authorization: Bearer {prettyToken}</code>。</>,
+            <>如果客户端走的是 Tavily 风格 HTTP API，而不是 MCP，就使用基础地址 <code>{baseUrl}/api/tavily</code>，再继续调用 <code>/search</code>、<code>/extract</code>、<code>/crawl</code>、<code>/map</code>、<code>/research</code> 等端点。</>,
+            <>对于 HTTP API 客户端，推荐继续使用同一个 Bearer Token；如果没法自定义 Header，也可以把令牌写入 JSON 请求体字段 <code>api_key</code>。</>,
           ],
-      sampleTitle: isEnglish ? 'Example: generic request' : '示例：通用请求',
-      snippetLanguage: 'bash',
-      snippet: curlSnippet,
-      reference: {
-        label: 'Model Context Protocol spec',
-        url: MCP_SPEC_URL,
-      },
+      samples: [
+        {
+          title: isEnglish ? 'Example 1: generic MCP client config' : '示例 1：通用 MCP 客户端配置',
+          language: 'json',
+          snippet: genericMcpSnippet,
+          reference: {
+            label: 'Model Context Protocol spec',
+            url: MCP_SPEC_URL,
+          },
+        },
+        {
+          title: isEnglish ? 'Example 2: POST /api/tavily/search' : '示例 2：POST /api/tavily/search',
+          language: 'bash',
+          snippet: apiSearchSnippet,
+          reference: {
+            label: 'Tavily Search API docs',
+            url: TAVILY_SEARCH_DOC_URL,
+          },
+        },
+      ],
     },
   }
 }
@@ -2357,11 +2516,40 @@ function buildGenericJsonSnippet(baseUrl: string, prettyToken: string): string {
 }`
 }
 
-function buildCurlSnippet(baseUrl: string, prettyToken: string): string {
-  return `curl -X POST \\
+function buildGenericMcpSnippet(baseUrl: string, prettyToken: string): string {
+  return `{
+  <span class="hl-key">"type"</span>: <span class="hl-string">"http"</span>,
+  <span class="hl-key">"url"</span>: <span class="hl-string">"${baseUrl}/mcp"</span>,
+  <span class="hl-key">"headers"</span>: {
+    <span class="hl-key">"Authorization"</span>: <span class="hl-string">"Bearer ${prettyToken}"</span>
+  }
+}`
+}
+
+function buildApiSearchSnippet(baseUrl: string, prettyToken: string): string {
+  return `curl -X POST "${baseUrl}/api/tavily/search" \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${prettyToken}" \\
-  ${baseUrl}/mcp`
+  -d '{
+    "query": "latest AI agent news",
+    "topic": "general",
+    "search_depth": "basic",
+    "include_answer": true,
+    "max_results": 5
+  }'`
+}
+
+function resolveGuideSamples(content: GuideContent): GuideSample[] {
+  if (content.samples && content.samples.length > 0) return content.samples
+  if (content.sampleTitle && content.snippet) {
+    return [{
+      title: content.sampleTitle,
+      language: content.snippetLanguage,
+      snippet: content.snippet,
+      reference: content.reference,
+    }]
+  }
+  return []
 }
 
 const EN = {
@@ -2422,6 +2610,12 @@ const EN = {
       iconAlt: 'token visibility toggle',
       loading: 'Loading full token…',
       revealFailed: 'Failed to reveal token: {message}',
+    },
+    guideToken: {
+      show: 'Show token',
+      hide: 'Hide token',
+      loading: 'Loading token…',
+      revealFailed: 'Failed to reveal guide token: {message}',
     },
     probe: {
       title: 'Connectivity Checks',
@@ -2576,6 +2770,12 @@ const ZH = {
       iconAlt: 'Token 显隐切换',
       loading: '正在读取完整 Token…',
       revealFailed: '读取完整 Token 失败：{message}',
+    },
+    guideToken: {
+      show: '显示密钥',
+      hide: '隐藏密钥',
+      loading: '正在读取密钥…',
+      revealFailed: '读取导览密钥失败：{message}',
     },
     probe: {
       title: '连通性检测',
