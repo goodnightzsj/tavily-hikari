@@ -1,5 +1,6 @@
 import { Icon } from './lib/icons'
 import { StatusBadge, type StatusTone } from './components/StatusBadge'
+import AdminRecentRequestsPanel, { type RecentRequestsOutcomeFilter } from './components/AdminRecentRequestsPanel'
 import AdminTablePagination from './components/AdminTablePagination'
 import AdminLoadingRegion from './components/AdminLoadingRegion'
 import AdminTableShell from './components/AdminTableShell'
@@ -120,15 +121,16 @@ import {
   clearApiKeyQuarantine,
   fetchProfile,
   fetchRequestLogs,
+  fetchRequestLogsPage,
   fetchSummary,
   fetchSummaryWindows,
   fetchVersion,
   type ApiKeyStats,
   type DashboardSnapshotEvent,
   type DashboardSiteStatusSnapshot,
-  type LogOperationalClass,
   type Profile,
   type RequestLog,
+  type RequestLogFacets,
   type Summary,
   type SummaryWindowsResponse,
   fetchTokens,
@@ -145,7 +147,7 @@ import {
   type TokenLeaderboardFocus,
   type Paginated,
   fetchKeyMetrics,
-  fetchKeyLogs,
+  fetchKeyLogsPage,
   fetchKeyStickyNodes,
   fetchKeyStickyUsers,
   type KeySummary,
@@ -191,6 +193,17 @@ import {
   type ForwardProxyDialogProgressState,
   updateDialogProgressState,
 } from './admin/forwardProxyDialogProgress'
+import {
+  buildRequestKindQuickFilterSelection,
+  defaultTokenLogRequestKindQuickFilters,
+  hasActiveRequestKindQuickFilters,
+  resolveEffectiveRequestKindSelection,
+  resolveManualRequestKindQuickFilters,
+  toggleRequestKindSelection,
+  type TokenLogRequestKindOption,
+  type TokenLogRequestKindQuickBilling,
+  type TokenLogRequestKindQuickProtocol,
+} from './tokenLogRequestKinds'
 import { finalizeForwardProxyRevalidate } from './admin/forwardProxyRevalidate'
 
 const REFRESH_INTERVAL_MS = 30_000
@@ -211,15 +224,6 @@ const DASHBOARD_TOKENS_PAGE_SIZE = 100
 const DASHBOARD_TOKENS_MAX_PAGES = 10
 const USER_TAG_DISPLAY_LIMIT = 3
 const NEW_USER_TAG_CARD_ID = '__new__'
-const REQUEST_LOG_OPERATIONAL_FILTERS: Array<'all' | LogOperationalClass> = [
-  'all',
-  'success',
-  'neutral',
-  'client_error',
-  'upstream_error',
-  'system_error',
-  'quota_exhausted',
-]
 const ADMIN_USERS_DEFAULT_SORT_FIELD: AdminUsersSortField = 'lastLoginAt'
 const ADMIN_USERS_DEFAULT_SORT_ORDER: SortDirection = 'desc'
 const ADMIN_USERS_SORT_FIELDS: readonly AdminUsersSortField[] = [
@@ -1135,6 +1139,13 @@ function keyEffectBadgeLabel(log: RequestLog, strings: AdminTranslations): strin
   }
 }
 
+const emptyRequestLogFacets: RequestLogFacets = {
+  results: [],
+  keyEffects: [],
+  tokens: [],
+  keys: [],
+}
+
 interface ManualCopyBubbleState {
   anchorEl: HTMLElement | null
   title: string
@@ -1205,9 +1216,14 @@ function AdminDashboard(): JSX.Element {
   const [dashboardLogs, setDashboardLogs] = useState<RequestLog[]>([])
   const [logsTotal, setLogsTotal] = useState(0)
   const [logsPage, setLogsPage] = useState(1)
-  const [logResultFilter, setLogResultFilter] = useState<'all' | 'success' | 'error' | 'quota_exhausted'>('all')
-  const [logOperationalClassFilter, setLogOperationalClassFilter] =
-    useState<'all' | LogOperationalClass>('all')
+  const [logsPerPage, setLogsPerPage] = useState(LOGS_PER_PAGE)
+  const [requestLogRequestKindOptions, setRequestLogRequestKindOptions] = useState<TokenLogRequestKindOption[]>([])
+  const [requestLogSelectedKinds, setRequestLogSelectedKinds] = useState<string[]>([])
+  const [requestLogQuickBilling, setRequestLogQuickBilling] = useState<TokenLogRequestKindQuickBilling>('all')
+  const [requestLogQuickProtocol, setRequestLogQuickProtocol] = useState<TokenLogRequestKindQuickProtocol>('all')
+  const [requestLogFacets, setRequestLogFacets] = useState<RequestLogFacets>(emptyRequestLogFacets)
+  const [requestLogOutcomeFilter, setRequestLogOutcomeFilter] = useState<RecentRequestsOutcomeFilter | null>(null)
+  const [requestLogKeyFilter, setRequestLogKeyFilter] = useState<string | null>(null)
   const [requestsLoadState, setRequestsLoadState] = useState<QueryLoadState>('initial_loading')
   const [requestsError, setRequestsError] = useState<string | null>(null)
   const [requestEntityDrawer, setRequestEntityDrawer] = useState<{ kind: 'key' | 'token'; id: string } | null>(null)
@@ -2658,28 +2674,84 @@ function AdminDashboard(): JSX.Element {
     return () => window.clearInterval(timer)
   }, [route, loadForwardProxyStatsData])
 
+  const requestLogQuickFilters = useMemo(
+    () => ({
+      billing: requestLogQuickBilling,
+      protocol: requestLogQuickProtocol,
+    }),
+    [requestLogQuickBilling, requestLogQuickProtocol],
+  )
+  const requestLogSelectedKindsNormalized = useMemo(
+    () => Array.from(new Set(requestLogSelectedKinds.map((value) => value.trim()).filter(Boolean))),
+    [requestLogSelectedKinds],
+  )
+  const requestLogQuickSelection = useMemo(
+    () => buildRequestKindQuickFilterSelection(requestLogRequestKindOptions, requestLogQuickFilters),
+    [requestLogQuickFilters, requestLogRequestKindOptions],
+  )
+  const requestLogEffectiveKinds = useMemo(
+    () =>
+      resolveEffectiveRequestKindSelection(
+        requestLogSelectedKindsNormalized,
+        requestLogQuickFilters,
+        requestLogQuickSelection,
+      ),
+    [requestLogQuickFilters, requestLogQuickSelection, requestLogSelectedKindsNormalized],
+  )
+  const requestLogEffectiveKindsKey = useMemo(
+    () => requestLogEffectiveKinds.join('\u0001'),
+    [requestLogEffectiveKinds],
+  )
+  const requestLogHasEmptyMatch = useMemo(
+    () => hasActiveRequestKindQuickFilters(requestLogQuickFilters) && requestLogQuickSelection.length === 0,
+    [requestLogQuickFilters, requestLogQuickSelection.length],
+  )
+  const requestLogResultFilter =
+    requestLogOutcomeFilter?.kind === 'result'
+      ? (requestLogOutcomeFilter.value as 'success' | 'error' | 'quota_exhausted')
+      : undefined
+  const requestLogKeyEffectFilter =
+    requestLogOutcomeFilter?.kind === 'keyEffect' ? requestLogOutcomeFilter.value : undefined
+
   // Logs list: backend pagination & result filter
   useEffect(() => {
     const request = beginManagedRequest(requestsAbortRef)
-    const resultParam =
-      logResultFilter === 'all' ? undefined : (logResultFilter as 'success' | 'error' | 'quota_exhausted')
     setRequestsLoadState(getBlockingLoadState(requestsLoadedRef.current))
     setRequestsError(null)
     setLogs([])
     setLogsTotal(0)
     setExpandedLogs(new Set())
+    setRequestLogFacets(emptyRequestLogFacets)
 
-    fetchRequestLogs(
-      logsPage,
-      LOGS_PER_PAGE,
-      resultParam,
+    if (requestLogHasEmptyMatch) {
+      setLogs([])
+      setLogsTotal(0)
+      setRequestsLoadState('ready')
+      requestsLoadedRef.current = true
+      request.cleanup()
+      return () => {
+        request.abort()
+        request.cleanup()
+      }
+    }
+
+    fetchRequestLogsPage(
+      {
+        page: logsPage,
+        perPage: logsPerPage,
+        requestKinds: requestLogEffectiveKinds,
+        result: requestLogResultFilter,
+        keyEffect: requestLogKeyEffectFilter,
+        keyId: requestLogKeyFilter ?? undefined,
+      },
       request.signal,
-      logOperationalClassFilter,
     )
       .then((result) => {
         if (request.signal.aborted) return
         setLogs(result.items)
         setLogsTotal(result.total)
+        setRequestLogRequestKindOptions(result.requestKindOptions)
+        setRequestLogFacets(result.facets)
         setRequestsLoadState('ready')
         requestsLoadedRef.current = true
       })
@@ -2699,7 +2771,68 @@ function AdminDashboard(): JSX.Element {
       request.abort()
       request.cleanup()
     }
-  }, [beginManagedRequest, logOperationalClassFilter, logsPage, logResultFilter])
+  }, [
+    beginManagedRequest,
+    logsPage,
+    logsPerPage,
+    requestLogEffectiveKindsKey,
+    requestLogHasEmptyMatch,
+    requestLogKeyEffectFilter,
+    requestLogKeyFilter,
+    requestLogResultFilter,
+  ])
+
+  const handleRequestLogQuickFilters = useCallback(
+    (billing: TokenLogRequestKindQuickBilling, protocol: TokenLogRequestKindQuickProtocol) => {
+      const nextFilters = { billing, protocol }
+      setRequestLogQuickBilling(billing)
+      setRequestLogQuickProtocol(protocol)
+      setRequestLogSelectedKinds(
+        buildRequestKindQuickFilterSelection(requestLogRequestKindOptions, nextFilters),
+      )
+      setLogsPage(1)
+    },
+    [requestLogRequestKindOptions],
+  )
+
+  const handleToggleRequestLogKind = useCallback(
+    (key: string) => {
+      const nextSelected = toggleRequestKindSelection(requestLogEffectiveKinds, key)
+      const nextQuickFilters = resolveManualRequestKindQuickFilters(
+        nextSelected,
+        requestLogQuickFilters,
+        requestLogQuickSelection,
+        requestLogRequestKindOptions,
+      )
+      setRequestLogSelectedKinds(nextSelected)
+      setRequestLogQuickBilling(nextQuickFilters.billing)
+      setRequestLogQuickProtocol(nextQuickFilters.protocol)
+      setLogsPage(1)
+    },
+    [
+      requestLogEffectiveKinds,
+      requestLogQuickFilters,
+      requestLogQuickSelection,
+      requestLogRequestKindOptions,
+    ],
+  )
+
+  const handleClearRequestLogKinds = useCallback(() => {
+    setRequestLogSelectedKinds([])
+    setRequestLogQuickBilling(defaultTokenLogRequestKindQuickFilters.billing)
+    setRequestLogQuickProtocol(defaultTokenLogRequestKindQuickFilters.protocol)
+    setLogsPage(1)
+  }, [])
+
+  const handleRequestLogOutcomeFilter = useCallback((value: RecentRequestsOutcomeFilter | null) => {
+    setRequestLogOutcomeFilter(value)
+    setLogsPage(1)
+  }, [])
+
+  const handleRequestLogKeyFilter = useCallback((value: string | null) => {
+    setRequestLogKeyFilter(value)
+    setLogsPage(1)
+  }, [])
 
   // Jobs list: refetch when filter or page changes
   useEffect(() => {
@@ -3494,17 +3627,23 @@ function AdminDashboard(): JSX.Element {
       setRequestsLoadState(getRefreshingLoadState(requestsLoadedRef.current))
       setRequestsError(null)
       tasks.push(
-        fetchRequestLogs(
-          logsPage,
-          LOGS_PER_PAGE,
-          logResultFilter === 'all' ? undefined : (logResultFilter as 'success' | 'error' | 'quota_exhausted'),
+        fetchRequestLogsPage(
+          {
+            page: logsPage,
+            perPage: logsPerPage,
+            requestKinds: requestLogHasEmptyMatch ? [] : requestLogEffectiveKinds,
+            result: requestLogResultFilter,
+            keyEffect: requestLogKeyEffectFilter,
+            keyId: requestLogKeyFilter ?? undefined,
+          },
           request.signal,
-          logOperationalClassFilter,
         )
           .then((result) => {
             if (request.signal.aborted) return
             setLogs(result.items)
             setLogsTotal(result.total)
+            setRequestLogRequestKindOptions(result.requestKindOptions)
+            setRequestLogFacets(result.facets)
             setRequestsLoadState('ready')
           })
           .catch((err) => {
@@ -4161,8 +4300,8 @@ function AdminDashboard(): JSX.Element {
   }, [keysBatchExpanded, updateKeysBatchOverlayLayout])
 
   const logsTotalPagesRaw = useMemo(
-    () => Math.max(1, Math.ceil(logsTotal / LOGS_PER_PAGE)),
-    [logsTotal],
+    () => Math.max(1, Math.ceil(logsTotal / logsPerPage)),
+    [logsPerPage, logsTotal],
   )
 
   const logsTotalPages = Math.min(logsTotalPagesRaw, LOGS_MAX_PAGES)
@@ -4629,7 +4768,7 @@ function AdminDashboard(): JSX.Element {
     setTokensPage((p) => Math.min(totalPages, p + 1))
   }
 
-  const hasLogsPagination = logsTotal > LOGS_PER_PAGE
+  const hasLogsPagination = logsTotal > logsPerPage
   const usersTotalPages = useMemo(() => Math.max(1, Math.ceil(usersTotal / USERS_PER_PAGE)), [usersTotal])
 
   const goPrevLogsPage = () => {
@@ -4638,6 +4777,11 @@ function AdminDashboard(): JSX.Element {
 
   const goNextLogsPage = () => {
     setLogsPage((p) => Math.min(logsTotalPages, p + 1))
+  }
+
+  const changeLogsPerPage = (value: number) => {
+    setLogsPerPage(value)
+    setLogsPage(1)
   }
 
   const goPrevUsersPage = () => {
@@ -5835,6 +5979,7 @@ function AdminDashboard(): JSX.Element {
           key={route.id}
           id={route.id}
           onBack={() => navigateModule('tokens')}
+          onOpenKey={navigateKey}
           onOpenUser={navigateUser}
           onSecretRotated={handleTokenSecretRotated}
         />
@@ -8066,196 +8211,45 @@ function AdminDashboard(): JSX.Element {
       )}
 
       {showRequests && (
-      <section className="surface panel">
-        <div className="panel-header">
-          <div>
-            <h2>{logStrings.title}</h2>
-            <p className="panel-description">{logStrings.description}</p>
-          </div>
-          <div className="panel-actions">
-            <Select
-              value={logOperationalClassFilter}
-              onValueChange={(value) => {
-                setLogOperationalClassFilter(value as 'all' | LogOperationalClass)
-                setLogsPage(1)
-              }}
-              disabled={requestsBlocking}
-            >
-              <SelectTrigger className="w-[196px]" aria-label={language === 'zh' ? '运行分类筛选' : 'Operational class filter'}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="end">
-                {REQUEST_LOG_OPERATIONAL_FILTERS.map((value) => (
-                  <SelectItem key={value} value={value}>
-                    {value === 'all'
-                      ? language === 'zh'
-                        ? '全部运行分类'
-                        : 'All operational classes'
-                      : operationalClassLabel(value, language)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <SegmentedTabs<'all' | 'success' | 'error' | 'quota_exhausted'>
-              value={logResultFilter}
-              onChange={(next) => {
-                setLogResultFilter(next)
-                setLogsPage(1)
-              }}
-              options={[
-                { value: 'all', label: logStrings.filters.all },
-                { value: 'success', label: logStrings.filters.success },
-                { value: 'error', label: logStrings.filters.error },
-                { value: 'quota_exhausted', label: logStrings.filters.quota },
-              ]}
-              ariaLabel={logStrings.title}
-              disabled={requestsBlocking}
-            />
-          </div>
-        </div>
-        <AdminTableShell
-          className="jobs-table-wrapper admin-responsive-up"
-          tableClassName="admin-logs-table admin-request-logs-table"
+        <AdminRecentRequestsPanel
+          variant="admin"
+          language={language}
+          strings={adminStrings}
+          title={logStrings.title}
+          description={logStrings.description}
+          emptyLabel={logStrings.empty.none}
           loadState={requestsLoadState}
           loadingLabel={requestsRefreshing ? loadingStateStrings.refreshing : logStrings.empty.loading}
           errorLabel={requestsError ?? loadingStateStrings.error}
-          minHeight={320}
-        >
-          {logs.length === 0 ? (
-            <tbody>
-              <tr>
-                <td colSpan={7}>
-                  <div className="empty-state alert">{logStrings.empty.none}</div>
-                </td>
-              </tr>
-            </tbody>
-          ) : (
-            <>
-              <thead>
-                <tr>
-                  <th>{logStrings.table.time}</th>
-                  <th>{logStrings.table.key}</th>
-                  <th>{logStrings.table.token}</th>
-                  <th>Status</th>
-                  <th>{logStrings.table.result}</th>
-                  <th>{logStrings.table.keyEffect}</th>
-                  <th>{logStrings.table.error}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {logs.map((log) => (
-                  <LogRow
-                    key={log.id}
-                    log={log}
-                    expanded={expandedLogs.has(log.id)}
-                    onToggle={toggleLogExpansion}
-                    strings={adminStrings}
-                    language={language}
-                    onOpenKey={openRequestKeyDrawer}
-                    onOpenToken={openRequestTokenDrawer}
-                  />
-                ))}
-              </tbody>
-            </>
-          )}
-        </AdminTableShell>
-        <AdminLoadingRegion
-          className="admin-mobile-list admin-responsive-down"
-          loadState={requestsLoadState}
-          loadingLabel={requestsRefreshing ? loadingStateStrings.refreshing : logStrings.empty.loading}
-          errorLabel={requestsError ?? loadingStateStrings.error}
-          minHeight={240}
-        >
-          {logs.length === 0 ? (
-            <div className="empty-state alert">{logStrings.empty.none}</div>
-          ) : (
-            logs.map((log) => (
-              <article key={log.id} className="admin-mobile-card">
-                <div className="admin-mobile-kv">
-                  <span>{logStrings.table.time}</span>
-                  <strong>{formatTimestamp(log.created_at)}</strong>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logStrings.table.key}</span>
-                  <button
-                    type="button"
-                    className="request-entity-button admin-mobile-request-entity-button"
-                    onClick={() => log.key_id && openRequestKeyDrawer(log.key_id)}
-                  >
-                    <strong>
-                      <code>{log.key_id ?? '—'}</code>
-                    </strong>
-                  </button>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logStrings.table.token}</span>
-                  {log.auth_token_id ? (
-                    <button
-                      type="button"
-                      className="request-entity-button admin-mobile-request-entity-button"
-                      onClick={() => {
-                        if (!log.auth_token_id) return
-                        openRequestTokenDrawer(log.auth_token_id)
-                      }}
-                    >
-                      <strong>
-                        <code>{log.auth_token_id}</code>
-                      </strong>
-                    </button>
-                  ) : (
-                    <strong>
-                      <code>—</code>
-                    </strong>
-                  )}
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>Status</span>
-                  <AnchoredInfoDisclosure
-                    className="status-pair-trigger"
-                    aria-label={formatRequestStatusTooltip(log, adminStrings)}
-                    bubbleContent={formatRequestStatusTooltip(log, adminStrings)}
-                  >
-                    <strong>{formatRequestStatusPair(log.http_status, log.mcp_status)}</strong>
-                  </AnchoredInfoDisclosure>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logStrings.table.result}</span>
-                  <StatusBadge tone={requestLogTone(log)}>
-                    {requestLogLabel(log, language)}
-                  </StatusBadge>
-                </div>
-                <div className="admin-mobile-kv admin-mobile-kv--stacked">
-                  <span>{logStrings.table.keyEffect}</span>
-                  <StatusBadge
-                    tone={keyEffectTone(log.key_effect_code)}
-                    title={formatKeyEffectSummary(log, adminStrings, language)}
-                  >
-                    {keyEffectBadgeLabel(log, adminStrings)}
-                  </StatusBadge>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logStrings.table.error}</span>
-                  <strong>{formatErrorMessage(log, adminStrings.logs.errors, language)}</strong>
-                </div>
-              </article>
-            ))
-          )}
-        </AdminLoadingRegion>
-        {hasLogsPagination && (
-          <AdminTablePagination
-            page={safeLogsPage}
-            totalPages={logsTotalPages}
-            pageSummary={<span className="panel-description">{logStrings.description} ({safeLogsPage} / {logsTotalPages})</span>}
-            previousLabel={tokenStrings.pagination.prev}
-            nextLabel={tokenStrings.pagination.next}
-            previousDisabled={safeLogsPage <= 1}
-            nextDisabled={safeLogsPage >= logsTotalPages}
-            disabled={requestsBlocking}
-            onPrevious={goPrevLogsPage}
-            onNext={goNextLogsPage}
-          />
-        )}
-      </section>
+          logs={logs}
+          requestKindOptions={requestLogRequestKindOptions}
+          requestKindQuickBilling={requestLogQuickBilling}
+          requestKindQuickProtocol={requestLogQuickProtocol}
+          selectedRequestKinds={requestLogSelectedKinds}
+          onRequestKindQuickFiltersChange={handleRequestLogQuickFilters}
+          onToggleRequestKind={handleToggleRequestLogKind}
+          onClearRequestKinds={handleClearRequestLogKinds}
+          outcomeFilter={requestLogOutcomeFilter}
+          resultOptions={requestLogFacets.results}
+          keyEffectOptions={requestLogFacets.keyEffects}
+          onOutcomeFilterChange={handleRequestLogOutcomeFilter}
+          keyOptions={requestLogFacets.keys}
+          selectedKeyId={requestLogKeyFilter}
+          onKeyFilterChange={handleRequestLogKeyFilter}
+          showKeyColumn
+          showTokenColumn
+          page={safeLogsPage}
+          perPage={logsPerPage}
+          total={logsTotal}
+          paginationDisabled={requestsBlocking}
+          onPreviousPage={goPrevLogsPage}
+          onNextPage={goNextLogsPage}
+          onPerPageChange={changeLogsPerPage}
+          formatTime={formatTimestampNoYear}
+          formatTimeDetail={(ts) => (ts ? `${formatTimestampWithMs(ts)} · ${formatRelativeTime(ts)}` : '—')}
+          onOpenKey={openRequestKeyDrawer}
+          onOpenToken={openRequestTokenDrawer}
+        />
       )}
 
       {showJobs && (
@@ -8902,12 +8896,14 @@ function AdminDashboard(): JSX.Element {
                 id={requestEntityDrawer.id}
                 onBack={closeRequestEntityDrawer}
                 onOpenUser={navigateUser}
+                onOpenToken={navigateToken}
               />
             ) : requestEntityDrawer?.kind === 'token' ? (
               <TokenDetail
                 key={`drawer-token-${requestEntityDrawer.id}`}
                 id={requestEntityDrawer.id}
                 onBack={closeRequestEntityDrawer}
+                onOpenKey={navigateKey}
                 onOpenUser={navigateUser}
                 onSecretRotated={handleTokenSecretRotated}
               />
@@ -9326,7 +9322,10 @@ function LogRow({ log, expanded, onToggle, strings, language, onOpenKey, onOpenT
             className="log-key-pill request-entity-button"
             title={strings.keys.actions.details}
             aria-label={strings.keys.actions.details}
-            onClick={() => onOpenKey?.(log.key_id)}
+            onClick={() => {
+              if (!log.key_id) return
+              onOpenKey?.(log.key_id)
+            }}
           >
             <code>{log.key_id}</code>
           </button>
@@ -9486,7 +9485,17 @@ function LogDetails({
   )
 }
 
-export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void; onOpenUser: (userId: string) => void }): JSX.Element {
+export function KeyDetails({
+  id,
+  onBack,
+  onOpenUser,
+  onOpenToken,
+}: {
+  id: string
+  onBack: () => void
+  onOpenUser: (userId: string) => void
+  onOpenToken?: (tokenId: string) => void
+}): JSX.Element {
   const { language } = useLanguage()
   const translations = useTranslate()
   const adminStrings = translations.admin
@@ -9500,14 +9509,26 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
   const [startDate, setStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10))
   const [summary, setSummary] = useState<KeySummary | null>(null)
   const [logs, setLogs] = useState<RequestLog[]>([])
+  const [logsPage, setLogsPage] = useState(1)
+  const [logsPerPage, setLogsPerPage] = useState(20)
+  const [logsTotal, setLogsTotal] = useState(0)
+  const [logsNonce, setLogsNonce] = useState(0)
+  const [keyLogRequestKindOptions, setKeyLogRequestKindOptions] = useState<TokenLogRequestKindOption[]>([])
+  const [keyLogSelectedKinds, setKeyLogSelectedKinds] = useState<string[]>([])
+  const [keyLogQuickBilling, setKeyLogQuickBilling] = useState<TokenLogRequestKindQuickBilling>('all')
+  const [keyLogQuickProtocol, setKeyLogQuickProtocol] = useState<TokenLogRequestKindQuickProtocol>('all')
+  const [keyLogFacets, setKeyLogFacets] = useState<RequestLogFacets>(emptyRequestLogFacets)
+  const [keyLogOutcomeFilter, setKeyLogOutcomeFilter] = useState<RecentRequestsOutcomeFilter | null>(null)
   const [stickyUsers, setStickyUsers] = useState<StickyUserRow[]>([])
   const [stickyUsersPage, setStickyUsersPage] = useState(1)
   const [stickyUsersTotal, setStickyUsersTotal] = useState(0)
   const [stickyNodes, setStickyNodes] = useState<StickyNode[]>([])
   const [detailLoadState, setDetailLoadState] = useState<QueryLoadState>('initial_loading')
+  const [logsLoadState, setLogsLoadState] = useState<QueryLoadState>('initial_loading')
   const [stickyUsersLoadState, setStickyUsersLoadState] = useState<QueryLoadState>('initial_loading')
   const [stickyNodesLoadState, setStickyNodesLoadState] = useState<QueryLoadState>('initial_loading')
   const [error, setError] = useState<string | null>(null)
+  const [logsError, setLogsError] = useState<string | null>(null)
   const [stickyUsersError, setStickyUsersError] = useState<string | null>(null)
   const [stickyNodesError, setStickyNodesError] = useState<string | null>(null)
   const [syncState, setSyncState] = useState<'idle' | 'syncing' | 'success'>('idle')
@@ -9516,12 +9537,15 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
   const syncInFlightRef = useRef(false)
   const syncFeedbackTimerRef = useRef<number | null>(null)
   const loadAbortRef = useRef<AbortController | null>(null)
+  const logsAbortRef = useRef<AbortController | null>(null)
   const queryKeyRef = useRef<string | null>(null)
+  const logsQueryKeyRef = useRef<string | null>(null)
   const stickyUsersAbortRef = useRef<AbortController | null>(null)
   const stickyUsersQueryKeyRef = useRef<string | null>(null)
   const stickyNodesAbortRef = useRef<AbortController | null>(null)
   const stickyNodesQueryKeyRef = useRef<string | null>(null)
   const queryKey = `${id}:${period}:${startDate}`
+  const logsQueryKey = `${id}:${period}:${startDate}:${logsPage}:${logsPerPage}:${keyLogSelectedKinds.join(',')}:${keyLogQuickBilling}:${keyLogQuickProtocol}:${keyLogOutcomeFilter?.kind ?? ''}:${keyLogOutcomeFilter?.value ?? ''}:${logsNonce}`
   const stickyUsersQueryKey = `${id}:${stickyUsersPage}`
   const stickyUsersPerPage = 20
   const quarantineDetailId = `key-quarantine-detail-${id}`
@@ -9556,17 +9580,14 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
       if (reason !== 'refresh') {
         setDetail(null)
         setSummary(null)
-        setLogs([])
       }
       const since = computeSince()
-      const [s, ls, d] = await Promise.all([
+      const [s, d] = await Promise.all([
         fetchKeyMetrics(id, period, since, controller.signal),
-        fetchKeyLogs(id, 50, since, controller.signal),
         fetchApiKeyDetail(id, controller.signal).catch(() => null),
       ])
       if (controller.signal.aborted) return
       setSummary(s)
-      setLogs(ls)
       setDetail(d)
       setDetailLoadState('ready')
       queryKeyRef.current = queryKey
@@ -9577,6 +9598,115 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
       setDetailLoadState('error')
     }
   }, [adminStrings.errors.loadKeyDetails, computeSince, id, period, queryKey])
+
+  const keyLogQuickFilters = useMemo(
+    () => ({
+      billing: keyLogQuickBilling,
+      protocol: keyLogQuickProtocol,
+    }),
+    [keyLogQuickBilling, keyLogQuickProtocol],
+  )
+  const keyLogSelectedKindsNormalized = useMemo(
+    () => Array.from(new Set(keyLogSelectedKinds.map((value) => value.trim()).filter(Boolean))),
+    [keyLogSelectedKinds],
+  )
+  const keyLogQuickSelection = useMemo(
+    () => buildRequestKindQuickFilterSelection(keyLogRequestKindOptions, keyLogQuickFilters),
+    [keyLogQuickFilters, keyLogRequestKindOptions],
+  )
+  const keyLogEffectiveKinds = useMemo(
+    () =>
+      resolveEffectiveRequestKindSelection(
+        keyLogSelectedKindsNormalized,
+        keyLogQuickFilters,
+        keyLogQuickSelection,
+      ),
+    [keyLogQuickFilters, keyLogQuickSelection, keyLogSelectedKindsNormalized],
+  )
+  const keyLogEffectiveKindsKey = useMemo(
+    () => keyLogEffectiveKinds.join('\u0001'),
+    [keyLogEffectiveKinds],
+  )
+  const keyLogHasEmptyMatch = useMemo(
+    () => hasActiveRequestKindQuickFilters(keyLogQuickFilters) && keyLogQuickSelection.length === 0,
+    [keyLogQuickFilters, keyLogQuickSelection.length],
+  )
+  const keyLogResultFilter =
+    keyLogOutcomeFilter?.kind === 'result'
+      ? (keyLogOutcomeFilter.value as 'success' | 'error' | 'quota_exhausted')
+      : undefined
+  const keyLogKeyEffectFilter =
+    keyLogOutcomeFilter?.kind === 'keyEffect' ? keyLogOutcomeFilter.value : undefined
+
+  useEffect(() => {
+    logsAbortRef.current?.abort()
+    const controller = new AbortController()
+    logsAbortRef.current = controller
+    const panelLoadState =
+      logsQueryKeyRef.current == null || logsQueryKeyRef.current !== logsQueryKey
+        ? getBlockingLoadState(logsQueryKeyRef.current != null)
+        : getRefreshingLoadState(logsQueryKeyRef.current != null)
+    setLogsLoadState(panelLoadState)
+    setLogsError(null)
+    setLogs([])
+    setLogsTotal(0)
+    setKeyLogFacets(emptyRequestLogFacets)
+    const since = computeSince()
+
+    if (keyLogHasEmptyMatch) {
+      setLogs([])
+      setLogsTotal(0)
+      setLogsLoadState('ready')
+      logsQueryKeyRef.current = logsQueryKey
+      return () => {
+        logsAbortRef.current?.abort()
+      }
+    }
+
+    fetchKeyLogsPage(
+      id,
+      {
+        page: logsPage,
+        perPage: logsPerPage,
+        since,
+        requestKinds: keyLogEffectiveKinds,
+        result: keyLogResultFilter,
+        keyEffect: keyLogKeyEffectFilter,
+      },
+      controller.signal,
+    )
+      .then((result) => {
+        if (controller.signal.aborted) return
+        setLogs(result.items)
+        setLogsTotal(result.total)
+        setLogsPerPage(result.perPage)
+        setKeyLogRequestKindOptions(result.requestKindOptions)
+        setKeyLogFacets(result.facets)
+        setLogsLoadState('ready')
+        logsQueryKeyRef.current = logsQueryKey
+      })
+      .catch((err) => {
+        if ((err as Error).name === 'AbortError') return
+        console.error(err)
+        setLogsError(err instanceof Error ? err.message : adminStrings.errors.loadKeyDetails)
+        setLogsLoadState('error')
+      })
+
+    return () => {
+      logsAbortRef.current?.abort()
+    }
+  }, [
+    adminStrings.errors.loadKeyDetails,
+    computeSince,
+    id,
+    keyLogEffectiveKindsKey,
+    keyLogHasEmptyMatch,
+    keyLogKeyEffectFilter,
+    keyLogResultFilter,
+    logsPage,
+    logsPerPage,
+    logsQueryKey,
+  ])
 
   const loadStickyUsers = useCallback(async (reason: 'initial' | 'switch' | 'refresh' = 'refresh') => {
     stickyUsersAbortRef.current?.abort()
@@ -9677,6 +9807,14 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
   useEffect(() => {
     setQuarantineDetailExpanded(false)
     setStickyUsersPage(1)
+    setLogsPage(1)
+    setLogsPerPage(20)
+    setKeyLogRequestKindOptions([])
+    setKeyLogSelectedKinds([])
+    setKeyLogQuickBilling('all')
+    setKeyLogQuickProtocol('all')
+    setKeyLogFacets(emptyRequestLogFacets)
+    setKeyLogOutcomeFilter(null)
   }, [id])
 
   const syncUsage = useCallback(async () => {
@@ -9687,6 +9825,7 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
       setError(null)
       await syncApiKeyUsage(id)
       await Promise.all([load('refresh'), loadStickyUsers('refresh'), loadStickyNodes('refresh')])
+      setLogsNonce((value) => value + 1)
       setSyncState('success')
       if (syncFeedbackTimerRef.current != null) {
         window.clearTimeout(syncFeedbackTimerRef.current)
@@ -9711,6 +9850,7 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
       setError(null)
       await clearApiKeyQuarantine(id)
       await Promise.all([load('refresh'), loadStickyUsers('refresh'), loadStickyNodes('refresh')])
+      setLogsNonce((value) => value + 1)
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : adminStrings.errors.clearQuarantine)
@@ -9718,6 +9858,54 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
       setQuarantineState('idle')
     }
   }, [adminStrings.errors.clearQuarantine, id, load, loadStickyNodes, loadStickyUsers, quarantineState])
+
+  const handleKeyLogQuickFilters = useCallback(
+    (billing: TokenLogRequestKindQuickBilling, protocol: TokenLogRequestKindQuickProtocol) => {
+      const nextFilters = { billing, protocol }
+      setKeyLogQuickBilling(billing)
+      setKeyLogQuickProtocol(protocol)
+      setKeyLogSelectedKinds(buildRequestKindQuickFilterSelection(keyLogRequestKindOptions, nextFilters))
+      setLogsPage(1)
+    },
+    [keyLogRequestKindOptions],
+  )
+
+  const handleToggleKeyLogKind = useCallback(
+    (key: string) => {
+      const nextSelected = toggleRequestKindSelection(keyLogEffectiveKinds, key)
+      const nextQuickFilters = resolveManualRequestKindQuickFilters(
+        nextSelected,
+        keyLogQuickFilters,
+        keyLogQuickSelection,
+        keyLogRequestKindOptions,
+      )
+      setKeyLogSelectedKinds(nextSelected)
+      setKeyLogQuickBilling(nextQuickFilters.billing)
+      setKeyLogQuickProtocol(nextQuickFilters.protocol)
+      setLogsPage(1)
+    },
+    [keyLogEffectiveKinds, keyLogQuickFilters, keyLogQuickSelection, keyLogRequestKindOptions],
+  )
+
+  const handleClearKeyLogKinds = useCallback(() => {
+    setKeyLogSelectedKinds([])
+    setKeyLogQuickBilling(defaultTokenLogRequestKindQuickFilters.billing)
+    setKeyLogQuickProtocol(defaultTokenLogRequestKindQuickFilters.protocol)
+    setLogsPage(1)
+  }, [])
+
+  const handleKeyLogOutcomeFilter = useCallback((value: RecentRequestsOutcomeFilter | null) => {
+    setKeyLogOutcomeFilter(value)
+    setLogsPage(1)
+  }, [])
+
+  const keyLogsTotalPages = Math.max(1, Math.ceil(logsTotal / logsPerPage) || 1)
+  const goPrevKeyLogsPage = () => setLogsPage((value) => Math.max(1, value - 1))
+  const goNextKeyLogsPage = () => setLogsPage((value) => Math.min(keyLogsTotalPages, value + 1))
+  const changeKeyLogsPerPage = (value: number) => {
+    setLogsPerPage(value)
+    setLogsPage(1)
+  }
 
   const metricCards = useMemo(() => {
     if (!summary) return []
@@ -9986,89 +10174,42 @@ export function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () 
         stickyNodesError={stickyNodesError}
         onOpenUser={onOpenUser}
       />
-
-      <section className="surface panel">
-        <div className="panel-header">
-          <div>
-            <h2>{keyDetailsStrings.logsTitle}</h2>
-            <p className="panel-description">{keyDetailsStrings.logsDescription}</p>
-          </div>
-        </div>
-        <AdminLoadingRegion
-          className="table-wrapper admin-responsive-up"
-          loadState={detailLoadState}
-          loadingLabel={detailLoadingLabel}
-          minHeight={260}
-        >
-          {logs.length === 0 ? (
-            <div className="empty-state alert">{keyDetailsStrings.logsEmpty}</div>
-          ) : (
-            <Table className="admin-logs-table">
-              <thead>
-                <tr>
-                  <th>{logsTableStrings.time}</th>
-                  <th>{logsTableStrings.httpStatus}</th>
-                  <th>{logsTableStrings.mcpStatus}</th>
-                  <th>{logsTableStrings.result}</th>
-                  <th>{logsTableStrings.error}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {logs.map((log) => (
-                  <tr key={log.id}>
-                    <td>{formatTimestamp(log.created_at)}</td>
-                    <td>{log.http_status ?? '—'}</td>
-                    <td>{log.mcp_status ?? '—'}</td>
-                    <td>
-                      <StatusBadge tone={requestLogTone(log)}>
-                        {requestLogLabel(log, language)}
-                      </StatusBadge>
-                    </td>
-                    <td>{formatErrorMessage(log, adminStrings.logs.errors, language)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-          )}
-        </AdminLoadingRegion>
-        <AdminLoadingRegion
-          className="admin-mobile-list admin-responsive-down"
-          loadState={detailLoadState}
-          loadingLabel={detailLoadingLabel}
-          minHeight={220}
-        >
-          {logs.length === 0 ? (
-            <div className="empty-state alert">{keyDetailsStrings.logsEmpty}</div>
-          ) : (
-            logs.map((log) => (
-              <article key={log.id} className="admin-mobile-card">
-                <div className="admin-mobile-kv">
-                  <span>{logsTableStrings.time}</span>
-                  <strong>{formatTimestamp(log.created_at)}</strong>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logsTableStrings.httpStatus}</span>
-                  <strong>{log.http_status ?? '—'}</strong>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logsTableStrings.mcpStatus}</span>
-                  <strong>{log.mcp_status ?? '—'}</strong>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logsTableStrings.result}</span>
-                  <StatusBadge tone={requestLogTone(log)}>
-                    {requestLogLabel(log, language)}
-                  </StatusBadge>
-                </div>
-                <div className="admin-mobile-kv">
-                  <span>{logsTableStrings.error}</span>
-                  <strong>{formatErrorMessage(log, adminStrings.logs.errors, language)}</strong>
-                </div>
-              </article>
-            ))
-          )}
-        </AdminLoadingRegion>
-      </section>
+      <AdminRecentRequestsPanel
+          variant="admin"
+          language={language}
+          strings={adminStrings}
+          title={keyDetailsStrings.logsTitle}
+          description={keyDetailsStrings.logsDescription}
+          emptyLabel={keyDetailsStrings.logsEmpty}
+          loadState={logsLoadState}
+          loadingLabel={logsLoadState === 'refreshing' ? loadingStateStrings.refreshing : detailLoadingLabel}
+          errorLabel={logsError ?? loadingStateStrings.error}
+          logs={logs}
+          requestKindOptions={keyLogRequestKindOptions}
+          requestKindQuickBilling={keyLogQuickBilling}
+          requestKindQuickProtocol={keyLogQuickProtocol}
+          selectedRequestKinds={keyLogSelectedKinds}
+          onRequestKindQuickFiltersChange={handleKeyLogQuickFilters}
+          onToggleRequestKind={handleToggleKeyLogKind}
+          onClearRequestKinds={handleClearKeyLogKinds}
+          outcomeFilter={keyLogOutcomeFilter}
+          resultOptions={keyLogFacets.results}
+          keyEffectOptions={keyLogFacets.keyEffects}
+          onOutcomeFilterChange={handleKeyLogOutcomeFilter}
+          keyOptions={[]}
+          showKeyColumn={false}
+          showTokenColumn
+          onOpenToken={onOpenToken}
+          page={logsPage}
+          perPage={logsPerPage}
+          total={logsTotal}
+          paginationDisabled={logsLoadState !== 'ready' && logsLoadState !== 'error'}
+          onPreviousPage={goPrevKeyLogsPage}
+          onNextPage={goNextKeyLogsPage}
+          onPerPageChange={changeKeyLogsPerPage}
+          formatTime={formatTimestamp}
+          formatTimeDetail={(ts) => (ts ? `${formatTimestampWithMs(ts)} · ${formatRelativeTime(ts)}` : '—')}
+        />
     </div>
   )
 }

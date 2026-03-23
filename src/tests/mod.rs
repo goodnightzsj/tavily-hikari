@@ -702,14 +702,14 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
         .expect("proxy reopened");
 
     let filters = vec!["mcp:raw:/mcp/sse".to_string()];
-    let (logs, total) = repaired
-        .token_logs_page(&token.id, 1, 20, 0, None, &filters, None)
+    let page = repaired
+        .token_logs_page(&token.id, 1, 20, 0, None, &filters, None, None, None, None)
         .await
         .expect("query filtered token logs");
-    assert_eq!(total, 1);
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].request_kind_key, "mcp:raw:/mcp/sse");
-    assert_eq!(logs[0].request_kind_label, "MCP | /mcp/sse");
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].request_kind_key, "mcp:raw:/mcp/sse");
+    assert_eq!(page.items[0].request_kind_label, "MCP | /mcp/sse");
 
     let options = repaired
         .token_log_request_kind_options(&token.id, 0, None)
@@ -720,6 +720,7 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
     assert_eq!(options[0].label, "MCP | /mcp/sse");
     assert_eq!(options[0].protocol_group, "mcp");
     assert_eq!(options[0].billing_group, "billable");
+    assert_eq!(options[0].count, 1);
 
     sqlx::query(
         r#"
@@ -735,14 +736,25 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
     .await
     .expect("insert legacy neutral control-plane row");
 
-    let (neutral_logs, neutral_total) = repaired
-        .token_logs_page(&token.id, 1, 20, 0, None, &[], Some("neutral"))
+    let neutral_page = repaired
+        .token_logs_page(
+            &token.id,
+            1,
+            20,
+            0,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            Some("neutral"),
+        )
         .await
         .expect("query neutral token logs");
-    assert_eq!(neutral_total, 1);
-    assert_eq!(neutral_logs.len(), 1);
-    assert_eq!(neutral_logs[0].request_kind_key, "mcp:raw:/mcp");
-    assert_eq!(neutral_logs[0].request_kind_label, "MCP | /mcp");
+    assert_eq!(neutral_page.total, 1);
+    assert_eq!(neutral_page.items.len(), 1);
+    assert_eq!(neutral_page.items[0].request_kind_key, "mcp:raw:/mcp");
+    assert_eq!(neutral_page.items[0].request_kind_label, "MCP | /mcp");
 
     sqlx::query(
         r#"
@@ -779,6 +791,7 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
     assert_eq!(canonicalized_options[0].label, "MCP | Acme Lookup");
     assert_eq!(canonicalized_options[0].protocol_group, "mcp");
     assert_eq!(canonicalized_options[0].billing_group, "non_billable");
+    assert_eq!(canonicalized_options[0].count, 3);
 
     sqlx::query(
         r#"
@@ -803,6 +816,7 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
         .find(|option| option.key == "mcp:raw:/mcp")
         .expect("raw root option exists");
     assert_eq!(raw_root_option.billing_group, "billable");
+    assert_eq!(raw_root_option.count, 1);
 
     sqlx::query(
         r#"
@@ -827,6 +841,7 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
         .find(|option| option.key == "api:search")
         .expect("api search option exists");
     assert_eq!(api_search_option.billing_group, "billable");
+    assert_eq!(api_search_option.count, 1);
 
     sqlx::query(
         r#"
@@ -851,6 +866,7 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
         .find(|option| option.key == "mcp:batch")
         .expect("mcp batch option exists");
     assert_eq!(batch_option.billing_group, "non_billable");
+    assert_eq!(batch_option.count, 1);
 
     sqlx::query(
         r#"
@@ -875,6 +891,7 @@ async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
         .find(|option| option.key == "mcp:batch")
         .expect("mixed mcp batch option exists");
     assert_eq!(mixed_batch_option.billing_group, "billable");
+    assert_eq!(mixed_batch_option.count, 2);
 
     let _ = std::fs::remove_file(db_path);
 }

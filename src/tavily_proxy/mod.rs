@@ -3458,7 +3458,8 @@ impl TavilyProxy {
                     )
                     .await?;
 
-                self.key_store
+                let request_log_id = self
+                    .key_store
                     .log_attempt(AttemptLog {
                         key_id: &lease.id,
                         auth_token_id: request.auth_token_id.as_deref(),
@@ -3484,6 +3485,7 @@ impl TavilyProxy {
                     headers,
                     body: body_bytes,
                     api_key_id: Some(lease.id.clone()),
+                    request_log_id: Some(request_log_id),
                     key_effect_code: key_effect.code,
                     key_effect_summary: key_effect.summary,
                 })
@@ -3633,7 +3635,8 @@ impl TavilyProxy {
                     .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                     .await?;
 
-                self.key_store
+                let request_log_id = self
+                    .key_store
                     .log_attempt(AttemptLog {
                         key_id: &lease.id,
                         auth_token_id,
@@ -3661,6 +3664,7 @@ impl TavilyProxy {
                         headers,
                         body: body_bytes,
                         api_key_id: Some(lease.id.clone()),
+                        request_log_id: Some(request_log_id),
                         key_effect_code: key_effect.code,
                         key_effect_summary: key_effect.summary,
                     },
@@ -3818,7 +3822,8 @@ impl TavilyProxy {
                     .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                     .await?;
 
-                self.key_store
+                let request_log_id = self
+                    .key_store
                     .log_attempt(AttemptLog {
                         key_id: &lease.id,
                         auth_token_id,
@@ -3871,6 +3876,7 @@ impl TavilyProxy {
                         headers,
                         body: body_bytes,
                         api_key_id: Some(lease.id.clone()),
+                        request_log_id: Some(request_log_id),
                         key_effect_code: key_effect.code,
                         key_effect_summary: key_effect.summary,
                     },
@@ -3986,7 +3992,8 @@ impl TavilyProxy {
                     .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                     .await?;
 
-                self.key_store
+                let request_log_id = self
+                    .key_store
                     .log_attempt(AttemptLog {
                         key_id: &lease.id,
                         auth_token_id,
@@ -4014,6 +4021,7 @@ impl TavilyProxy {
                         headers,
                         body: body_bytes,
                         api_key_id: Some(lease.id.clone()),
+                        request_log_id: Some(request_log_id),
                         key_effect_code: key_effect.code,
                         key_effect_summary: key_effect.summary,
                     },
@@ -4121,6 +4129,36 @@ impl TavilyProxy {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn request_logs_page(
+        &self,
+        request_kinds: &[String],
+        result_status: Option<&str>,
+        key_effect_code: Option<&str>,
+        auth_token_id: Option<&str>,
+        key_id: Option<&str>,
+        operational_class: Option<&str>,
+        page: i64,
+        per_page: i64,
+    ) -> Result<RequestLogsPage, ProxyError> {
+        self.key_store
+            .fetch_request_logs_page(
+                None,
+                None,
+                request_kinds,
+                result_status,
+                key_effect_code,
+                auth_token_id,
+                key_id,
+                operational_class,
+                page,
+                per_page,
+                true,
+                true,
+            )
+            .await
+    }
+
     /// Rebuild API-key request buckets from visible request logs.
     pub async fn rebuild_api_key_usage_buckets(&self) -> Result<(), ProxyError> {
         self.key_store.rebuild_api_key_usage_buckets().await
@@ -4143,6 +4181,36 @@ impl TavilyProxy {
         since: Option<i64>,
     ) -> Result<Vec<RequestLogRecord>, ProxyError> {
         self.key_store.fetch_key_logs(key_id, limit, since).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn key_logs_page(
+        &self,
+        key_id: &str,
+        since: Option<i64>,
+        request_kinds: &[String],
+        result_status: Option<&str>,
+        key_effect_code: Option<&str>,
+        auth_token_id: Option<&str>,
+        page: i64,
+        per_page: i64,
+    ) -> Result<RequestLogsPage, ProxyError> {
+        self.key_store
+            .fetch_request_logs_page(
+                Some(key_id),
+                since,
+                request_kinds,
+                result_status,
+                key_effect_code,
+                auth_token_id,
+                None,
+                None,
+                page,
+                per_page,
+                true,
+                false,
+            )
+            .await
     }
 
     pub async fn key_sticky_users_paged(
@@ -4932,8 +5000,43 @@ impl TavilyProxy {
         key_effect_code: Option<&str>,
         key_effect_summary: Option<&str>,
     ) -> Result<(), ProxyError> {
+        self.record_token_attempt_request_log_metadata(
+            token_id,
+            method,
+            path,
+            query,
+            http_status,
+            mcp_status,
+            counts_business_quota,
+            result_status,
+            error_message,
+            failure_kind,
+            key_effect_code,
+            key_effect_summary,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_token_attempt_request_log_metadata(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        failure_kind: Option<&str>,
+        key_effect_code: Option<&str>,
+        key_effect_summary: Option<&str>,
+        request_log_id: Option<i64>,
+    ) -> Result<(), ProxyError> {
         let request_kind = classify_token_request_kind(path, None);
-        self.record_token_attempt_with_kind_metadata(
+        self.record_token_attempt_with_kind_request_log_metadata(
             token_id,
             method,
             path,
@@ -4947,6 +5050,7 @@ impl TavilyProxy {
             failure_kind,
             key_effect_code,
             key_effect_summary,
+            request_log_id,
         )
         .await
     }
@@ -5000,6 +5104,43 @@ impl TavilyProxy {
         key_effect_code: Option<&str>,
         key_effect_summary: Option<&str>,
     ) -> Result<(), ProxyError> {
+        self.record_token_attempt_with_kind_request_log_metadata(
+            token_id,
+            method,
+            path,
+            query,
+            http_status,
+            mcp_status,
+            counts_business_quota,
+            result_status,
+            error_message,
+            request_kind,
+            failure_kind,
+            key_effect_code,
+            key_effect_summary,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_token_attempt_with_kind_request_log_metadata(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        request_kind: &TokenRequestKind,
+        failure_kind: Option<&str>,
+        key_effect_code: Option<&str>,
+        key_effect_summary: Option<&str>,
+        request_log_id: Option<i64>,
+    ) -> Result<(), ProxyError> {
         self.key_store
             .insert_token_log(
                 token_id,
@@ -5015,6 +5156,7 @@ impl TavilyProxy {
                 failure_kind,
                 key_effect_code.unwrap_or(KEY_EFFECT_NONE),
                 key_effect_summary,
+                request_log_id,
             )
             .await
     }
@@ -5073,8 +5215,47 @@ impl TavilyProxy {
         key_effect_code: Option<&str>,
         key_effect_summary: Option<&str>,
     ) -> Result<i64, ProxyError> {
+        self.record_pending_billing_attempt_request_log_metadata(
+            token_id,
+            method,
+            path,
+            query,
+            http_status,
+            mcp_status,
+            counts_business_quota,
+            result_status,
+            error_message,
+            business_credits,
+            api_key_id,
+            failure_kind,
+            key_effect_code,
+            key_effect_summary,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_pending_billing_attempt_request_log_metadata(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+        api_key_id: Option<&str>,
+        failure_kind: Option<&str>,
+        key_effect_code: Option<&str>,
+        key_effect_summary: Option<&str>,
+        request_log_id: Option<i64>,
+    ) -> Result<i64, ProxyError> {
         let request_kind = classify_token_request_kind(path, None);
-        self.record_pending_billing_attempt_with_kind_metadata(
+        self.record_pending_billing_attempt_with_kind_request_log_metadata(
             token_id,
             method,
             path,
@@ -5090,6 +5271,7 @@ impl TavilyProxy {
             failure_kind,
             key_effect_code,
             key_effect_summary,
+            request_log_id,
         )
         .await
     }
@@ -5149,8 +5331,49 @@ impl TavilyProxy {
         key_effect_code: Option<&str>,
         key_effect_summary: Option<&str>,
     ) -> Result<i64, ProxyError> {
+        self.record_pending_billing_attempt_with_kind_request_log_metadata(
+            token_id,
+            method,
+            path,
+            query,
+            http_status,
+            mcp_status,
+            counts_business_quota,
+            result_status,
+            error_message,
+            business_credits,
+            request_kind,
+            api_key_id,
+            failure_kind,
+            key_effect_code,
+            key_effect_summary,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_pending_billing_attempt_with_kind_request_log_metadata(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+        request_kind: &TokenRequestKind,
+        api_key_id: Option<&str>,
+        failure_kind: Option<&str>,
+        key_effect_code: Option<&str>,
+        key_effect_summary: Option<&str>,
+        request_log_id: Option<i64>,
+    ) -> Result<i64, ProxyError> {
         let billing_subject = self.billing_subject_for_token(token_id).await?;
-        self.record_pending_billing_attempt_for_subject_with_kind(
+        self.record_pending_billing_attempt_for_subject_with_kind_request_log(
             token_id,
             method,
             path,
@@ -5167,6 +5390,7 @@ impl TavilyProxy {
             failure_kind,
             key_effect_code,
             key_effect_summary,
+            request_log_id,
         )
         .await
     }
@@ -5226,8 +5450,49 @@ impl TavilyProxy {
         key_effect_code: Option<&str>,
         key_effect_summary: Option<&str>,
     ) -> Result<i64, ProxyError> {
+        self.record_pending_billing_attempt_for_subject_request_log_metadata(
+            token_id,
+            method,
+            path,
+            query,
+            http_status,
+            mcp_status,
+            counts_business_quota,
+            result_status,
+            error_message,
+            business_credits,
+            billing_subject,
+            api_key_id,
+            failure_kind,
+            key_effect_code,
+            key_effect_summary,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_pending_billing_attempt_for_subject_request_log_metadata(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+        billing_subject: &str,
+        api_key_id: Option<&str>,
+        failure_kind: Option<&str>,
+        key_effect_code: Option<&str>,
+        key_effect_summary: Option<&str>,
+        request_log_id: Option<i64>,
+    ) -> Result<i64, ProxyError> {
         let request_kind = classify_token_request_kind(path, None);
-        self.record_pending_billing_attempt_for_subject_with_kind(
+        self.record_pending_billing_attempt_for_subject_with_kind_request_log(
             token_id,
             method,
             path,
@@ -5244,6 +5509,7 @@ impl TavilyProxy {
             failure_kind,
             key_effect_code,
             key_effect_summary,
+            request_log_id,
         )
         .await
     }
@@ -5268,6 +5534,49 @@ impl TavilyProxy {
         key_effect_code: Option<&str>,
         key_effect_summary: Option<&str>,
     ) -> Result<i64, ProxyError> {
+        self.record_pending_billing_attempt_for_subject_with_kind_request_log(
+            token_id,
+            method,
+            path,
+            query,
+            http_status,
+            mcp_status,
+            counts_business_quota,
+            result_status,
+            error_message,
+            business_credits,
+            billing_subject,
+            request_kind,
+            api_key_id,
+            failure_kind,
+            key_effect_code,
+            key_effect_summary,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_pending_billing_attempt_for_subject_with_kind_request_log(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+        billing_subject: &str,
+        request_kind: &TokenRequestKind,
+        api_key_id: Option<&str>,
+        failure_kind: Option<&str>,
+        key_effect_code: Option<&str>,
+        key_effect_summary: Option<&str>,
+        request_log_id: Option<i64>,
+    ) -> Result<i64, ProxyError> {
         self.key_store
             .insert_token_log_pending_billing(
                 token_id,
@@ -5286,6 +5595,7 @@ impl TavilyProxy {
                 failure_kind,
                 key_effect_code.unwrap_or(KEY_EFFECT_NONE),
                 key_effect_summary,
+                request_log_id,
             )
             .await
     }
@@ -5421,8 +5731,11 @@ impl TavilyProxy {
         since: i64,
         until: Option<i64>,
         request_kinds: &[String],
+        result_status: Option<&str>,
+        key_effect_code: Option<&str>,
+        key_id: Option<&str>,
         operational_class: Option<&str>,
-    ) -> Result<(Vec<TokenLogRecord>, i64), ProxyError> {
+    ) -> Result<TokenLogsPage, ProxyError> {
         self.key_store
             .fetch_token_logs_page(
                 token_id,
@@ -5431,6 +5744,9 @@ impl TavilyProxy {
                 since,
                 until,
                 request_kinds,
+                result_status,
+                key_effect_code,
+                key_id,
                 operational_class,
             )
             .await

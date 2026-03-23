@@ -996,6 +996,18 @@ interface AdminTranslationsShape {
       success: string
       error: string
       quota: string
+      requestType: string
+      requestTypeAll: string
+      requestTypeEmpty: string
+      billingGroup: string
+      protocolGroup: string
+      resultOrEffect: string
+      resultOrEffectAll: string
+      resultGroup: string
+      keyEffectGroup: string
+      tokenAll: string
+      keyAll: string
+      noFacetOptions: string
     }
     empty: {
       loading: string
@@ -1005,6 +1017,9 @@ interface AdminTranslationsShape {
       time: string
       key: string
       token: string
+      requestType: string
+      status: string
+      chargedCredits: string
       httpStatus: string
       mcpStatus: string
       result: string
@@ -1040,6 +1055,7 @@ interface AdminTranslationsShape {
     response: string
     outcome: string
     keyEffect: string
+    requestTypeDetail: string
     solution: string
     requestBody: string
     responseBody: string
@@ -2175,6 +2191,18 @@ export const translations: Record<Language, TranslationShape> = {
           success: 'Success',
           error: 'Errors',
           quota: 'Quota exhausted',
+          requestType: 'Request Type',
+          requestTypeAll: 'All',
+          requestTypeEmpty: 'No request types in this window',
+          billingGroup: 'Billing',
+          protocolGroup: 'Protocol',
+          resultOrEffect: 'Result / Key Effect',
+          resultOrEffectAll: 'All',
+          resultGroup: 'Result',
+          keyEffectGroup: 'Key Effect',
+          tokenAll: 'All tokens',
+          keyAll: 'All',
+          noFacetOptions: 'No options in this window',
         },
         empty: {
           loading: 'Collecting recent requests…',
@@ -2184,6 +2212,9 @@ export const translations: Record<Language, TranslationShape> = {
           key: 'Key',
           token: 'Token',
           time: 'Time',
+          requestType: 'Request Type',
+          status: 'Status',
+          chargedCredits: 'Credits',
           httpStatus: 'HTTP Status',
           mcpStatus: 'Tavily Status',
           result: 'Result',
@@ -2274,6 +2305,7 @@ export const translations: Record<Language, TranslationShape> = {
         response: 'Response',
         outcome: 'Outcome',
         keyEffect: 'Key Effect',
+        requestTypeDetail: 'Request Type Detail',
         solution: 'Suggested Handling',
         requestBody: 'Request Body',
         responseBody: 'Response Body',
@@ -3367,6 +3399,18 @@ export const translations: Record<Language, TranslationShape> = {
           success: '成功',
           error: '错误',
           quota: '额度耗尽',
+          requestType: '请求类型',
+          requestTypeAll: 'All',
+          requestTypeEmpty: '当前时间窗没有请求类型',
+          billingGroup: '计费',
+          protocolGroup: '协议',
+          resultOrEffect: '结果与影响',
+          resultOrEffectAll: 'All',
+          resultGroup: '结果',
+          keyEffectGroup: 'Key 影响',
+          tokenAll: '全部 Token',
+          keyAll: 'All',
+          noFacetOptions: '当前没有可选项',
         },
         empty: {
           loading: '正在收集最新请求…',
@@ -3376,6 +3420,9 @@ export const translations: Record<Language, TranslationShape> = {
           key: 'Key',
           token: 'Token',
           time: '时间',
+          requestType: '请求类型',
+          status: '状态',
+          chargedCredits: 'Credits',
           httpStatus: 'HTTP 状态码',
           mcpStatus: 'Tavily 状态',
           result: '结果',
@@ -3466,6 +3513,7 @@ export const translations: Record<Language, TranslationShape> = {
         response: '响应',
         outcome: '结果',
         keyEffect: 'Key 影响',
+        requestTypeDetail: '请求类型详情',
         solution: '建议处理',
         requestBody: '请求体',
         responseBody: '响应体',
