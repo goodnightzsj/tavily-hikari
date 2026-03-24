@@ -56,10 +56,13 @@ const canonicalTokenLogRequestKindOptions: TokenLogRequestKindOption[] = [
   { key: 'api:research', label: 'API | research', protocol_group: 'api', billing_group: 'billable' },
   { key: 'api:research-result', label: 'API | research result', protocol_group: 'api', billing_group: 'non_billable' },
   { key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' },
+  { key: 'api:unknown-path', label: 'API | unknown path', protocol_group: 'api', billing_group: 'non_billable' },
   { key: 'api:usage', label: 'API | usage', protocol_group: 'api', billing_group: 'non_billable' },
   { key: 'mcp:batch', label: 'MCP | batch', protocol_group: 'mcp', billing_group: 'billable' },
+  { key: 'mcp:crawl', label: 'MCP | crawl', protocol_group: 'mcp', billing_group: 'billable' },
   { key: 'mcp:extract', label: 'MCP | extract', protocol_group: 'mcp', billing_group: 'billable' },
   { key: 'mcp:initialize', label: 'MCP | initialize', protocol_group: 'mcp', billing_group: 'non_billable' },
+  { key: 'mcp:map', label: 'MCP | map', protocol_group: 'mcp', billing_group: 'billable' },
   {
     key: 'mcp:notifications/initialized',
     label: 'MCP | notifications/initialized',
@@ -68,8 +71,7 @@ const canonicalTokenLogRequestKindOptions: TokenLogRequestKindOption[] = [
   },
   { key: 'mcp:ping', label: 'MCP | ping', protocol_group: 'mcp', billing_group: 'non_billable' },
   { key: 'mcp:prompts/list', label: 'MCP | prompts/list', protocol_group: 'mcp', billing_group: 'non_billable' },
-  { key: 'mcp:raw:/mcp', label: 'MCP | /mcp', protocol_group: 'mcp', billing_group: 'billable' },
-  { key: 'mcp:raw:/mcp/sse', label: 'MCP | /mcp/sse', protocol_group: 'mcp', billing_group: 'billable' },
+  { key: 'mcp:research', label: 'MCP | research', protocol_group: 'mcp', billing_group: 'billable' },
   { key: 'mcp:resources/list', label: 'MCP | resources/list', protocol_group: 'mcp', billing_group: 'non_billable' },
   {
     key: 'mcp:resources/templates/list',
@@ -78,20 +80,55 @@ const canonicalTokenLogRequestKindOptions: TokenLogRequestKindOption[] = [
     billing_group: 'non_billable',
   },
   { key: 'mcp:search', label: 'MCP | search', protocol_group: 'mcp', billing_group: 'billable' },
-  { key: 'mcp:tools/call', label: 'MCP | tools/call', protocol_group: 'mcp', billing_group: 'billable' },
+  { key: 'mcp:third-party-tool', label: 'MCP | third-party tool', protocol_group: 'mcp', billing_group: 'non_billable' },
   { key: 'mcp:tools/list', label: 'MCP | tools/list', protocol_group: 'mcp', billing_group: 'non_billable' },
+  { key: 'mcp:unknown-method', label: 'MCP | unknown method', protocol_group: 'mcp', billing_group: 'non_billable' },
+  { key: 'mcp:unknown-payload', label: 'MCP | unknown payload', protocol_group: 'mcp', billing_group: 'non_billable' },
+  { key: 'mcp:unsupported-path', label: 'MCP | unsupported path', protocol_group: 'mcp', billing_group: 'non_billable' },
 ]
+
+const canonicalTokenLogRequestKindOptionsByKey = new Map<string, TokenLogRequestKindOption>(
+  canonicalTokenLogRequestKindOptions.map((option) => [option.key, option]),
+)
 
 function sortRequestKindOptions(left: TokenLogRequestKindOption, right: TokenLogRequestKindOption): number {
   return left.label.localeCompare(right.label) || left.key.localeCompare(right.key)
 }
 
+function normalizeRequestKindSelectionKey(raw: string): string {
+  const value = raw.trim()
+  if (!value) return ''
+  if (canonicalTokenLogRequestKindOptionsByKey.has(value)) {
+    return value
+  }
+  if (value.startsWith('api:raw:') || value.startsWith('api:')) {
+    return 'api:unknown-path'
+  }
+  if (value.startsWith('mcp:tool:')) {
+    return 'mcp:third-party-tool'
+  }
+  if (value === 'mcp:tools/call') {
+    return 'mcp:unknown-payload'
+  }
+  if (value.startsWith('mcp:raw:')) {
+    const path = value.slice('mcp:raw:'.length)
+    if (path === '/mcp') {
+      return 'mcp:unknown-payload'
+    }
+    if (path.startsWith('/mcp/')) {
+      return 'mcp:unsupported-path'
+    }
+  }
+  if (value.startsWith('mcp:')) {
+    return 'mcp:unknown-method'
+  }
+  return value
+}
+
 export function mergeRequestKindCatalog(
   options: TokenLogRequestKindOption[],
 ): TokenLogRequestKindOption[] {
-  const byKey = new Map<string, TokenLogRequestKindOption>(
-    canonicalTokenLogRequestKindOptions.map((option) => [option.key, option]),
-  )
+  const byKey = new Map<string, TokenLogRequestKindOption>(canonicalTokenLogRequestKindOptionsByKey)
   for (const option of options) {
     const key = option.key.trim()
     if (!key) continue
@@ -104,7 +141,7 @@ export function uniqueSelectedRequestKinds(requestKinds: string[]): string[] {
   const seen = new Set<string>()
   const normalized: string[] = []
   for (const raw of requestKinds) {
-    const value = raw.trim()
+    const value = normalizeRequestKindSelectionKey(raw)
     if (!value || seen.has(value)) continue
     seen.add(value)
     normalized.push(value)
@@ -146,7 +183,7 @@ export function buildVisibleRequestKindOptions(
 }
 
 export function toggleRequestKindSelection(selected: string[], nextKey: string): string[] {
-  const key = nextKey.trim()
+  const key = normalizeRequestKindSelectionKey(nextKey)
   if (!key) return uniqueSelectedRequestKinds(selected)
   const normalized = uniqueSelectedRequestKinds(selected)
   return normalized.includes(key)
