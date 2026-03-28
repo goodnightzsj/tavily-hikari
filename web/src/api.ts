@@ -180,6 +180,11 @@ export interface RequestLog {
   requestKindBillingGroup: 'billable' | 'non_billable'
 }
 
+export interface RequestLogBodies {
+  request_body: string | null
+  response_body: string | null
+}
+
 export interface LogFacetOption {
   value: string
   count: number
@@ -232,6 +237,7 @@ export interface RequestLogsPageQuery {
   result?: LogResultFilter
   keyEffect?: string
   operationalClass?: LogOperationalClass | 'all'
+  includeBodies?: boolean
   tokenId?: string
   keyId?: string
   since?: number
@@ -266,6 +272,7 @@ function appendRequestLogsPageFilters(
     result,
     keyEffect,
     operationalClass,
+    includeBodies,
     tokenId,
     keyId,
     since,
@@ -280,6 +287,7 @@ function appendRequestLogsPageFilters(
   if (result) params.set('result', result)
   if (keyEffect?.trim()) params.set('key_effect', keyEffect.trim())
   if (operationalClass && operationalClass !== 'all') params.set('operational_class', operationalClass)
+  if (includeBodies) params.set('include_bodies', 'true')
   if (tokenId?.trim()) params.set('auth_token_id', tokenId.trim())
   if (keyId?.trim()) params.set('key_id', keyId.trim())
   if (typeof since === 'number' && Number.isFinite(since)) params.set('since', String(since))
@@ -1399,6 +1407,11 @@ export function fetchKeyLogsPage(
   )
 }
 
+export function fetchKeyLogDetails(id: string, logId: number, signal?: AbortSignal): Promise<RequestLogBodies> {
+  const encoded = encodeURIComponent(id)
+  return requestJson(`/api/keys/${encoded}/logs/${encodeURIComponent(String(logId))}/details`, { signal })
+}
+
 export function fetchKeyStickyUsers(
   id: string,
   page = 1,
@@ -1456,7 +1469,11 @@ export function fetchRequestLogs(
   signal?: AbortSignal,
   operationalClass?: LogOperationalClass | 'all',
 ): Promise<RequestLogsPage> {
-  return fetchRequestLogsPage({ page, perPage, result, operationalClass }, signal)
+  return fetchRequestLogsPage({ page, perPage, result, operationalClass, includeBodies: true }, signal)
+}
+
+export function fetchRequestLogDetails(logId: number, signal?: AbortSignal): Promise<RequestLogBodies> {
+  return requestJson(`/api/logs/${encodeURIComponent(String(logId))}/details`, { signal })
 }
 
 export function fetchJobs(
@@ -1685,6 +1702,11 @@ export function fetchTokenLogsPage(
   return requestJson<ServerRequestLogsPage>(`/api/tokens/${encoded}/logs/page?${params.toString()}`, { signal }).then(
     normalizeRequestLogsPage,
   )
+}
+
+export function fetchTokenLogDetails(id: string, logId: number, signal?: AbortSignal): Promise<RequestLogBodies> {
+  const encoded = encodeURIComponent(id)
+  return requestJson(`/api/tokens/${encoded}/logs/${encodeURIComponent(String(logId))}/details`, { signal })
 }
 
 export type TokenLeaderboardPeriod = 'day' | 'month' | 'all'
