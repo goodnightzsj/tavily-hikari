@@ -180,7 +180,7 @@ None
 - [x] M1: 新增 session-delete unsupported canonical kind，并修正未来写入的 non-billable / neutral 语义
 - [x] M2: 让 request/token logs 的结果筛选、facets、catalog 与 UI 同步支持 `neutral`
 - [x] M3: 交付一次性 repair binary，并重建受影响的 `token_usage_stats` 与月 quota rebase
-- [ ] M4: 补齐后端/前端/repair 回归测试并完成快车道 merge-ready 收口
+- [x] M4: 补齐后端/前端/repair 回归测试并完成快车道 merge-ready 收口
 
 ## 方案概述（Approach, high-level）
 
