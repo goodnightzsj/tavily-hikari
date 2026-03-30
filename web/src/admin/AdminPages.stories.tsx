@@ -21,12 +21,17 @@ import type {
   RequestLog,
   SortDirection,
 } from '../api'
+import AdminCompactIntro from '../components/AdminCompactIntro'
 import AdminPanelHeader from '../components/AdminPanelHeader'
 import AdminRecentRequestsPanel, { type RecentRequestsOutcomeFilter } from '../components/AdminRecentRequestsPanel'
+import AdminReturnToConsoleLink from '../components/AdminReturnToConsoleLink'
 import AdminTablePagination from '../components/AdminTablePagination'
 import JobKeyLink from '../components/JobKeyLink'
 import QuotaRangeField from '../components/QuotaRangeField'
+import { AdminSidebarUtilityCard, AdminSidebarUtilityStack } from '../components/AdminSidebarUtility'
+import LanguageSwitcher from '../components/LanguageSwitcher'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
+import ThemeToggle from '../components/ThemeToggle'
 import SegmentedTabs from '../components/ui/SegmentedTabs'
 import { Button } from '../components/ui/button'
 import {
@@ -62,7 +67,7 @@ import {
   type TokenLogRequestKindQuickProtocol,
 } from '../tokenLogRequestKinds'
 
-import AdminShell, { type AdminNavItem, type AdminNavTarget } from './AdminShell'
+import AdminShell, { AdminShellSidebarUtility, type AdminNavItem, type AdminNavTarget } from './AdminShell'
 import DashboardOverview, { type DashboardMetricCard } from './DashboardOverview'
 import {
   createDashboardMonthMetrics,
@@ -2559,10 +2564,64 @@ function buildNavItems(strings: AdminTranslations): AdminNavItem[] {
 interface AdminPageFrameProps {
   activeModule: AdminNavTarget
   children: ReactNode
+  showDefaultShellChrome?: boolean
 }
 
-function AdminPageFrame({ activeModule, children }: AdminPageFrameProps): JSX.Element {
+function AdminPageFrame({
+  activeModule,
+  children,
+  showDefaultShellChrome = true,
+}: AdminPageFrameProps): JSX.Element {
   const admin = useTranslate().admin
+  const intro = (() => {
+    switch (activeModule) {
+      case 'dashboard':
+        return {
+          title: admin.header.title,
+          description: admin.header.subtitle,
+        }
+      case 'tokens':
+        return {
+          title: admin.tokens.title,
+          description: admin.tokens.description,
+        }
+      case 'keys':
+        return {
+          title: admin.keys.title,
+          description: admin.keys.description,
+        }
+      case 'requests':
+        return {
+          title: admin.logs.title,
+          description: admin.logs.description,
+        }
+      case 'jobs':
+        return {
+          title: admin.jobs.title,
+          description: admin.jobs.description,
+        }
+      case 'users':
+        return {
+          title: admin.users.title,
+          description: admin.users.description,
+        }
+      case 'alerts':
+        return {
+          title: admin.modules.alerts.title,
+          description: admin.modules.alerts.description,
+        }
+      case 'proxy-settings':
+        return {
+          title: admin.proxySettings.title,
+          description: admin.proxySettings.description,
+        }
+      default:
+        return {
+          title: admin.header.title,
+          description: admin.header.subtitle,
+        }
+    }
+  })()
 
   return (
     <AdminShell
@@ -2571,20 +2630,67 @@ function AdminPageFrame({ activeModule, children }: AdminPageFrameProps): JSX.El
       skipToContentLabel={admin.accessibility.skipToContent}
       onSelectItem={() => {}}
     >
-      <AdminPanelHeader
-        title={admin.header.title}
-        subtitle={admin.header.subtitle}
-        displayName="Ops Admin"
-        isAdmin
-        updatedPrefix={admin.header.updatedPrefix}
-        updatedTime="11:42:10"
-        isRefreshing={false}
-        refreshLabel={admin.header.refreshNow}
-        refreshingLabel={admin.header.refreshing}
-        userConsoleLabel={admin.header.returnToConsole}
-        userConsoleHref="/console"
-        onRefresh={() => {}}
-      />
+      {showDefaultShellChrome && (
+        <>
+          <AdminShellSidebarUtility>
+            <AdminSidebarUtilityStack>
+              <AdminSidebarUtilityCard>
+                <div className="admin-sidebar-utility-toolbar">
+                  <ThemeToggle />
+                  <LanguageSwitcher />
+                </div>
+                <div className="admin-sidebar-utility-meta">
+                  <div className="user-badge user-badge-admin">
+                    <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />
+                    <span>Ops Admin</span>
+                  </div>
+                  <span className="admin-panel-header-time" aria-live="polite">
+                    <Icon icon="mdi:clock-time-four-outline" width={14} height={14} className="admin-panel-header-time-icon" aria-hidden="true" />
+                    <span className="admin-panel-header-time-label">{admin.header.updatedPrefix}</span>
+                    <span className="admin-panel-header-time-value">11:42:10</span>
+                  </span>
+                </div>
+              </AdminSidebarUtilityCard>
+              <AdminSidebarUtilityCard>
+                <div className="admin-sidebar-utility-actions">
+                  <AdminReturnToConsoleLink
+                    label={admin.header.returnToConsole}
+                    href="/console"
+                    className="admin-sidebar-utility-action"
+                  />
+                  <Button type="button" variant="outline" size="sm" className="admin-panel-refresh-button admin-sidebar-utility-action">
+                    <Icon icon="mdi:refresh" width={16} height={16} aria-hidden="true" />
+                    <span>{admin.header.refreshNow}</span>
+                  </Button>
+                </div>
+              </AdminSidebarUtilityCard>
+            </AdminSidebarUtilityStack>
+          </AdminShellSidebarUtility>
+
+          <div className="admin-stacked-only">
+            <AdminPanelHeader
+              title={admin.header.title}
+              subtitle={admin.header.subtitle}
+              displayName="Ops Admin"
+              isAdmin
+              updatedPrefix={admin.header.updatedPrefix}
+              updatedTime="11:42:10"
+              isRefreshing={false}
+              refreshLabel={admin.header.refreshNow}
+              refreshingLabel={admin.header.refreshing}
+              userConsoleLabel={admin.header.returnToConsole}
+              userConsoleHref="/console"
+              onRefresh={() => {}}
+            />
+          </div>
+          <div className="admin-desktop-only">
+            <AdminCompactIntro
+              title={intro.title}
+              description={intro.description}
+            />
+          </div>
+        </>
+      )}
       {children}
     </AdminShell>
   )
@@ -3286,7 +3392,11 @@ function KeysPageCanvas({
   )
 }
 
-function RequestsPageCanvas(): JSX.Element {
+function RequestsPageCanvas({
+  initialDrawerTarget = null,
+}: {
+  initialDrawerTarget?: { kind: 'key' | 'token'; id: string } | null
+} = {}): JSX.Element {
   const admin = useTranslate().admin
   const { language } = useLanguage()
   const logStrings = admin.logs
@@ -3299,7 +3409,7 @@ function RequestsPageCanvas(): JSX.Element {
     useState<TokenLogRequestKindQuickProtocol>('all')
   const [outcomeFilter, setOutcomeFilter] = useState<RecentRequestsOutcomeFilter | null>(null)
   const [selectedKeyId, setSelectedKeyId] = useState<string | null>(null)
-  const [drawerTarget, setDrawerTarget] = useState<{ kind: 'key' | 'token'; id: string } | null>(null)
+  const [drawerTarget, setDrawerTarget] = useState<{ kind: 'key' | 'token'; id: string } | null>(initialDrawerTarget)
   const requestKindQuickFilters = useMemo(
     () => ({
       billing: requestKindQuickBilling,
@@ -3911,17 +4021,70 @@ function UsersUsagePageCanvas({
   }
 
   return (
-    <AdminPageFrame activeModule="user-usage">
+    <AdminPageFrame activeModule="user-usage" showDefaultShellChrome={false}>
+      <AdminShellSidebarUtility>
+        <AdminSidebarUtilityStack>
+          <AdminSidebarUtilityCard>
+            <div className="admin-sidebar-utility-toolbar">
+              <ThemeToggle />
+              <LanguageSwitcher />
+            </div>
+            <div className="admin-sidebar-utility-meta">
+              <div className="user-badge user-badge-admin">
+                <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />
+                <span>Ops Admin</span>
+              </div>
+              <span className="admin-panel-header-time" aria-live="polite">
+                <Icon icon="mdi:clock-time-four-outline" width={14} height={14} className="admin-panel-header-time-icon" aria-hidden="true" />
+                <span className="admin-panel-header-time-label">{admin.header.updatedPrefix}</span>
+                <span className="admin-panel-header-time-value">11:42:10</span>
+              </span>
+            </div>
+          </AdminSidebarUtilityCard>
+          <AdminSidebarUtilityCard>
+            <div className="admin-sidebar-utility-actions">
+              <AdminReturnToConsoleLink
+                label={admin.header.returnToConsole}
+                href="/console"
+                className="admin-sidebar-utility-action"
+              />
+              <Button type="button" variant="outline" size="sm" className="admin-panel-refresh-button admin-sidebar-utility-action">
+                <Icon icon="mdi:refresh" width={16} height={16} aria-hidden="true" />
+                <span>{admin.header.refreshNow}</span>
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="admin-sidebar-utility-action"
+                onClick={() => openAdminStory('admin-pages--users')}
+              >
+                <Icon icon="mdi:arrow-left" width={16} height={16} aria-hidden="true" />
+                <span>{users.usage.back}</span>
+              </Button>
+            </div>
+          </AdminSidebarUtilityCard>
+        </AdminSidebarUtilityStack>
+      </AdminShellSidebarUtility>
+
+      <div className="admin-desktop-only">
+        <AdminCompactIntro
+          title={users.usage.title}
+          description={users.usage.description}
+        />
+      </div>
+
       <section className="surface panel">
         <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
-          <div>
+          <div className="admin-stacked-only" style={{ flex: '1 1 340px', minWidth: 260 }}>
             <h2>{users.usage.title}</h2>
             <p className="panel-description">{users.usage.description}</p>
           </div>
           <div className="admin-inline-actions" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <button type="button" className="btn btn-outline" onClick={() => openAdminStory('admin-pages--users')}>
-              {users.usage.back}
-            </button>
+            <div className="admin-stacked-only">
+              <button type="button" className="btn btn-outline" onClick={() => openAdminStory('admin-pages--users')}>
+                {users.usage.back}
+              </button>
+            </div>
             <div className="users-search-controls">
               <input
                 type="text"
@@ -4199,15 +4362,17 @@ function UnboundTokenUsagePageCanvas({
     <AdminPageFrame activeModule="tokens">
       <section className="surface panel">
         <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ flex: '1 1 340px', minWidth: 260 }}>
+          <div className="admin-stacked-only" style={{ flex: '1 1 340px', minWidth: 260 }}>
             <h2>{strings.title}</h2>
             <p className="panel-description">{strings.description}</p>
             <p className="panel-description" data-selected-token>{selectedTokenId ? `Opened ${selectedTokenId}` : 'No token opened yet'}</p>
           </div>
           <div className="admin-inline-actions" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <button type="button" className="btn btn-outline" onClick={() => openAdminStory('admin-pages--tokens')}>
-              {strings.back}
-            </button>
+            <div className="admin-stacked-only">
+              <button type="button" className="btn btn-outline" onClick={() => openAdminStory('admin-pages--tokens')}>
+                {strings.back}
+              </button>
+            </div>
             <div className="users-search-controls">
               <input
                 type="text"
@@ -4223,15 +4388,23 @@ function UnboundTokenUsagePageCanvas({
                 {users.search}
               </button>
               {query.length > 0 && (
-                <button type="button" className="btn btn-ghost" onClick={() => {
-                  setQuery('')
-                  setPage(1)
-                }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => {
+                    setQuery('')
+                    setPage(1)
+                  }}
+                >
                   {users.clear}
                 </button>
               )}
             </div>
           </div>
+        </div>
+
+        <div className="admin-desktop-only">
+          <p className="panel-description" data-selected-token>{selectedTokenId ? `Opened ${selectedTokenId}` : 'No token opened yet'}</p>
         </div>
 
         <div className="table-wrapper jobs-table-wrapper admin-users-usage-table-wrapper admin-responsive-up">
@@ -5224,6 +5397,30 @@ export const Dashboard: Story = {
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
   },
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+    const root = canvasElement.ownerDocument
+    const utility = root.querySelector<HTMLElement>('.admin-sidebar-utility')
+    const intro = root.querySelector<HTMLElement>('.admin-compact-intro')
+    const stackedChrome = root.querySelector<HTMLElement>('.admin-stacked-only')
+
+    if (!utility || !intro || !stackedChrome) {
+      throw new Error('Expected admin page chrome fixtures to render for dashboard story.')
+    }
+    if (window.getComputedStyle(intro).display === 'none') {
+      throw new Error('Expected compact intro to remain visible at desktop width.')
+    }
+    if (window.getComputedStyle(stackedChrome).display !== 'none') {
+      throw new Error('Expected stacked header chrome to be hidden at desktop width.')
+    }
+  },
+}
+
+export const DashboardStacked: Story = {
+  render: () => <DashboardPageCanvas />,
+  parameters: {
+    viewport: { defaultViewport: '1100-breakpoint-admin-stack-max' },
+  },
 }
 
 export const Tokens: Story = {
@@ -5259,6 +5456,31 @@ export const Requests: Story = {
   },
 }
 
+export const RequestsTokenDrawerDesktop: Story = {
+  render: () => <RequestsPageCanvas initialDrawerTarget={{ kind: 'token', id: 'tok_req_001' }} />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 200))
+    const drawerBody = canvasElement.ownerDocument.querySelector<HTMLElement>('.request-entity-drawer-body')
+    if (!drawerBody) {
+      throw new Error('Expected request drawer body to be mounted.')
+    }
+    const utility = drawerBody?.querySelector<HTMLElement>('.admin-sidebar-utility')
+    const intro = drawerBody?.querySelector<HTMLElement>('.admin-compact-intro')
+    if (!utility || !intro) {
+      throw new Error('Expected request drawer token detail to render desktop utility fallback and compact intro.')
+    }
+    const text = drawerBody.textContent ?? ''
+    for (const expected of ['Regenerate Secret', 'Back']) {
+      if (!text.includes(expected)) {
+        throw new Error(`Expected request drawer token detail to contain: ${expected}`)
+      }
+    }
+  },
+}
+
 export const Jobs: Story = {
   render: () => <JobsPageCanvas />,
   parameters: {
@@ -5277,6 +5499,24 @@ export const UsersUsage: Story = {
   render: () => <UsersUsagePageCanvas />,
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
+  },
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+    const utility = canvasElement.querySelector<HTMLElement>('.admin-sidebar-utility')
+    const intro = canvasElement.querySelector<HTMLElement>('.admin-compact-intro')
+    if (!utility) {
+      throw new Error('Expected user usage page to render desktop sidebar utility.')
+    }
+    if (!intro || !intro.textContent?.includes('用量')) {
+      throw new Error('Expected user usage page to render a compact intro with the page title.')
+    }
+  },
+}
+
+export const UsersUsageStacked: Story = {
+  render: () => <UsersUsagePageCanvas />,
+  parameters: {
+    viewport: { defaultViewport: '1100-breakpoint-admin-stack-max' },
   },
 }
 
@@ -5335,6 +5575,13 @@ export const UnboundTokenUsageMobile: Story = {
   render: () => <UnboundTokenUsagePageCanvas />,
   parameters: {
     viewport: { defaultViewport: '0390-device-iphone-14' },
+  },
+}
+
+export const UnboundTokenUsageStacked: Story = {
+  render: () => <UnboundTokenUsagePageCanvas />,
+  parameters: {
+    viewport: { defaultViewport: '1100-breakpoint-admin-stack-max' },
   },
 }
 
