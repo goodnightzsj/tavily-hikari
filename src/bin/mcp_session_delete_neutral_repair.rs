@@ -459,9 +459,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::{
         AuthTokenLogCandidate, BILLING_STATE_NONE, REQUEST_KIND_KEY, REQUEST_KIND_LABEL,
-        apply_auth_token_log_updates, apply_request_log_updates, build_report, connect_sqlite_pool,
-        load_auth_token_log_candidates, load_request_log_candidates, repair_month_start,
-        request_log_needs_update, touched_months,
+        RepairExecutionSummary, apply_auth_token_log_updates, apply_request_log_updates,
+        build_report, connect_sqlite_pool, load_auth_token_log_candidates,
+        load_request_log_candidates, repair_month_start, request_log_needs_update, touched_months,
     };
     use chrono::{Datelike, TimeZone, Utc};
     use nanoid::nanoid;
