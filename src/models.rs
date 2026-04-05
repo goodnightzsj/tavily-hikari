@@ -1,7 +1,7 @@
 use crate::store::*;
 use crate::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ApiKeyLease {
     pub(crate) id: String,
     pub(crate) secret: String,
