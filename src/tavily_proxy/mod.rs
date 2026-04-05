@@ -535,6 +535,115 @@ impl TavilyProxy {
         None
     }
 
+    fn format_budget_requirement(requirement: &KeyBudgetRequirement) -> String {
+        format!(
+            "rpm_cost={} credit_cost={}",
+            requirement.rpm_cost.max(1),
+            requirement.credit_cost.max(0)
+        )
+    }
+
+    fn format_key_budget_snapshot(
+        candidate: &ApiKeyBudgetCandidate,
+        state: &KeyRuntimeBudgetState,
+        now: i64,
+        rpm_limit: usize,
+    ) -> String {
+        let effective_quota = Self::compute_effective_quota_remaining(candidate, state)
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        let quota_remaining = candidate
+            .quota_remaining
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        let quota_limit = candidate
+            .quota_limit
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        let quota_synced_at = candidate
+            .quota_synced_at
+            .map_or_else(|| "-".to_string(), |value| value.to_string());
+        let cooldown_until = state
+            .cooldown_until
+            .map_or_else(|| "-".to_string(), |value| value.to_string());
+        let block_reason = Self::compute_runtime_budget_block_reason(candidate, state, now)
+            .unwrap_or_else(|| "none".to_string());
+        let rpm_used = state.recent_request_timestamps.len();
+        let rpm_remaining = rpm_limit.saturating_sub(rpm_used);
+        format!(
+            "key_id={} key={} status={} quota={}/{} effective_quota={} quota_synced_at={} rpm={}/{} cooldown_until={} block_reason={} migration_reason={}",
+            candidate.id,
+            preview_key(&candidate.secret),
+            candidate.status,
+            quota_remaining,
+            quota_limit,
+            effective_quota,
+            quota_synced_at,
+            rpm_used,
+            rpm_remaining,
+            cooldown_until,
+            block_reason,
+            state
+                .last_migration_reason
+                .clone()
+                .unwrap_or_else(|| "-".to_string())
+        )
+    }
+
+    fn build_key_budget_inventory(
+        candidates: &[ApiKeyBudgetCandidate],
+        runtime_states: &mut HashMap<String, KeyRuntimeBudgetState>,
+        now: i64,
+        rpm_limit: usize,
+    ) -> Vec<String> {
+        candidates
+            .iter()
+            .map(|candidate| {
+                let state = runtime_states.entry(candidate.id.clone()).or_default();
+                Self::prune_key_runtime_state(state, now);
+                Self::format_key_budget_snapshot(candidate, state, now, rpm_limit)
+            })
+            .collect()
+    }
+
+    async fn emit_key_budget_inventory_log(
+        &self,
+        event: &str,
+        requirement: Option<&KeyBudgetRequirement>,
+        focus_key_ids: &[String],
+        excluded_key_ids: &[String],
+        details: &str,
+    ) {
+        let mut candidates = match self.key_store.list_api_key_budget_candidates().await {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                eprintln!("key-budget event={event} log_failed={err}");
+                return;
+            }
+        };
+        candidates.sort_by(|left, right| left.id.cmp(&right.id));
+        let now = Utc::now().timestamp();
+        let rpm_limit = effective_key_rpm_limit_per_minute().max(1) as usize;
+        let inventory = {
+            let mut guard = self.key_runtime_budgets.lock().await;
+            Self::build_key_budget_inventory(&candidates, &mut guard, now, rpm_limit)
+        };
+        let requirement_desc = requirement
+            .map(Self::format_budget_requirement)
+            .unwrap_or_else(|| "-".to_string());
+        let focus_keys = if focus_key_ids.is_empty() {
+            "-".to_string()
+        } else {
+            focus_key_ids.join(",")
+        };
+        let excluded_keys = if excluded_key_ids.is_empty() {
+            "-".to_string()
+        } else {
+            excluded_key_ids.join(",")
+        };
+        eprintln!(
+            "key-budget event={event} requirement={requirement_desc} focus_keys={focus_keys} excluded_keys={excluded_keys} details={details} inventory={}",
+            inventory.join(" || ")
+        );
+    }
+
     async fn select_budgeted_key(
         &self,
         preferred_key_ids: &[String],
@@ -634,6 +743,23 @@ impl TavilyProxy {
         }
 
         let Some((candidate, _, _, _, _)) = best else {
+            let inventory =
+                Self::build_key_budget_inventory(&candidates, &mut guard, now, rpm_limit);
+            eprintln!(
+                "key-budget event=no-available requirement={} preferred_keys={} excluded_keys={} inventory={}",
+                Self::format_budget_requirement(requirement),
+                if preferred_key_ids.is_empty() {
+                    "-".to_string()
+                } else {
+                    preferred_key_ids.join(",")
+                },
+                if excluded_key_ids.is_empty() {
+                    "-".to_string()
+                } else {
+                    excluded_key_ids.join(",")
+                },
+                inventory.join(" || ")
+            );
             return Err(ProxyError::NoAvailableKeys);
         };
 
@@ -649,6 +775,14 @@ impl TavilyProxy {
             .inflight_credit_reservations
             .saturating_add(requirement.credit_cost.max(0));
         state.last_selected_at = Some(now);
+        if !excluded_key_ids.is_empty() {
+            eprintln!(
+                "key-budget event=selected-after-exclusion requirement={} excluded_keys={} selected={}",
+                Self::format_budget_requirement(requirement),
+                excluded_key_ids.join(","),
+                Self::format_key_budget_snapshot(&candidate, state, now, rpm_limit)
+            );
+        }
         drop(guard);
 
         self.key_store.touch_key(&candidate.secret, now).await?;
@@ -698,6 +832,12 @@ impl TavilyProxy {
                 .saturating_add(required_rpm)
                 > rpm_limit
         {
+            eprintln!(
+                "key-budget event=reserve-specific-blocked requirement={} key_id={} snapshot={}",
+                Self::format_budget_requirement(requirement),
+                key_id,
+                Self::format_key_budget_snapshot(&candidate, state, now, rpm_limit)
+            );
             return Ok(None);
         }
 
@@ -705,6 +845,12 @@ impl TavilyProxy {
         if requirement.credit_cost > 0
             && effective_quota.is_some_and(|remaining| remaining < requirement.credit_cost)
         {
+            eprintln!(
+                "key-budget event=reserve-specific-insufficient-quota requirement={} key_id={} snapshot={}",
+                Self::format_budget_requirement(requirement),
+                key_id,
+                Self::format_key_budget_snapshot(&candidate, state, now, rpm_limit)
+            );
             return Ok(None);
         }
 
@@ -777,7 +923,16 @@ impl TavilyProxy {
                 None,
                 now,
             )
-            .await
+            .await?;
+        self.emit_key_budget_inventory_log(
+            "cooldown-applied",
+            None,
+            &[key_id.to_string()],
+            &[],
+            &format!("reason={reason} cooldown_until={cooldown_until}"),
+        )
+        .await;
+        Ok(())
     }
 
     async fn note_key_migration(&self, key_id: &str, reason: &str) -> Result<(), ProxyError> {
@@ -3816,6 +3971,20 @@ impl TavilyProxy {
                         created_at: Utc::now().timestamp(),
                     })
                     .await?;
+                self.emit_key_budget_inventory_log(
+                    "quota-exhausted-marked",
+                    None,
+                    std::slice::from_ref(&lease.id),
+                    &[],
+                    &format!(
+                        "source={source} tavily_status_code={} failure_kind={}",
+                        analysis
+                            .tavily_status_code
+                            .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                        analysis.failure_kind.as_deref().unwrap_or("-")
+                    ),
+                )
+                .await;
                 Ok(KeyEffect::new(
                     KEY_EFFECT_MARKED_EXHAUSTED,
                     "The system automatically marked this key as exhausted",
@@ -3924,13 +4093,19 @@ impl TavilyProxy {
         status: StatusCode,
         outcome: &AttemptAnalysis,
     ) -> Option<&'static str> {
-        if status == StatusCode::TOO_MANY_REQUESTS {
+        if Self::attempt_is_upstream_rate_limited(status, outcome) {
             return Some("upstream_429");
         }
         if outcome.status == OUTCOME_QUOTA_EXHAUSTED {
             return Some("quota_exhausted");
         }
         None
+    }
+
+    fn attempt_is_upstream_rate_limited(status: StatusCode, outcome: &AttemptAnalysis) -> bool {
+        status == StatusCode::TOO_MANY_REQUESTS
+            || outcome.tavily_status_code == Some(StatusCode::TOO_MANY_REQUESTS.as_u16() as i64)
+            || outcome.failure_kind.as_deref() == Some(FAILURE_KIND_UPSTREAM_RATE_LIMITED_429)
     }
 
     fn build_internal_mcp_headers(
@@ -4026,7 +4201,7 @@ impl TavilyProxy {
                     )
                     .await?;
 
-                if status == StatusCode::TOO_MANY_REQUESTS {
+                if Self::attempt_is_upstream_rate_limited(status, &outcome) {
                     let _ = self
                         .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
                         .await;
@@ -4247,6 +4422,10 @@ impl TavilyProxy {
         let _ = self
             .note_key_migration(&session.upstream_key_id, migration_reason)
             .await;
+        eprintln!(
+            "key-budget event=mcp-session-migrated proxy_session_id={} from_key={} to_key={} reason={migration_reason}",
+            session.proxy_session_id, session.upstream_key_id, selection.lease.id
+        );
 
         let updated = self
             .get_active_mcp_session(&session.proxy_session_id)
@@ -4353,7 +4532,25 @@ impl TavilyProxy {
                                 .await
                             {
                                 Ok(result) => result,
-                                Err(ProxyError::NoAvailableKeys) => return Ok(response),
+                                Err(ProxyError::NoAvailableKeys) => {
+                                    self.emit_key_budget_inventory_log(
+                                        "mcp-retry-no-available",
+                                        Some(&requirement),
+                                        &excluded_key_ids,
+                                        &excluded_key_ids,
+                                        &format!(
+                                            "reason={retry_reason} proxy_session_id={} status={} tavily_status_code={} failure_kind={}",
+                                            request.proxy_session_id.as_deref().unwrap_or("-"),
+                                            response.status,
+                                            outcome
+                                                .tavily_status_code
+                                                .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                            outcome.failure_kind.as_deref().unwrap_or("-")
+                                        ),
+                                    )
+                                    .await;
+                                    return Ok(response);
+                                }
                                 Err(err) => return Err(err),
                             };
                             self.settle_key_budget_reservation(
@@ -4371,6 +4568,12 @@ impl TavilyProxy {
                                     )
                                     .await;
                             }
+                            eprintln!(
+                                "key-budget event=mcp-retry-migrated proxy_session_id={} from_key={} to_key={} reason={retry_reason}",
+                                request.proxy_session_id.as_deref().unwrap_or("-"),
+                                selection.lease.id,
+                                migrated_selection.lease.id
+                            );
                             session = Some(updated_session);
                             preselected = Some(migrated_selection);
                         } else {
@@ -4383,7 +4586,24 @@ impl TavilyProxy {
                                 .await
                             {
                                 Ok(selection) => selection,
-                                Err(ProxyError::NoAvailableKeys) => return Ok(response),
+                                Err(ProxyError::NoAvailableKeys) => {
+                                    self.emit_key_budget_inventory_log(
+                                        "mcp-retry-no-available",
+                                        Some(&requirement),
+                                        &excluded_key_ids,
+                                        &excluded_key_ids,
+                                        &format!(
+                                            "reason={retry_reason} status={} tavily_status_code={} failure_kind={}",
+                                            response.status,
+                                            outcome
+                                                .tavily_status_code
+                                                .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                            outcome.failure_kind.as_deref().unwrap_or("-")
+                                        ),
+                                    )
+                                    .await;
+                                    return Ok(response);
+                                }
                                 Err(err) => return Err(err),
                             };
                             let _ = self
@@ -4404,6 +4624,12 @@ impl TavilyProxy {
                                     )
                                     .await;
                             }
+                            eprintln!(
+                                "key-budget event=mcp-retry-migrated proxy_session_id={} from_key={} to_key={} reason={retry_reason}",
+                                request.proxy_session_id.as_deref().unwrap_or("-"),
+                                selection.lease.id,
+                                next_selection.lease.id
+                            );
                             preselected = Some(next_selection);
                         }
                         continue;
@@ -4554,7 +4780,7 @@ impl TavilyProxy {
                         .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                         .await?;
 
-                    if status == StatusCode::TOO_MANY_REQUESTS {
+                    if Self::attempt_is_upstream_rate_limited(status, &analysis) {
                         let _ = self
                             .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
                             .await;
@@ -4606,11 +4832,29 @@ impl TavilyProxy {
                         {
                             Ok(selection) => selection,
                             Err(ProxyError::NoAvailableKeys) => {
+                                self.emit_key_budget_inventory_log(
+                                    "http-retry-no-available",
+                                    Some(&requirement),
+                                    &excluded_key_ids,
+                                    &excluded_key_ids,
+                                    &format!(
+                                        "path={display_path} reason={retry_reason} status={status} tavily_status_code={} failure_kind={}",
+                                        analysis
+                                            .tavily_status_code
+                                            .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                        analysis.failure_kind.as_deref().unwrap_or("-")
+                                    ),
+                                )
+                                .await;
                                 return Ok((proxy_response, analysis));
                             }
                             Err(err) => return Err(err),
                         };
                         let _ = self.note_key_migration(&lease.id, retry_reason).await;
+                        eprintln!(
+                            "key-budget event=http-retry-migrated path={display_path} from_key={} to_key={} reason={retry_reason}",
+                            lease.id, next_selection.lease.id
+                        );
                         self.settle_key_budget_reservation(&lease.id, reserved_key_credits, 0)
                             .await;
                         let _ = self
@@ -4792,7 +5036,7 @@ impl TavilyProxy {
                 let key_effect = self
                     .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                     .await?;
-                if status == StatusCode::TOO_MANY_REQUESTS {
+                if Self::attempt_is_upstream_rate_limited(status, &analysis) {
                     let _ = self
                         .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
                         .await;
@@ -4978,7 +5222,7 @@ impl TavilyProxy {
                 let key_effect = self
                     .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                     .await?;
-                if status == StatusCode::TOO_MANY_REQUESTS {
+                if Self::attempt_is_upstream_rate_limited(status, &analysis) {
                     let _ = self
                         .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
                         .await;

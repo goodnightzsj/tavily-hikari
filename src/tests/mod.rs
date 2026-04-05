@@ -6019,6 +6019,317 @@ async fn proxy_http_search_retries_on_quota_exhausted_with_alternate_key() {
 }
 
 #[tokio::test]
+async fn proxy_request_retries_on_mcp_logical_429_with_alternate_key() {
+    let db_path = temp_db_path("mcp-logical-429-retry");
+    let db_str = db_path.to_string_lossy().to_string();
+
+    let primary_api_key = "tvly-mcp-retry-primary";
+    let secondary_api_key = "tvly-mcp-retry-secondary";
+    let proxy = TavilyProxy::with_endpoint(
+        vec![primary_api_key.to_string(), secondary_api_key.to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let now = Utc::now().timestamp();
+    for (api_key, quota_remaining) in [(primary_api_key, 1000_i64), (secondary_api_key, 100_i64)] {
+        sqlx::query(
+            "UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?",
+        )
+        .bind(quota_remaining)
+        .bind(now)
+        .bind(api_key)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed key quota snapshot");
+    }
+
+    let hits = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let app = Router::new().route(
+        "/mcp",
+        post({
+            let hits = Arc::clone(&hits);
+            move |headers: HeaderMap, Json(body): Json<Value>| {
+                let hits = Arc::clone(&hits);
+                let primary_api_key = primary_api_key.to_string();
+                async move {
+                    let api_key = headers
+                        .get("tavily-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    hits.lock().await.push(api_key.clone());
+                    let request_id = body.get("id").cloned().unwrap_or(Value::Null);
+                    if api_key == primary_api_key {
+                        Json(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": "{\"error\":\"blocked\",\"status\":429}"
+                                }],
+                                "structuredContent": {
+                                    "error": "blocked",
+                                    "status": 429,
+                                    "detail": { "error": "rate limited" }
+                                },
+                                "isError": false
+                            }
+                        }))
+                    } else {
+                        Json(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "content": [{ "type": "text", "text": "ok" }],
+                                "structuredContent": {
+                                    "status": 200,
+                                    "usage": { "credits": 1 }
+                                }
+                            }
+                        }))
+                    }
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let upstream = format!("http://{addr}/mcp");
+    let proxy = TavilyProxy::with_endpoint(
+        vec![primary_api_key.to_string(), secondary_api_key.to_string()],
+        &upstream,
+        &db_str,
+    )
+    .await
+    .expect("proxy recreated against test upstream");
+
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert("content-type", HeaderValue::from_static("application/json"));
+    request_headers.insert(
+        "accept",
+        HeaderValue::from_static("application/json, text/event-stream"),
+    );
+
+    let request = ProxyRequest {
+        method: Method::POST,
+        path: "/mcp".to_string(),
+        query: None,
+        headers: request_headers,
+        body: Bytes::from_static(
+            br#"{"jsonrpc":"2.0","id":"retry-429","method":"tools/call","params":{"name":"tavily_search","arguments":{"query":"retry me","search_depth":"advanced"}}}"#,
+        ),
+        auth_token_id: Some("tok1".to_string()),
+        pinned_api_key_id: None,
+        proxy_session_id: None,
+        reserved_key_credits: 1,
+        allow_transparent_retry: true,
+        is_mcp_initialize: false,
+        is_mcp_initialized_notification: false,
+    };
+
+    let response = proxy
+        .proxy_request(request)
+        .await
+        .expect("proxy request succeeds after retry");
+
+    let secondary_key_id: String = sqlx::query_scalar("SELECT id FROM api_keys WHERE api_key = ?")
+        .bind(secondary_api_key)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("secondary key id");
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.api_key_id.as_deref(),
+        Some(secondary_key_id.as_str())
+    );
+    assert_eq!(
+        hits.lock().await.clone(),
+        vec![primary_api_key.to_string(), secondary_api_key.to_string()],
+    );
+
+    let visible_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE visibility = ?")
+            .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count visible request logs");
+    let shadow_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE visibility = ?")
+            .bind(REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count shadow request logs");
+    assert_eq!(visible_count, 1);
+    assert_eq!(shadow_count, 1);
+
+    let runtime_state = sqlx::query(
+        r#"
+        SELECT cooldown_until, last_migration_reason
+        FROM api_key_runtime_state
+        WHERE key_id = (SELECT id FROM api_keys WHERE api_key = ?)
+        "#,
+    )
+    .bind(primary_api_key)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("runtime state row exists");
+    let cooldown_until: Option<i64> = runtime_state.try_get("cooldown_until").expect("cooldown");
+    let last_migration_reason: Option<String> = runtime_state
+        .try_get("last_migration_reason")
+        .expect("migration reason");
+    assert!(
+        cooldown_until.is_some(),
+        "logical 429 should put the key into cooldown"
+    );
+    assert_eq!(last_migration_reason.as_deref(), Some("upstream_429"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn proxy_request_avoids_cooldown_key_after_mcp_logical_429_retry() {
+    let db_path = temp_db_path("mcp-logical-429-cooldown");
+    let db_str = db_path.to_string_lossy().to_string();
+
+    let primary_api_key = "tvly-mcp-cooldown-primary";
+    let secondary_api_key = "tvly-mcp-cooldown-secondary";
+    let hits = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let app = Router::new().route(
+        "/mcp",
+        post({
+            let hits = Arc::clone(&hits);
+            move |headers: HeaderMap, Json(body): Json<Value>| {
+                let hits = Arc::clone(&hits);
+                let primary_api_key = primary_api_key.to_string();
+                async move {
+                    let api_key = headers
+                        .get("tavily-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    hits.lock().await.push(api_key.clone());
+                    let request_id = body.get("id").cloned().unwrap_or(Value::Null);
+                    if api_key == primary_api_key {
+                        Json(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "structuredContent": {
+                                    "error": "blocked",
+                                    "status": 429
+                                },
+                                "isError": false
+                            }
+                        }))
+                    } else {
+                        Json(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "content": [{ "type": "text", "text": "ok" }],
+                                "structuredContent": {
+                                    "status": 200,
+                                    "usage": { "credits": 1 }
+                                }
+                            }
+                        }))
+                    }
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let upstream = format!("http://{addr}/mcp");
+    let proxy = TavilyProxy::with_endpoint(
+        vec![primary_api_key.to_string(), secondary_api_key.to_string()],
+        &upstream,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let now = Utc::now().timestamp();
+    for (api_key, quota_remaining) in [(primary_api_key, 1000_i64), (secondary_api_key, 100_i64)] {
+        sqlx::query(
+            "UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?",
+        )
+        .bind(quota_remaining)
+        .bind(now)
+        .bind(api_key)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed key quota snapshot");
+    }
+
+    let request = || {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert(
+            "accept",
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        ProxyRequest {
+            method: Method::POST,
+            path: "/mcp".to_string(),
+            query: None,
+            headers,
+            body: Bytes::from_static(
+                br#"{"jsonrpc":"2.0","id":"cooldown-429","method":"tools/call","params":{"name":"tavily_search","arguments":{"query":"cooldown me"}}}"#,
+            ),
+            auth_token_id: Some("tok1".to_string()),
+            pinned_api_key_id: None,
+            proxy_session_id: None,
+            reserved_key_credits: 1,
+            allow_transparent_retry: true,
+            is_mcp_initialize: false,
+            is_mcp_initialized_notification: false,
+        }
+    };
+
+    let first = proxy
+        .proxy_request(request())
+        .await
+        .expect("first request succeeds after retry");
+    let second = proxy
+        .proxy_request(request())
+        .await
+        .expect("second request should avoid cooled-down key");
+
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(
+        hits.lock().await.clone(),
+        vec![
+            primary_api_key.to_string(),
+            secondary_api_key.to_string(),
+            secondary_api_key.to_string(),
+        ],
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn proxy_http_json_endpoint_injects_bearer_auth_when_enabled() {
     let db_path = temp_db_path("http-json-bearer-enabled");
     let db_str = db_path.to_string_lossy().to_string();

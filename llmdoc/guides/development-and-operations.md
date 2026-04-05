@@ -11,6 +11,7 @@
 - Core backend checks: `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test --locked --all-features`. Source: `README.md:287`.
 - Frontend checks: `bun test`, production build, and Storybook build. Source: `web/package.json:8`, `web/package.json:11`, `web/package.json:13`.
 - Bun-only enforcement exists via `bun run validate:no-node-runtime`. Source: `package.json:7`, `README.md:290`.
+- When validating key rotation or rate-limit behavior in container logs, watch for `key-budget event=...` lines; they now include the active event name, source/target keys, cooldown windows, and the current per-key quota/RPM inventory snapshot used by the scheduler. Source: `src/tavily_proxy/mod.rs:606`, `src/tavily_proxy/mod.rs:908`, `src/tavily_proxy/mod.rs:4536`, `src/tavily_proxy/mod.rs:4850`.
 
 ## CI and release
 - CI runs lint, tests, and builds from `.github/workflows/ci.yml`. Source: `README.md:291`.
