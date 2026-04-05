@@ -1083,17 +1083,17 @@ async fn proxy_handler(
                                 resp.headers
                                     .insert(HeaderName::from_static("mcp-session-id"), proxy_header);
                             }
-                        } else if let Some(upstream_session_id) = resp
+                        } else if resp
                             .headers
                             .get("mcp-session-id")
                             .and_then(|value| value.to_str().ok())
                             .map(str::trim)
                             .filter(|value| !value.is_empty())
+                            .is_some()
+                            && let Ok(proxy_header) = ReqHeaderValue::from_str(proxy_session_id)
                         {
-                            if let Ok(proxy_header) = ReqHeaderValue::from_str(proxy_session_id) {
-                                resp.headers
-                                    .insert(HeaderName::from_static("mcp-session-id"), proxy_header);
-                            }
+                            resp.headers
+                                .insert(HeaderName::from_static("mcp-session-id"), proxy_header);
                         }
                     }
                 } else if is_mcp_initialize && resp.status.is_success() {

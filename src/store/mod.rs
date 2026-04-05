@@ -8019,8 +8019,8 @@ impl KeyStore {
             )
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(key_id) DO UPDATE SET
-                cooldown_until = excluded.cooldown_until,
-                cooldown_reason = excluded.cooldown_reason,
+                cooldown_until = COALESCE(excluded.cooldown_until, api_key_runtime_state.cooldown_until),
+                cooldown_reason = COALESCE(excluded.cooldown_reason, api_key_runtime_state.cooldown_reason),
                 last_migration_at = COALESCE(excluded.last_migration_at, api_key_runtime_state.last_migration_at),
                 last_migration_reason = COALESCE(excluded.last_migration_reason, api_key_runtime_state.last_migration_reason),
                 updated_at = excluded.updated_at

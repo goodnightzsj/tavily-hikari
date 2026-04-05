@@ -2,6 +2,7 @@ use crate::analysis::*;
 use crate::models::*;
 use crate::store::*;
 use crate::*;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use std::collections::VecDeque;
 
 const KEY_BUDGET_WINDOW_SECS: i64 = 60;
@@ -553,68 +554,82 @@ impl TavilyProxy {
         let mut guard = self.key_runtime_budgets.lock().await;
         let mut best: Option<(ApiKeyBudgetCandidate, Option<i64>, usize, usize, usize)> = None;
 
-        for candidate in candidates {
-            if excluded.contains(candidate.id.as_str()) {
-                continue;
+        let allow_exhausted_fallback = requirement.credit_cost <= 0;
+        for allow_exhausted in [false, allow_exhausted_fallback] {
+            if allow_exhausted && best.is_some() {
+                break;
             }
-            if candidate.status != STATUS_ACTIVE || candidate.quarantined {
-                continue;
-            }
-
-            let state = guard.entry(candidate.id.clone()).or_default();
-            Self::prune_key_runtime_state(state, now);
-
-            if state.cooldown_until.is_some_and(|until| until > now) {
-                continue;
-            }
-
-            let required_rpm = requirement.rpm_cost.max(1) as usize;
-            if state
-                .recent_request_timestamps
-                .len()
-                .saturating_add(required_rpm)
-                > rpm_limit
-            {
-                continue;
-            }
-
-            let effective_quota = Self::compute_effective_quota_remaining(&candidate, state);
-            if requirement.credit_cost > 0
-                && effective_quota.is_some_and(|remaining| remaining < requirement.credit_cost)
-            {
-                continue;
-            }
-
-            let preferred_rank = preferred_order
-                .get(candidate.id.as_str())
-                .copied()
-                .unwrap_or(usize::MAX);
-            let rpm_remaining = rpm_limit.saturating_sub(state.recent_request_timestamps.len());
-            let last_used_rank = candidate.last_used_at.unwrap_or_default() as usize;
-
-            let should_replace = match best.as_ref() {
-                None => true,
-                Some((_, best_quota, best_preferred, best_rpm_remaining, best_last_used_rank)) => {
-                    if preferred_rank != *best_preferred {
-                        preferred_rank < *best_preferred
-                    } else if effective_quota.unwrap_or(-1) != best_quota.unwrap_or(-1) {
-                        effective_quota.unwrap_or(-1) > best_quota.unwrap_or(-1)
-                    } else if rpm_remaining != *best_rpm_remaining {
-                        rpm_remaining > *best_rpm_remaining
-                    } else {
-                        last_used_rank < *best_last_used_rank
-                    }
+            for candidate in &candidates {
+                if excluded.contains(candidate.id.as_str()) || candidate.quarantined {
+                    continue;
                 }
-            };
+                if candidate.status != STATUS_ACTIVE
+                    && !(allow_exhausted && candidate.status == STATUS_EXHAUSTED)
+                {
+                    continue;
+                }
 
-            if should_replace {
-                best = Some((
-                    candidate,
-                    effective_quota,
-                    preferred_rank,
-                    rpm_remaining,
-                    last_used_rank,
-                ));
+                let state = guard.entry(candidate.id.clone()).or_default();
+                Self::prune_key_runtime_state(state, now);
+
+                if state.cooldown_until.is_some_and(|until| until > now) {
+                    continue;
+                }
+
+                let required_rpm = requirement.rpm_cost.max(1) as usize;
+                if state
+                    .recent_request_timestamps
+                    .len()
+                    .saturating_add(required_rpm)
+                    > rpm_limit
+                {
+                    continue;
+                }
+
+                let effective_quota = Self::compute_effective_quota_remaining(candidate, state);
+                if requirement.credit_cost > 0
+                    && effective_quota.is_some_and(|remaining| remaining < requirement.credit_cost)
+                {
+                    continue;
+                }
+
+                let preferred_rank = preferred_order
+                    .get(candidate.id.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                let rpm_remaining = rpm_limit.saturating_sub(state.recent_request_timestamps.len());
+                let last_used_rank = candidate.last_used_at.unwrap_or_default() as usize;
+
+                let should_replace = match best.as_ref() {
+                    None => true,
+                    Some((
+                        _,
+                        best_quota,
+                        best_preferred,
+                        best_rpm_remaining,
+                        best_last_used_rank,
+                    )) => {
+                        if preferred_rank != *best_preferred {
+                            preferred_rank < *best_preferred
+                        } else if effective_quota.unwrap_or(-1) != best_quota.unwrap_or(-1) {
+                            effective_quota.unwrap_or(-1) > best_quota.unwrap_or(-1)
+                        } else if rpm_remaining != *best_rpm_remaining {
+                            rpm_remaining > *best_rpm_remaining
+                        } else {
+                            last_used_rank < *best_last_used_rank
+                        }
+                    }
+                };
+
+                if should_replace {
+                    best = Some((
+                        candidate.clone(),
+                        effective_quota,
+                        preferred_rank,
+                        rpm_remaining,
+                        last_used_rank,
+                    ));
+                }
             }
         }
 
@@ -661,7 +676,11 @@ impl TavilyProxy {
         else {
             return Ok(None);
         };
-        if candidate.status != STATUS_ACTIVE || candidate.quarantined {
+        let allow_exhausted = requirement.credit_cost <= 0;
+        if candidate.quarantined
+            || (candidate.status != STATUS_ACTIVE
+                && !(allow_exhausted && candidate.status == STATUS_EXHAUSTED))
+        {
             return Ok(None);
         }
 
@@ -3569,6 +3588,11 @@ impl TavilyProxy {
             self.key_store
                 .sync_user_primary_api_key_affinity(&user_id, &lease.lease.id)
                 .await?;
+            if user_primary.as_deref() != Some(lease.lease.id.as_str()) {
+                self.key_store
+                    .revoke_mcp_sessions_for_user(&user_id, "primary_api_key_rebound")
+                    .await?;
+            }
             return Ok(lease);
         }
 
@@ -3587,6 +3611,11 @@ impl TavilyProxy {
             self.key_store
                 .set_token_primary_api_key_affinity(token_id, None, &lease.lease.id)
                 .await?;
+            if token_primary.api_key_id != lease.lease.id {
+                self.key_store
+                    .revoke_mcp_sessions_for_token(token_id, "primary_api_key_rebound")
+                    .await?;
+            }
             return Ok(lease);
         }
 
@@ -3632,8 +3661,9 @@ impl TavilyProxy {
 
             if let Some(key_id) = candidate_key_id {
                 return self
-                    .select_budgeted_key(&[key_id], excluded_key_ids, requirement)
-                    .await;
+                    .reserve_specific_key_if_budgeted(&key_id, requirement)
+                    .await?
+                    .ok_or(ProxyError::NoAvailableKeys);
             }
         }
 
@@ -3908,6 +3938,7 @@ impl TavilyProxy {
         upstream_session_id: Option<&str>,
     ) -> Result<HeaderMap, ProxyError> {
         let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(protocol_version) = protocol_version
             && let Ok(value) = HeaderValue::from_str(protocol_version)
         {
@@ -4251,7 +4282,7 @@ impl TavilyProxy {
                 } else {
                     let mut migration_excluded = excluded_key_ids.clone();
                     migration_excluded.push(active_session.upstream_key_id.clone());
-                    let (updated_session, selection) = self
+                    let (updated_session, selection) = match self
                         .replay_mcp_session_on_new_key(
                             &active_session,
                             request.auth_token_id.as_deref(),
@@ -4259,7 +4290,14 @@ impl TavilyProxy {
                             &migration_excluded,
                             "pinned_key_budget_unavailable",
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(ProxyError::NoAvailableKeys) => {
+                            return Err(ProxyError::PinnedMcpSessionUnavailable);
+                        }
+                        Err(err) => return Err(err),
+                    };
                     session = Some(updated_session);
                     selection
                 }
@@ -4476,10 +4514,13 @@ impl TavilyProxy {
                         let mut builder =
                             client.request(request_method.clone(), request_url.clone());
                         for (name, value) in sanitized_headers.headers.iter() {
-                            if name == HOST || name == CONTENT_LENGTH {
+                            if name == HOST || name == CONTENT_LENGTH || name == AUTHORIZATION {
                                 continue;
                             }
                             builder = builder.header(name, value);
+                        }
+                        if !sanitized_headers.headers.contains_key(CONTENT_TYPE) {
+                            builder = builder.header(CONTENT_TYPE, "application/json");
                         }
                         if inject_upstream_bearer_auth {
                             builder = builder
@@ -4709,7 +4750,7 @@ impl TavilyProxy {
             .send_with_forward_proxy(&lease.id, "research", |client| {
                 let mut builder = client.request(request_method.clone(), request_url.clone());
                 for (name, value) in sanitized_headers.headers.iter() {
-                    if name == HOST || name == CONTENT_LENGTH {
+                    if name == HOST || name == CONTENT_LENGTH || name == AUTHORIZATION {
                         continue;
                     }
                     builder = builder.header(name, value);
@@ -4895,7 +4936,7 @@ impl TavilyProxy {
             .send_with_forward_proxy(&lease.id, "research_result", |client| {
                 let mut builder = client.request(request_method.clone(), request_url.clone());
                 for (name, value) in sanitized_headers.headers.iter() {
-                    if name == HOST || name == CONTENT_LENGTH {
+                    if name == HOST || name == CONTENT_LENGTH || name == AUTHORIZATION {
                         continue;
                     }
                     builder = builder.header(name, value);
