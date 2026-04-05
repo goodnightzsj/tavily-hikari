@@ -26,7 +26,7 @@ Tavily Hikari is a Rust + Axum proxy for Tavily's MCP endpoint. It multiplexes m
 - **High-anonymity forwarding** – only `/mcp` traffic is tunneled upstream; sensitive headers are stripped or rewritten. See [`docs/high-anonymity-proxy.md`](docs/high-anonymity-proxy.md).
 - **Full audit trail** – `request_logs` persists method/path/query, upstream responses, error payloads, and the list of forwarded/dropped headers.
 - **Operator UI** – the SPA in `web/` visualizes key health, request logs, and admin actions (soft delete, restore, reveal real keys).
-- **CI + Release** – GitHub Actions runs lint/tests; every successful `main` push produces a release and publishes `ghcr.io/goodnightzsj/tavily-hikari:<tag>` with prebuilt web assets.
+- **CI + Release** – GitHub Actions runs lint/tests; every successful `main` push produces a Git tag + GitHub Release, while GHCR image publication is manual.
 
 ## Architecture Snapshot
 
@@ -289,16 +289,20 @@ codex mcp list | grep tavily_hikari
 - Hooks: run `lefthook install` to enable automatic `cargo fmt`, `cargo clippy`, `bunx --bun dprint fmt`, and `bunx --bun commitlint --edit` on every commit.
 - No-node proof: run `bun run validate:no-node-runtime` to verify the repo build/hook paths still pass when a failing `node` shim is prepended to `PATH`.
 - CI: `.github/workflows/ci.yml` runs lint/tests/build.
-- Release: `.github/workflows/release.yml` runs after main CI succeeds and publishes tags, GitHub Releases, and GHCR images.
+- Release: `.github/workflows/release.yml` runs after main CI succeeds and publishes tags + GitHub Releases automatically; GHCR image publication is manual.
 
 ## Release
 
 Every successful push to `main` triggers the release workflow.
 
 - The workflow always computes the next stable patch semver (`X.Y.Z`).
-- It publishes:
-  - Git tag + GitHub Release
-  - GHCR image tags: `latest`, `vX.Y.Z`
+- It automatically publishes:
+  - Git tag
+  - GitHub Release
+- GHCR image publication is manual via `Release` workflow dispatch with:
+  - `head_sha=<target main commit>`
+  - `publish_docker=true`
+- When manual Docker publishing runs, it pushes GHCR image tags `latest` and `vX.Y.Z`.
 - PR labels are no longer required for release publication.
 
 ## Deployment Notes

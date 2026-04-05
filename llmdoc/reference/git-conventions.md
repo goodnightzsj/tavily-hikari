@@ -2,7 +2,7 @@
 
 ## Branch and release posture
 - `main` is the primary integration branch. Release automation runs after merges to `main` and CI success. Source: `README.md:296`, `README.md:301`.
-- Each successful push to `main` now produces an automatic stable patch release; PR labels are no longer part of the release contract. Source: `.github/workflows/release.yml:29`, `.github/workflows/release.yml:56`, `.github/workflows/label-gate.yml:18`.
+- Each successful push to `main` now produces an automatic stable patch Git tag + GitHub Release; GHCR publication is manual and no longer part of every main-branch release. Source: `.github/workflows/release.yml:33`, `.github/workflows/release.yml:64`, `.github/workflows/release.yml:701`.
 
 ## Commit message style
 - Conventional Commits are enforced via commitlint. Allowed types are `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`, `build`, `revert`. Source: `commitlint.config.mjs:3`, `commitlint.config.mjs:6`.

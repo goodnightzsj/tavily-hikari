@@ -14,8 +14,8 @@
 
 ## CI and release
 - CI runs lint, tests, and builds from `.github/workflows/ci.yml`. Source: `README.md:287`.
-- Release automation runs from `.github/workflows/release.yml` after `main` CI succeeds and now publishes an automatic stable patch release for every new `main` commit. Source: `.github/workflows/release.yml:29`, `.github/workflows/release.yml:56`, `.github/workflows/release.yml:65`.
-- CI already builds a local Docker image for the ForwardAuth compose smoke job, and the release workflow rebuilds the production image, smoke-tests it against `mock_tavily`, then publishes multi-arch GHCR tags. Source: `.github/workflows/ci.yml:91`, `.github/workflows/ci.yml:132`, `.github/workflows/release.yml:180`, `.github/workflows/release.yml:241`, `.github/workflows/release.yml:531`, `.github/workflows/release.yml:578`.
+- Release automation runs from `.github/workflows/release.yml` after `main` CI succeeds and now publishes an automatic stable patch release for every new `main` commit; GHCR publication is only enabled on manual dispatch with `publish_docker=true`. Source: `.github/workflows/release.yml:33`, `.github/workflows/release.yml:62`, `.github/workflows/release.yml:71`, `.github/workflows/release.yml:194`.
+- CI still builds a local Docker image for the ForwardAuth compose smoke job, while the release workflow only rebuilds and publishes production GHCR images during explicit manual Docker publishes. Source: `.github/workflows/ci.yml:91`, `.github/workflows/ci.yml:132`, `.github/workflows/release.yml:189`, `.github/workflows/release.yml:601`.
 
 ## Container and deployment modes
 - Single-container runtime serves backend + static `web/dist` assets and persists SQLite under `/srv/app/data`. Source: `README.md:63`, `README.md:72`.

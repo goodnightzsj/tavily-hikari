@@ -11,10 +11,14 @@ on:
         description: Commit SHA on main to backfill release for
         required: true
         type: string
+      publish_docker:
+        description: Also build and publish GHCR Docker images for this release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
-  packages: write
 
 env:
   REGISTRY: ghcr.io
@@ -38,6 +42,7 @@ jobs:
       should_release: ${{ steps.intent.outputs.should_release }}
       bump_level: ${{ steps.intent.outputs.bump_level }}
       release_channel: ${{ steps.intent.outputs.release_channel }}
+      publish_docker: ${{ steps.intent.outputs.publish_docker }}
       pr_number: ${{ steps.intent.outputs.pr_number }}
       pr_url: ${{ steps.intent.outputs.pr_url }}
       release_intent_label: ${{ steps.intent.outputs.release_intent_label }}
@@ -54,11 +59,20 @@ jobs:
       - name: Determine automatic release policy
         id: intent
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PUBLISH_DOCKER: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_docker || 'false' }}
         run: |
+          publish_docker=false
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${INPUT_PUBLISH_DOCKER}" == "true" ]]; then
+            publish_docker=true
+          fi
+
           {
             echo "should_release=true"
             echo "bump_level=patch"
             echo "release_channel=stable"
+            echo "publish_docker=${publish_docker}"
             echo "pr_number="
             echo "pr_url="
             echo "release_intent_label=auto:patch"
@@ -165,6 +179,7 @@ jobs:
             echo "- release_policy: ${{ steps.intent.outputs.release_intent_label }}"
             echo "- bump_level: ${{ steps.intent.outputs.bump_level }}"
             echo "- release_channel: ${{ steps.intent.outputs.release_channel }}"
+            echo "- publish_docker: ${{ steps.intent.outputs.publish_docker }}"
             echo "- pr: ${{ steps.intent.outputs.pr_number }} (${{ steps.intent.outputs.pr_url }})"
             echo "- reason: ${{ steps.intent.outputs.reason }}"
             echo "- tag: ${{ steps.tagmeta.outputs.tag || '<none>' }}"
@@ -176,7 +191,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     needs: [prepare]
-    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    if: ${{ needs.prepare.outputs.should_release == 'true' && needs.prepare.outputs.publish_docker == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -583,7 +598,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [prepare, docker-native]
-    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    if: ${{ needs.prepare.outputs.should_release == 'true' && needs.prepare.outputs.publish_docker == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -687,7 +702,7 @@ jobs:
     name: GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [prepare, docker-manifest]
+    needs: [prepare]
     if: ${{ needs.prepare.outputs.should_release == 'true' }}
     permissions:
       contents: write
