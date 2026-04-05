@@ -5904,6 +5904,7 @@ impl KeyStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn acquire_key(&self) -> Result<ApiKeyLease, ProxyError> {
         self.reset_monthly().await?;
 
@@ -5965,6 +5966,7 @@ impl KeyStore {
         Err(ProxyError::NoAvailableKeys)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn try_acquire_specific_key(
         &self,
         key_id: &str,
@@ -6026,6 +6028,7 @@ impl KeyStore {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn acquire_active_key_excluding(
         &self,
         excluded_key_id: Option<&str>,
@@ -7796,6 +7799,7 @@ impl KeyStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn revoke_mcp_sessions_for_user(
         &self,
         user_id: &str,
@@ -7818,6 +7822,7 @@ impl KeyStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn revoke_mcp_sessions_for_token(
         &self,
         token_id: &str,
@@ -12330,6 +12335,7 @@ impl KeyStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn reset_monthly(&self) -> Result<(), ProxyError> {
         let now = Utc::now();
         let month_start = start_of_month(now).timestamp();

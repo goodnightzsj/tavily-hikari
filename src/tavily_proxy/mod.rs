@@ -48,12 +48,11 @@ impl KeyBudgetRequirement {
 
 #[derive(Clone, Debug)]
 struct KeyBudgetReservation {
-    key_id: String,
     reserved_credits: i64,
 }
 
 #[derive(Clone, Debug)]
-struct KeyBudgetLease {
+pub(crate) struct KeyBudgetLease {
     lease: ApiKeyLease,
     reservation: KeyBudgetReservation,
 }
@@ -645,7 +644,6 @@ impl TavilyProxy {
                 secret: candidate.secret,
             },
             reservation: KeyBudgetReservation {
-                key_id: candidate.id,
                 reserved_credits: requirement.credit_cost.max(0),
             },
         })
@@ -711,7 +709,6 @@ impl TavilyProxy {
                 secret: candidate.secret,
             },
             reservation: KeyBudgetReservation {
-                key_id: candidate.id,
                 reserved_credits: requirement.credit_cost.max(0),
             },
         }))
@@ -3478,6 +3475,7 @@ impl TavilyProxy {
         })
     }
 
+    #[allow(dead_code)]
     async fn rebind_user_primary_affinity(
         &self,
         user_id: &str,
@@ -3496,6 +3494,7 @@ impl TavilyProxy {
         Ok(lease)
     }
 
+    #[allow(dead_code)]
     async fn rebind_token_primary_affinity(
         &self,
         token_id: &str,
@@ -3580,7 +3579,7 @@ impl TavilyProxy {
         {
             let lease = self
                 .select_budgeted_key(
-                    &[token_primary.api_key_id.clone()],
+                    std::slice::from_ref(&token_primary.api_key_id),
                     excluded_key_ids,
                     requirement,
                 )
@@ -5015,6 +5014,7 @@ impl TavilyProxy {
 
     /// Proxy a Tavily HTTP `/search` call via the usage base URL, performing key rotation
     /// and recording request logs with sensitive fields redacted.
+    #[allow(clippy::too_many_arguments)]
     pub async fn proxy_http_search(
         &self,
         usage_base: &str,
@@ -7241,6 +7241,7 @@ impl TavilyProxy {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_mcp_session(
         &self,
         upstream_session_id: &str,
