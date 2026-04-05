@@ -3693,6 +3693,27 @@ impl TavilyProxy {
         requirement: &KeyBudgetRequirement,
         excluded_key_ids: &[String],
     ) -> Result<KeyBudgetLease, ProxyError> {
+        self.acquire_key_for_with_rebind_policy(auth_token_id, requirement, excluded_key_ids, true)
+            .await
+    }
+
+    async fn acquire_key_for_runtime_migration(
+        &self,
+        auth_token_id: Option<&str>,
+        requirement: &KeyBudgetRequirement,
+        excluded_key_ids: &[String],
+    ) -> Result<KeyBudgetLease, ProxyError> {
+        self.acquire_key_for_with_rebind_policy(auth_token_id, requirement, excluded_key_ids, false)
+            .await
+    }
+
+    async fn acquire_key_for_with_rebind_policy(
+        &self,
+        auth_token_id: Option<&str>,
+        requirement: &KeyBudgetRequirement,
+        excluded_key_ids: &[String],
+        revoke_sessions_on_rebind: bool,
+    ) -> Result<KeyBudgetLease, ProxyError> {
         let Some(token_id) = auth_token_id else {
             // No token id (e.g. certain internal or dev flows) → plain global scheduling.
             return self
@@ -3743,7 +3764,8 @@ impl TavilyProxy {
             self.key_store
                 .sync_user_primary_api_key_affinity(&user_id, &lease.lease.id)
                 .await?;
-            if user_primary.as_deref() != Some(lease.lease.id.as_str()) {
+            if revoke_sessions_on_rebind && user_primary.as_deref() != Some(lease.lease.id.as_str())
+            {
                 self.key_store
                     .revoke_mcp_sessions_for_user(&user_id, "primary_api_key_rebound")
                     .await?;
@@ -3766,7 +3788,7 @@ impl TavilyProxy {
             self.key_store
                 .set_token_primary_api_key_affinity(token_id, None, &lease.lease.id)
                 .await?;
-            if token_primary.api_key_id != lease.lease.id {
+            if revoke_sessions_on_rebind && token_primary.api_key_id != lease.lease.id {
                 self.key_store
                     .revoke_mcp_sessions_for_token(token_id, "primary_api_key_rebound")
                     .await?;
@@ -4296,7 +4318,7 @@ impl TavilyProxy {
             2
         };
         let selection = self
-            .acquire_key_for(
+            .acquire_key_for_runtime_migration(
                 auth_token_id,
                 &KeyBudgetRequirement::billable(actual_request_credits)
                     .with_rpm_cost(control_plane_hops),

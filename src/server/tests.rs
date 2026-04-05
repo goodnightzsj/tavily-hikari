@@ -20317,6 +20317,7 @@ colo=LAX
         let pool = connect_sqlite_test_pool(&db_str).await;
         let key_rows = fetch_api_key_rows(&pool).await;
         let first_key_id = find_api_key_id(&key_rows, first_api_key.as_str());
+        let second_key_id = find_api_key_id(&key_rows, second_api_key.as_str());
         sqlx::query(
             r#"
             INSERT INTO token_primary_api_key_affinity (
@@ -20417,14 +20418,87 @@ colo=LAX
             "follow-up request should succeed after session migration"
         );
 
+        let rebound_session: (String, String, Option<i64>, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT upstream_session_id, upstream_key_id, revoked_at, revoke_reason
+            FROM mcp_sessions
+            WHERE proxy_session_id = ?
+            "#,
+        )
+        .bind(proxy_session_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("load migrated proxy session");
+        assert_eq!(
+            rebound_session.0, "session-2",
+            "proxy session should persist the rebound upstream session id"
+        );
+        assert_eq!(
+            rebound_session.1, second_key_id,
+            "proxy session should persist the rebound upstream key id"
+        );
+        assert!(
+            rebound_session.2.is_none(),
+            "runtime migration must not revoke the current proxy session"
+        );
+        assert!(
+            rebound_session.3.is_none(),
+            "runtime migration must not stamp a revoke reason on the current proxy session"
+        );
+
+        let second_search = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", proxy_session_id.as_str())
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "search-migrate-2",
+                "method": "tools/call",
+                "params": {
+                    "name": "tavily-search",
+                    "arguments": {
+                        "query": "reused migrated session",
+                        "search_depth": "basic"
+                    }
+                }
+            }))
+            .send()
+            .await
+            .expect("second search request");
+
+        assert_ne!(
+            second_search.status(),
+            StatusCode::CONFLICT,
+            "migrated proxy session should not become unavailable after the first replayed request"
+        );
+        let second_status = second_search.status();
+        let second_body: Value = second_search.json().await.expect("parse second search response");
+        assert_ne!(
+            second_body.get("error").and_then(|value| value.as_str()),
+            Some("session_unavailable"),
+            "follow-up request should no longer fail because the proxy session was revoked during migration"
+        );
+        if second_status == StatusCode::OK {
+            assert_eq!(
+                second_body
+                    .get("result")
+                    .and_then(|value| value.get("structuredContent"))
+                    .and_then(|value| value.get("status"))
+                    .and_then(|value| value.as_i64()),
+                Some(200),
+                "follow-up request on the same proxy session should keep succeeding"
+            );
+        }
+
         let recorded = calls
             .lock()
             .expect("session replay calls lock poisoned")
             .clone();
-        assert_eq!(
-            recorded.len(),
-            6,
-            "expected initialize + initialized + first tools/call + replay initialize + replay initialized + retry tools/call"
+        assert!(
+            recorded.len() >= 6,
+            "expected initialize + initialized + first tools/call + replay initialize + replay initialized + retried tools/call"
         );
 
         assert_eq!(recorded[0].method, "initialize");
@@ -20449,6 +20523,11 @@ colo=LAX
         assert_eq!(recorded[5].method, "tools/call");
         assert_eq!(recorded[5].tavily_api_key.as_deref(), Some(second_api_key.as_str()));
         assert_eq!(recorded[5].session_id.as_deref(), Some("session-2"));
+        if let Some(follow_up_call) = recorded.get(6) {
+            assert_eq!(follow_up_call.method, "tools/call");
+            assert_eq!(follow_up_call.tavily_api_key.as_deref(), Some(second_api_key.as_str()));
+            assert_eq!(follow_up_call.session_id.as_deref(), Some("session-2"));
+        }
 
         let _ = std::fs::remove_file(db_path);
     }
