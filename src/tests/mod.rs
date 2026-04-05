@@ -5741,13 +5741,15 @@ async fn proxy_http_search_retries_on_upstream_429_with_alternate_key() {
 
     let now = Utc::now().timestamp();
     for (api_key, quota_remaining) in [(primary_api_key, 1000_i64), (secondary_api_key, 100_i64)] {
-        sqlx::query("UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?")
-            .bind(quota_remaining)
-            .bind(now)
-            .bind(api_key)
-            .execute(&proxy.key_store.pool)
-            .await
-            .expect("seed key quota snapshot");
+        sqlx::query(
+            "UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?",
+        )
+        .bind(quota_remaining)
+        .bind(now)
+        .bind(api_key)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed key quota snapshot");
     }
 
     let hits = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
@@ -5816,10 +5818,7 @@ async fn proxy_http_search_retries_on_upstream_429_with_alternate_key() {
     assert_eq!(analysis.status, OUTCOME_SUCCESS);
     assert_eq!(
         hits.lock().await.clone(),
-        vec![
-            primary_api_key.to_string(),
-            secondary_api_key.to_string(),
-        ]
+        vec![primary_api_key.to_string(), secondary_api_key.to_string(),]
     );
 
     let visible_count: i64 =
@@ -5861,11 +5860,11 @@ async fn proxy_http_search_retries_on_upstream_429_with_alternate_key() {
     let last_migration_reason: Option<String> = runtime_state
         .try_get("last_migration_reason")
         .expect("migration reason");
-    assert!(cooldown_until.is_some(), "429 should put the key into cooldown");
-    assert_eq!(
-        last_migration_reason.as_deref(),
-        Some("upstream_429"),
+    assert!(
+        cooldown_until.is_some(),
+        "429 should put the key into cooldown"
     );
+    assert_eq!(last_migration_reason.as_deref(), Some("upstream_429"),);
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -5887,13 +5886,15 @@ async fn proxy_http_search_retries_on_quota_exhausted_with_alternate_key() {
 
     let now = Utc::now().timestamp();
     for (api_key, quota_remaining) in [(primary_api_key, 1000_i64), (secondary_api_key, 100_i64)] {
-        sqlx::query("UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?")
-            .bind(quota_remaining)
-            .bind(now)
-            .bind(api_key)
-            .execute(&proxy.key_store.pool)
-            .await
-            .expect("seed key quota snapshot");
+        sqlx::query(
+            "UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?",
+        )
+        .bind(quota_remaining)
+        .bind(now)
+        .bind(api_key)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed key quota snapshot");
     }
 
     let hits = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
@@ -5963,17 +5964,15 @@ async fn proxy_http_search_retries_on_quota_exhausted_with_alternate_key() {
     assert_eq!(analysis.status, OUTCOME_SUCCESS);
     assert_eq!(
         hits.lock().await.clone(),
-        vec![
-            primary_api_key.to_string(),
-            secondary_api_key.to_string(),
-        ]
+        vec![primary_api_key.to_string(), secondary_api_key.to_string(),]
     );
 
-    let primary_status: String = sqlx::query_scalar("SELECT status FROM api_keys WHERE api_key = ?")
-        .bind(primary_api_key)
-        .fetch_one(&proxy.key_store.pool)
-        .await
-        .expect("primary key status");
+    let primary_status: String =
+        sqlx::query_scalar("SELECT status FROM api_keys WHERE api_key = ?")
+            .bind(primary_api_key)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("primary key status");
     assert_eq!(primary_status, STATUS_EXHAUSTED);
 
     let visible_count: i64 =
@@ -6014,10 +6013,7 @@ async fn proxy_http_search_retries_on_quota_exhausted_with_alternate_key() {
     let last_migration_reason: Option<String> = runtime_state
         .try_get("last_migration_reason")
         .expect("migration reason");
-    assert_eq!(
-        last_migration_reason.as_deref(),
-        Some("quota_exhausted"),
-    );
+    assert_eq!(last_migration_reason.as_deref(), Some("quota_exhausted"),);
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -6370,7 +6366,12 @@ async fn research_result_keeps_affinity_when_original_key_is_quarantined() {
         .expect("quarantine affinity key");
 
     let err = proxy
-        .acquire_key_for_research_request(Some("tok1"), Some(request_id))
+        .acquire_key_for_research_request(
+            Some("tok1"),
+            Some(request_id),
+            &KeyBudgetRequirement::control_plane(),
+            &[],
+        )
         .await
         .expect_err("result retrieval should not fall back to a different key");
     assert!(matches!(err, ProxyError::NoAvailableKeys));

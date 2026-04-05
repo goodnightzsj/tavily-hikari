@@ -20,27 +20,27 @@ struct KeyRuntimeBudgetState {
 }
 
 #[derive(Clone, Debug)]
-struct KeyBudgetRequirement {
+pub(crate) struct KeyBudgetRequirement {
     rpm_cost: i64,
     credit_cost: i64,
 }
 
 impl KeyBudgetRequirement {
-    fn control_plane() -> Self {
+    pub(crate) fn control_plane() -> Self {
         Self {
             rpm_cost: 1,
             credit_cost: 0,
         }
     }
 
-    fn billable(credit_cost: i64) -> Self {
+    pub(crate) fn billable(credit_cost: i64) -> Self {
         Self {
             rpm_cost: 1,
             credit_cost: credit_cost.max(0),
         }
     }
 
-    fn with_rpm_cost(mut self, rpm_cost: i64) -> Self {
+    pub(crate) fn with_rpm_cost(mut self, rpm_cost: i64) -> Self {
         self.rpm_cost = rpm_cost.max(1);
         self
     }
@@ -445,7 +445,10 @@ impl TavilyProxy {
         let since = now - KEY_BUDGET_WINDOW_SECS;
         let recent_events = self.key_store.list_recent_key_request_events(since).await?;
         let overlay_seeds = self.key_store.list_key_quota_overlay_seeds().await?;
-        let persisted_states = self.key_store.list_persisted_api_key_runtime_states(now).await?;
+        let persisted_states = self
+            .key_store
+            .list_persisted_api_key_runtime_states(now)
+            .await?;
 
         let rpm_limit = effective_key_rpm_limit_per_minute().max(1) as usize;
         let mut states: HashMap<String, KeyRuntimeBudgetState> = HashMap::new();
@@ -521,7 +524,8 @@ impl TavilyProxy {
         if candidate.quarantined {
             return Some("quarantined".to_string());
         }
-        if Self::compute_effective_quota_remaining(candidate, state).is_some_and(|remaining| remaining <= 0)
+        if Self::compute_effective_quota_remaining(candidate, state)
+            .is_some_and(|remaining| remaining <= 0)
         {
             return Some("quota_exhausted".to_string());
         }
@@ -566,7 +570,12 @@ impl TavilyProxy {
             }
 
             let required_rpm = requirement.rpm_cost.max(1) as usize;
-            if state.recent_request_timestamps.len().saturating_add(required_rpm) > rpm_limit {
+            if state
+                .recent_request_timestamps
+                .len()
+                .saturating_add(required_rpm)
+                > rpm_limit
+            {
                 continue;
             }
 
@@ -648,7 +657,10 @@ impl TavilyProxy {
         requirement: &KeyBudgetRequirement,
     ) -> Result<Option<KeyBudgetLease>, ProxyError> {
         let candidates = self.key_store.list_api_key_budget_candidates().await?;
-        let Some(candidate) = candidates.into_iter().find(|candidate| candidate.id == key_id) else {
+        let Some(candidate) = candidates
+            .into_iter()
+            .find(|candidate| candidate.id == key_id)
+        else {
             return Ok(None);
         };
         if candidate.status != STATUS_ACTIVE || candidate.quarantined {
@@ -663,7 +675,11 @@ impl TavilyProxy {
 
         let required_rpm = requirement.rpm_cost.max(1) as usize;
         if state.cooldown_until.is_some_and(|until| until > now)
-            || state.recent_request_timestamps.len().saturating_add(required_rpm) > rpm_limit
+            || state
+                .recent_request_timestamps
+                .len()
+                .saturating_add(required_rpm)
+                > rpm_limit
         {
             return Ok(None);
         }
@@ -781,12 +797,12 @@ impl TavilyProxy {
             quarantined: metrics.quarantine.is_some(),
         };
         let rpm_limit = effective_key_rpm_limit_per_minute();
-        metrics.effective_quota_remaining = Self::compute_effective_quota_remaining(&candidate, &state);
+        metrics.effective_quota_remaining =
+            Self::compute_effective_quota_remaining(&candidate, &state);
         metrics.runtime_rpm_limit = Some(rpm_limit);
         metrics.runtime_rpm_used = Some(state.recent_request_timestamps.len() as i64);
-        metrics.runtime_rpm_remaining = Some(
-            rpm_limit.saturating_sub(state.recent_request_timestamps.len() as i64),
-        );
+        metrics.runtime_rpm_remaining =
+            Some(rpm_limit.saturating_sub(state.recent_request_timestamps.len() as i64));
         metrics.cooldown_until = state.cooldown_until;
         metrics.budget_block_reason =
             Self::compute_runtime_budget_block_reason(&candidate, &state, now);
@@ -4249,7 +4265,10 @@ impl TavilyProxy {
                     selection
                 }
             } else if let Some(key_id) = request.pinned_api_key_id.as_deref() {
-                let Some(selection) = self.reserve_specific_key_if_budgeted(key_id, &requirement).await? else {
+                let Some(selection) = self
+                    .reserve_specific_key_if_budgeted(key_id, &requirement)
+                    .await?
+                else {
                     return Err(ProxyError::PinnedMcpSessionUnavailable);
                 };
                 selection
@@ -4262,8 +4281,9 @@ impl TavilyProxy {
                 .await?
             };
 
-            let upstream_session_id_override =
-                session.as_ref().map(|session| session.upstream_session_id.as_str());
+            let upstream_session_id_override = session
+                .as_ref()
+                .map(|session| session.upstream_session_id.as_str());
             match self
                 .execute_mcp_proxy_attempt(
                     &request,
@@ -4275,7 +4295,8 @@ impl TavilyProxy {
                 .await
             {
                 Ok((response, outcome)) => {
-                    let retry_reason = Self::should_retry_key_budget_attempt(response.status, &outcome);
+                    let retry_reason =
+                        Self::should_retry_key_budget_attempt(response.status, &outcome);
                     if request.allow_transparent_retry
                         && attempt < MAX_TRANSPARENT_KEY_MIGRATIONS
                         && let Some(retry_reason) = retry_reason
@@ -4328,7 +4349,9 @@ impl TavilyProxy {
                                 Err(ProxyError::NoAvailableKeys) => return Ok(response),
                                 Err(err) => return Err(err),
                             };
-                            let _ = self.note_key_migration(&selection.lease.id, retry_reason).await;
+                            let _ = self
+                                .note_key_migration(&selection.lease.id, retry_reason)
+                                .await;
                             self.settle_key_budget_reservation(
                                 &selection.lease.id,
                                 selection.reservation.reserved_credits,
@@ -4447,20 +4470,25 @@ impl TavilyProxy {
             let request_url = url.clone();
             let upstream_secret = lease.secret.clone();
             let response = self
-                .send_with_forward_proxy(&lease.id, upstream_path.trim_start_matches('/'), |client| {
-                    let mut builder = client.request(request_method.clone(), request_url.clone());
-                    for (name, value) in sanitized_headers.headers.iter() {
-                        if name == HOST || name == CONTENT_LENGTH {
-                            continue;
+                .send_with_forward_proxy(
+                    &lease.id,
+                    upstream_path.trim_start_matches('/'),
+                    |client| {
+                        let mut builder =
+                            client.request(request_method.clone(), request_url.clone());
+                        for (name, value) in sanitized_headers.headers.iter() {
+                            if name == HOST || name == CONTENT_LENGTH {
+                                continue;
+                            }
+                            builder = builder.header(name, value);
                         }
-                        builder = builder.header(name, value);
-                    }
-                    if inject_upstream_bearer_auth {
-                        builder =
-                            builder.header("Authorization", format!("Bearer {}", upstream_secret));
-                    }
-                    builder.body(request_body.clone())
-                })
+                        if inject_upstream_bearer_auth {
+                            builder = builder
+                                .header("Authorization", format!("Bearer {}", upstream_secret));
+                        }
+                        builder.body(request_body.clone())
+                    },
+                )
                 .await;
 
             match response {
@@ -4537,16 +4565,14 @@ impl TavilyProxy {
                             .await
                         {
                             Ok(selection) => selection,
-                            Err(ProxyError::NoAvailableKeys) => return Ok((proxy_response, analysis)),
+                            Err(ProxyError::NoAvailableKeys) => {
+                                return Ok((proxy_response, analysis));
+                            }
                             Err(err) => return Err(err),
                         };
                         let _ = self.note_key_migration(&lease.id, retry_reason).await;
-                        self.settle_key_budget_reservation(
-                            &lease.id,
-                            reserved_key_credits,
-                            0,
-                        )
-                        .await;
+                        self.settle_key_budget_reservation(&lease.id, reserved_key_credits, 0)
+                            .await;
                         let _ = self
                             .key_store
                             .set_request_log_visibility(
