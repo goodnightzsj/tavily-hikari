@@ -26,7 +26,7 @@ Tavily Hikari is a Rust + Axum proxy for Tavily's MCP endpoint. It multiplexes m
 - **High-anonymity forwarding** – only `/mcp` traffic is tunneled upstream; sensitive headers are stripped or rewritten. See [`docs/high-anonymity-proxy.md`](docs/high-anonymity-proxy.md).
 - **Full audit trail** – `request_logs` persists method/path/query, upstream responses, error payloads, and the list of forwarded/dropped headers.
 - **Operator UI** – the SPA in `web/` visualizes key health, request logs, and admin actions (soft delete, restore, reveal real keys).
-- **CI + Release** – GitHub Actions runs lint/tests; every successful `main` push produces a Git tag + GitHub Release, while GHCR image publication is manual.
+- **CI + Release** – GitHub Actions runs lint/tests; pushed release tags publish the GitHub Release and GHCR multi-arch images automatically.
 
 ## Architecture Snapshot
 
@@ -289,20 +289,21 @@ codex mcp list | grep tavily_hikari
 - Hooks: run `lefthook install` to enable automatic `cargo fmt`, `cargo clippy`, `bunx --bun dprint fmt`, and `bunx --bun commitlint --edit` on every commit.
 - No-node proof: run `bun run validate:no-node-runtime` to verify the repo build/hook paths still pass when a failing `node` shim is prepended to `PATH`.
 - CI: `.github/workflows/ci.yml` runs lint/tests/build.
-- Release: `.github/workflows/release.yml` runs after main CI succeeds and publishes tags + GitHub Releases automatically; GHCR image publication is manual.
+- Release: `.github/workflows/release.yml` runs on pushed release tags and publishes GitHub Releases + GHCR images automatically.
 
 ## Release
 
-Every successful push to `main` triggers the release workflow.
+Pushing a release tag like `v0.2.3` or `v0.2.3-rc.1` triggers the release workflow.
 
-- The workflow always computes the next stable patch semver (`X.Y.Z`).
-- It automatically publishes:
-  - Git tag
-  - GitHub Release
-- GHCR image publication is manual via `Release` workflow dispatch with:
-  - `head_sha=<target main commit>`
-  - `publish_docker=true`
-- When manual Docker publishing runs, it pushes GHCR image tags `latest` and `vX.Y.Z`.
+- The pushed tag is the source of truth for release versioning.
+- The workflow automatically publishes:
+  - GitHub Release for that tag
+  - GHCR multi-arch Docker images
+- Stable tags publish GHCR tags `latest` and `vX.Y.Z`.
+- RC tags publish `vX.Y.Z-rc.*` only and do not move `latest`.
+- Manual backfill remains available via `Release` workflow dispatch with:
+  - `release_tag=<existing tag>`
+  - optional `publish_docker=true|false`
 - PR labels are no longer required for release publication.
 
 ## Deployment Notes

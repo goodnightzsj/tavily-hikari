@@ -1,20 +1,19 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: ["CI Pipeline"]
-    types: [completed]
-    branches: [main]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
-      head_sha:
-        description: Commit SHA on main to backfill release for
+      release_tag:
+        description: Existing release tag to backfill, for example v0.2.3
         required: true
         type: string
       publish_docker:
-        description: Also build and publish GHCR Docker images for this release
+        description: Also build and publish GHCR Docker images for this tag
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -22,123 +21,91 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  RELEASE_HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   prepare:
-    name: Prepare (auto patch + version + tag)
+    name: Prepare (tag + version + policy)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: >-
-      (github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push') ||
-      github.event_name == 'workflow_dispatch'
     outputs:
       should_release: ${{ steps.intent.outputs.should_release }}
-      bump_level: ${{ steps.intent.outputs.bump_level }}
       release_channel: ${{ steps.intent.outputs.release_channel }}
       publish_docker: ${{ steps.intent.outputs.publish_docker }}
-      pr_number: ${{ steps.intent.outputs.pr_number }}
-      pr_url: ${{ steps.intent.outputs.pr_url }}
-      release_intent_label: ${{ steps.intent.outputs.release_intent_label }}
+      head_sha: ${{ steps.intent.outputs.head_sha }}
       reason: ${{ steps.intent.outputs.reason }}
       version: ${{ steps.tagmeta.outputs.version }}
       tag: ${{ steps.tagmeta.outputs.tag }}
     steps:
-      - name: Checkout (workflow_run)
+      - name: Checkout tag/ref
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_HEAD_SHA }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
-      - name: Determine automatic release policy
+      - name: Determine tag-driven release policy
         id: intent
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          INPUT_PUBLISH_DOCKER: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_docker || 'false' }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          INPUT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
+          INPUT_PUBLISH_DOCKER: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_docker || 'true' }}
         run: |
           publish_docker=false
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+              echo "should_release=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            release_tag="${GITHUB_REF_NAME}"
+            publish_docker=true
+            reason="release_on_tag_push"
+          else
+            release_tag="${INPUT_RELEASE_TAG}"
+            reason="manual_tag_backfill"
+          fi
+
           if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${INPUT_PUBLISH_DOCKER}" == "true" ]]; then
             publish_docker=true
           fi
 
+          if [[ -z "${release_tag}" ]]; then
+            echo "release tag is required" >&2
+            exit 1
+          fi
+          if [[ ! "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9A-Za-z._-]+)?$ ]]; then
+            echo "release tag must look like vX.Y.Z or vX.Y.Z-rc.suffix, got ${release_tag}" >&2
+            exit 1
+          fi
+
+          release_channel=stable
+          if [[ "${release_tag}" == *-rc.* ]]; then
+            release_channel=rc
+          fi
+
           {
             echo "should_release=true"
-            echo "bump_level=patch"
-            echo "release_channel=stable"
+            echo "release_channel=${release_channel}"
             echo "publish_docker=${publish_docker}"
-            echo "pr_number="
-            echo "pr_url="
-            echo "release_intent_label=auto:patch"
-            echo "reason=release_every_main_push"
+            echo "head_sha=$(git rev-parse HEAD)"
+            echo "reason=${reason}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Determine release version/tag (idempotent)
+      - name: Determine release version/tag
         id: tagmeta
         if: ${{ steps.intent.outputs.should_release == 'true' }}
         shell: bash
         env:
-          BUMP_LEVEL: ${{ steps.intent.outputs.bump_level }}
-          RELEASE_CHANNEL: ${{ steps.intent.outputs.release_channel }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
-
-          # If HEAD already has a channel-matching tag, reuse it to keep reruns idempotent.
-          if [[ "${RELEASE_CHANNEL}" == "rc" ]]; then
-            existing_tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9a-f]{7}$' | head -n1 || true)"
-          else
-            existing_tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
-          fi
-          if [[ -n "${existing_tag}" ]]; then
-            tag="${existing_tag}"
-            version="${tag#v}"
-            echo "reuse existing tag on HEAD: ${tag}"
-          else
-            base_version="$(bash ./.github/scripts/compute-version.sh --print-version)"
-            if [[ "${RELEASE_CHANNEL}" == "rc" ]]; then
-              sha="${{ env.RELEASE_HEAD_SHA }}"
-              short_sha="${sha:0:7}"
-              version="${base_version}-rc.${short_sha}"
-            else
-              version="${base_version}"
-            fi
-
-            tag="v${version}"
-            echo "computed version: ${version} (tag ${tag}, channel ${RELEASE_CHANNEL})"
-          fi
-
-          if [[ "${RELEASE_CHANNEL}" == "stable" ]]; then
-            latest_stable_tag="$(
-              git tag -l \
-                | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
-                | sed -E 's/^v//' \
-                | sort -Vu \
-                | tail -n1 \
-                || true
-            )"
-
-            if [[ -n "${latest_stable_tag}" ]]; then
-              if [[ -n "${existing_tag}" ]]; then
-                if [[ "${version}" != "${latest_stable_tag}" ]]; then
-                  echo "existing stable tag '${version}' on HEAD is behind latest stable '${latest_stable_tag}'" >&2
-                  exit 1
-                fi
-              else
-                highest="$(printf '%s\n%s\n' "${latest_stable_tag}" "${version}" | sort -V | tail -n1)"
-                if [[ "${highest}" != "${version}" || "${version}" == "${latest_stable_tag}" ]]; then
-                  echo "computed stable version '${version}' must be greater than latest stable '${latest_stable_tag}'" >&2
-                  exit 1
-                fi
-              fi
-            fi
-          fi
-
+          tag="${RELEASE_TAG}"
+          version="${tag#v}"
           echo "APP_EFFECTIVE_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
@@ -149,38 +116,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Create and push tag (if missing)
-        if: ${{ steps.intent.outputs.should_release == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ steps.tagmeta.outputs.tag }}"
-          if [[ -z "${tag}" ]]; then
-            echo "missing tag output" >&2
-            exit 2
-          fi
-
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "tag exists: ${tag}"
-            exit 0
-          fi
-
-          git tag -a "${tag}" -m "${tag}"
-          git push origin "${tag}"
-
       - name: Summary
         if: always()
         shell: bash
         run: |
           {
             echo "### Release prepare"
-            echo "- head_sha: ${{ env.RELEASE_HEAD_SHA }}"
+            echo "- head_sha: ${{ steps.intent.outputs.head_sha }}"
             echo "- should_release: ${{ steps.intent.outputs.should_release }}"
-            echo "- release_policy: ${{ steps.intent.outputs.release_intent_label }}"
-            echo "- bump_level: ${{ steps.intent.outputs.bump_level }}"
             echo "- release_channel: ${{ steps.intent.outputs.release_channel }}"
             echo "- publish_docker: ${{ steps.intent.outputs.publish_docker }}"
-            echo "- pr: ${{ steps.intent.outputs.pr_number }} (${{ steps.intent.outputs.pr_url }})"
             echo "- reason: ${{ steps.intent.outputs.reason }}"
             echo "- tag: ${{ steps.tagmeta.outputs.tag || '<none>' }}"
             echo "- version: ${{ steps.tagmeta.outputs.version || '<none>' }}"
@@ -208,10 +153,10 @@ jobs:
     env:
       APP_EFFECTIVE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - name: Checkout (workflow_run)
+      - name: Checkout tag/ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_HEAD_SHA }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Install Rust native dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libsqlite3-dev

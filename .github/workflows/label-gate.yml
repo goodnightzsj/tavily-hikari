@@ -24,4 +24,4 @@ jobs:
         run: |
           set -euo pipefail
           echo "Release labels are no longer required."
-          echo "Every successful push to main now triggers an automatic stable patch release."
+          echo "Automated releases now run from pushed v* tags instead of every main push."

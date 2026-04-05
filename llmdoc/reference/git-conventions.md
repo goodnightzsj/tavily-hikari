@@ -1,8 +1,8 @@
 # Git Conventions
 
 ## Branch and release posture
-- `main` is the primary integration branch. Release automation runs after merges to `main` and CI success. Source: `README.md:296`, `README.md:301`.
-- Each successful push to `main` now produces an automatic stable patch Git tag + GitHub Release; GHCR publication is manual and no longer part of every main-branch release. Source: `.github/workflows/release.yml:33`, `.github/workflows/release.yml:64`, `.github/workflows/release.yml:701`.
+- `main` is the primary integration branch for CI, but release automation is tag-driven rather than merge-driven. Source: `README.md:292`, `.github/workflows/ci.yml:1`, `.github/workflows/release.yml:1`.
+- Release versioning is driven by pushed `v*` tags; tag pushes create the GitHub Release and GHCR images automatically, while manual dispatch is only for backfilling an existing tag and can skip Docker. Source: `README.md:296`, `.github/workflows/release.yml:4`, `.github/workflows/release.yml:59`, `.github/workflows/release.yml:139`, `.github/workflows/release.yml:647`.
 
 ## Commit message style
 - Conventional Commits are enforced via commitlint. Allowed types are `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`, `build`, `revert`. Source: `commitlint.config.mjs:3`, `commitlint.config.mjs:6`.
