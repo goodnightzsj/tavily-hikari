@@ -15,8 +15,6 @@ on:
 permissions:
   contents: write
   packages: write
-  issues: read
-  pull-requests: read
 
 env:
   REGISTRY: ghcr.io
@@ -28,7 +26,7 @@ concurrency:
 
 jobs:
   prepare:
-    name: Prepare (intent + version + tag)
+    name: Prepare (auto patch + version + tag)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: >-
@@ -53,14 +51,19 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.RELEASE_HEAD_SHA }}
 
-      - name: Determine release intent (labels)
+      - name: Determine automatic release policy
         id: intent
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_RUN_SHA: ${{ env.RELEASE_HEAD_SHA }}
         run: |
-          bash ./.github/scripts/release-intent.sh
+          {
+            echo "should_release=true"
+            echo "bump_level=patch"
+            echo "release_channel=stable"
+            echo "pr_number="
+            echo "pr_url="
+            echo "release_intent_label=auto:patch"
+            echo "reason=release_every_main_push"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Determine release version/tag (idempotent)
         id: tagmeta
@@ -159,7 +162,7 @@ jobs:
             echo "### Release prepare"
             echo "- head_sha: ${{ env.RELEASE_HEAD_SHA }}"
             echo "- should_release: ${{ steps.intent.outputs.should_release }}"
-            echo "- intent_label: ${{ steps.intent.outputs.release_intent_label }}"
+            echo "- release_policy: ${{ steps.intent.outputs.release_intent_label }}"
             echo "- bump_level: ${{ steps.intent.outputs.bump_level }}"
             echo "- release_channel: ${{ steps.intent.outputs.release_channel }}"
             echo "- pr: ${{ steps.intent.outputs.pr_number }} (${{ steps.intent.outputs.pr_url }})"

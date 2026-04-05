@@ -14,7 +14,7 @@
 
 ## CI and release
 - CI runs lint, tests, and builds from `.github/workflows/ci.yml`. Source: `README.md:287`.
-- Release automation runs from `.github/workflows/release.yml` after `main` CI succeeds and uses PR labels to compute version/channel. Source: `README.md:288`, `README.md:294`.
+- Release automation runs from `.github/workflows/release.yml` after `main` CI succeeds and now publishes an automatic stable patch release for every new `main` commit. Source: `.github/workflows/release.yml:29`, `.github/workflows/release.yml:56`, `.github/workflows/release.yml:65`.
 - CI already builds a local Docker image for the ForwardAuth compose smoke job, and the release workflow rebuilds the production image, smoke-tests it against `mock_tavily`, then publishes multi-arch GHCR tags. Source: `.github/workflows/ci.yml:91`, `.github/workflows/ci.yml:132`, `.github/workflows/release.yml:180`, `.github/workflows/release.yml:241`, `.github/workflows/release.yml:531`, `.github/workflows/release.yml:578`.
 
 ## Container and deployment modes

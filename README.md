@@ -26,7 +26,7 @@ Tavily Hikari is a Rust + Axum proxy for Tavily's MCP endpoint. It multiplexes m
 - **High-anonymity forwarding** – only `/mcp` traffic is tunneled upstream; sensitive headers are stripped or rewritten. See [`docs/high-anonymity-proxy.md`](docs/high-anonymity-proxy.md).
 - **Full audit trail** – `request_logs` persists method/path/query, upstream responses, error payloads, and the list of forwarded/dropped headers.
 - **Operator UI** – the SPA in `web/` visualizes key health, request logs, and admin actions (soft delete, restore, reveal real keys).
-- **CI + Release** – GitHub Actions runs lint/tests; releases are driven by PR intent labels and publish `ghcr.io/ivanli-cn/tavily-hikari:<tag>` with prebuilt web assets.
+- **CI + Release** – GitHub Actions runs lint/tests; every successful `main` push produces a release and publishes `ghcr.io/goodnightzsj/tavily-hikari:<tag>` with prebuilt web assets.
 
 ## Architecture Snapshot
 
@@ -67,7 +67,7 @@ Visit `http://127.0.0.1:58087/health` for a health check or `http://127.0.0.1:55
 docker run --rm \
   -p 8787:8787 \
   -v $(pwd)/data:/srv/app/data \
-  ghcr.io/ivanli-cn/tavily-hikari:latest
+  ghcr.io/goodnightzsj/tavily-hikari:latest
 ```
 
 The container listens on `0.0.0.0:8787`, serves `web/dist`, and persists data in `/srv/app/data/tavily_proxy.db`. Once it is up, register keys via the admin API/console.
@@ -291,18 +291,15 @@ codex mcp list | grep tavily_hikari
 - CI: `.github/workflows/ci.yml` runs lint/tests/build.
 - Release: `.github/workflows/release.yml` runs after main CI succeeds and publishes tags, GitHub Releases, and GHCR images.
 
-## Release (PR labels)
+## Release
 
-Releases are label-driven:
+Every successful push to `main` triggers the release workflow.
 
-- Every PR must have exactly one intent label: `type:patch`, `type:minor`, `type:major`, `type:docs`, or `type:skip`.
-- Every PR must have exactly one channel label: `channel:stable` or `channel:rc`.
-- When a PR is merged into `main` and CI passes, the release workflow computes the next stable semver (`X.Y.Z`) and publishes:
+- The workflow always computes the next stable patch semver (`X.Y.Z`).
+- It publishes:
   - Git tag + GitHub Release
-  - GHCR image tags:
-    - stable (`channel:stable`): `latest`, `vX.Y.Z`
-    - prerelease (`channel:rc`): `vX.Y.Z-rc.<sha7>` (no `latest`)
-- If a commit cannot be mapped to exactly one PR, release is skipped (conservative default).
+  - GHCR image tags: `latest`, `vX.Y.Z`
+- PR labels are no longer required for release publication.
 
 ## Deployment Notes
 
