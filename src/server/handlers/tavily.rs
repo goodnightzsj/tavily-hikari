@@ -786,6 +786,7 @@ async fn proxy_tavily_http_endpoint(
                 options,
                 &headers,
                 true,
+                reserved_credits,
             )
             .await;
 
@@ -804,6 +805,7 @@ async fn proxy_tavily_http_endpoint(
                     None
                 };
                 let mut attempt_logged = false;
+                let mut actual_key_credits = 0i64;
 
                 if resp.status.is_success()
                     && analysis.status == "success"
@@ -811,6 +813,7 @@ async fn proxy_tavily_http_endpoint(
                 {
                     let credits = usage_delta.unwrap_or(reserved_credits);
                     if credits > 0 {
+                        actual_key_credits = credits;
                         match if let Some(subject) = billing_subject.as_deref() {
                             state
                                 .proxy
@@ -940,6 +943,14 @@ async fn proxy_tavily_http_endpoint(
                         )
                         .await;
                 }
+                state
+                    .proxy
+                    .settle_key_budget_charge(
+                        resp.api_key_id.as_deref(),
+                        resp.reserved_key_credits,
+                        actual_key_credits,
+                    )
+                    .await;
                 // Return the upstream response once billing either succeeded or we captured a local audit error.
                 return Ok(build_response(resp));
             }
@@ -999,6 +1010,7 @@ async fn proxy_tavily_http_endpoint(
                     &path,
                     options,
                     &headers,
+                    reserved_credits,
                 )
                 .await
         }
@@ -1014,6 +1026,7 @@ async fn proxy_tavily_http_endpoint(
                     options,
                     &headers,
                     true,
+                    reserved_credits,
                 )
                 .await
         }
@@ -1023,6 +1036,7 @@ async fn proxy_tavily_http_endpoint(
         Ok((resp, analysis)) => {
             let mut billing_error: Option<String> = None;
             let mut attempt_logged = false;
+            let mut actual_key_credits = 0i64;
             if resp.status.is_success()
                 && analysis.status == "success"
                 && let Some(tid) = token_id_for_logs.as_deref()
@@ -1043,6 +1057,7 @@ async fn proxy_tavily_http_endpoint(
                     }
                 };
                 if credits > 0 {
+                    actual_key_credits = credits;
                     match if let Some(subject) = billing_subject.as_deref() {
                         state
                             .proxy
@@ -1166,6 +1181,14 @@ async fn proxy_tavily_http_endpoint(
                     )
                     .await;
             }
+            state
+                .proxy
+                .settle_key_budget_charge(
+                    resp.api_key_id.as_deref(),
+                    resp.reserved_key_credits,
+                    actual_key_credits,
+                )
+                .await;
             // Always return the upstream response, even if local billing persistence fails.
             // Returning a 5xx here can trigger client retries and cause duplicate upstream charges.
             Ok(build_response(resp))

@@ -2,6 +2,61 @@ use crate::analysis::*;
 use crate::models::*;
 use crate::store::*;
 use crate::*;
+use std::collections::VecDeque;
+
+const KEY_BUDGET_WINDOW_SECS: i64 = 60;
+const MAX_TRANSPARENT_KEY_MIGRATIONS: usize = 3;
+
+#[derive(Clone, Debug, Default)]
+struct KeyRuntimeBudgetState {
+    recent_request_timestamps: VecDeque<i64>,
+    inflight_credit_reservations: i64,
+    local_billed_credits: i64,
+    cooldown_until: Option<i64>,
+    cooldown_reason: Option<String>,
+    last_selected_at: Option<i64>,
+    last_migration_at: Option<i64>,
+    last_migration_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct KeyBudgetRequirement {
+    rpm_cost: i64,
+    credit_cost: i64,
+}
+
+impl KeyBudgetRequirement {
+    fn control_plane() -> Self {
+        Self {
+            rpm_cost: 1,
+            credit_cost: 0,
+        }
+    }
+
+    fn billable(credit_cost: i64) -> Self {
+        Self {
+            rpm_cost: 1,
+            credit_cost: credit_cost.max(0),
+        }
+    }
+
+    fn with_rpm_cost(mut self, rpm_cost: i64) -> Self {
+        self.rpm_cost = rpm_cost.max(1);
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+struct KeyBudgetReservation {
+    key_id: String,
+    reserved_credits: i64,
+}
+
+#[derive(Clone, Debug)]
+struct KeyBudgetLease {
+    lease: ApiKeyLease,
+    reservation: KeyBudgetReservation,
+}
 
 #[derive(Clone, Debug)]
 struct TokenQuota {
@@ -58,6 +113,7 @@ pub struct TavilyProxy {
     // serialization is provided by quota_subject_locks in SQLite.
     pub(crate) token_billing_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     pub(crate) research_key_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    key_runtime_budgets: Arc<Mutex<HashMap<String, KeyRuntimeBudgetState>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -369,8 +425,10 @@ impl TavilyProxy {
             ))),
             token_billing_locks: Arc::new(Mutex::new(HashMap::new())),
             research_key_locks: Arc::new(Mutex::new(HashMap::new())),
+            key_runtime_budgets: Arc::new(Mutex::new(HashMap::new())),
         };
         proxy.initialize_forward_proxy_runtime().await?;
+        proxy.recover_key_runtime_budgets().await?;
         Ok(proxy)
     }
 
@@ -380,6 +438,361 @@ impl TavilyProxy {
         }
         let manager = self.forward_proxy.lock().await;
         forward_proxy::sync_manager_runtime_to_store(&self.key_store, &manager).await
+    }
+
+    async fn recover_key_runtime_budgets(&self) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        let since = now - KEY_BUDGET_WINDOW_SECS;
+        let recent_events = self.key_store.list_recent_key_request_events(since).await?;
+        let overlay_seeds = self.key_store.list_key_quota_overlay_seeds().await?;
+        let persisted_states = self.key_store.list_persisted_api_key_runtime_states(now).await?;
+
+        let rpm_limit = effective_key_rpm_limit_per_minute().max(1) as usize;
+        let mut states: HashMap<String, KeyRuntimeBudgetState> = HashMap::new();
+
+        for event in recent_events {
+            let state = states.entry(event.key_id).or_default();
+            state.recent_request_timestamps.push_back(event.created_at);
+            while state.recent_request_timestamps.len() > rpm_limit {
+                state.recent_request_timestamps.pop_front();
+            }
+        }
+
+        for seed in overlay_seeds {
+            states.entry(seed.key_id).or_default().local_billed_credits =
+                seed.local_billed_credits.max(0);
+        }
+
+        for persisted in persisted_states {
+            let state = states.entry(persisted.key_id).or_default();
+            state.cooldown_until = persisted.cooldown_until.filter(|until| *until > now);
+            state.cooldown_reason = persisted.cooldown_reason;
+            state.last_migration_at = persisted.last_migration_at;
+            state.last_migration_reason = persisted.last_migration_reason;
+        }
+
+        let mut guard = self.key_runtime_budgets.lock().await;
+        *guard = states;
+        Ok(())
+    }
+
+    fn prune_key_runtime_state(state: &mut KeyRuntimeBudgetState, now: i64) {
+        let cutoff = now - KEY_BUDGET_WINDOW_SECS;
+        while state
+            .recent_request_timestamps
+            .front()
+            .is_some_and(|ts| *ts < cutoff)
+        {
+            state.recent_request_timestamps.pop_front();
+        }
+        if state.cooldown_until.is_some_and(|until| until <= now) {
+            state.cooldown_until = None;
+            state.cooldown_reason = None;
+        }
+    }
+
+    fn compute_effective_quota_remaining(
+        candidate: &ApiKeyBudgetCandidate,
+        state: &KeyRuntimeBudgetState,
+    ) -> Option<i64> {
+        candidate.quota_remaining.map(|remaining| {
+            remaining
+                .saturating_sub(state.local_billed_credits.max(0))
+                .saturating_sub(state.inflight_credit_reservations.max(0))
+        })
+    }
+
+    fn compute_runtime_budget_block_reason(
+        candidate: &ApiKeyBudgetCandidate,
+        state: &KeyRuntimeBudgetState,
+        now: i64,
+    ) -> Option<String> {
+        if state.cooldown_until.is_some_and(|until| until > now) {
+            return Some(
+                state
+                    .cooldown_reason
+                    .clone()
+                    .unwrap_or_else(|| "cooldown".to_string()),
+            );
+        }
+        if candidate.status != STATUS_ACTIVE {
+            return Some(candidate.status.clone());
+        }
+        if candidate.quarantined {
+            return Some("quarantined".to_string());
+        }
+        if Self::compute_effective_quota_remaining(candidate, state).is_some_and(|remaining| remaining <= 0)
+        {
+            return Some("quota_exhausted".to_string());
+        }
+        if state.recent_request_timestamps.len() as i64 >= effective_key_rpm_limit_per_minute() {
+            return Some("rpm_exhausted".to_string());
+        }
+        None
+    }
+
+    async fn select_budgeted_key(
+        &self,
+        preferred_key_ids: &[String],
+        excluded_key_ids: &[String],
+        requirement: &KeyBudgetRequirement,
+    ) -> Result<KeyBudgetLease, ProxyError> {
+        let candidates = self.key_store.list_api_key_budget_candidates().await?;
+        let now = Utc::now().timestamp();
+        let rpm_limit = effective_key_rpm_limit_per_minute().max(1) as usize;
+        let excluded: HashSet<&str> = excluded_key_ids.iter().map(String::as_str).collect();
+        let preferred_order: HashMap<&str, usize> = preferred_key_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, key_id)| (key_id.as_str(), idx))
+            .collect();
+
+        let mut guard = self.key_runtime_budgets.lock().await;
+        let mut best: Option<(ApiKeyBudgetCandidate, Option<i64>, usize, usize, usize)> = None;
+
+        for candidate in candidates {
+            if excluded.contains(candidate.id.as_str()) {
+                continue;
+            }
+            if candidate.status != STATUS_ACTIVE || candidate.quarantined {
+                continue;
+            }
+
+            let state = guard.entry(candidate.id.clone()).or_default();
+            Self::prune_key_runtime_state(state, now);
+
+            if state.cooldown_until.is_some_and(|until| until > now) {
+                continue;
+            }
+
+            let required_rpm = requirement.rpm_cost.max(1) as usize;
+            if state.recent_request_timestamps.len().saturating_add(required_rpm) > rpm_limit {
+                continue;
+            }
+
+            let effective_quota = Self::compute_effective_quota_remaining(&candidate, state);
+            if requirement.credit_cost > 0
+                && effective_quota.is_some_and(|remaining| remaining < requirement.credit_cost)
+            {
+                continue;
+            }
+
+            let preferred_rank = preferred_order
+                .get(candidate.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            let rpm_remaining = rpm_limit.saturating_sub(state.recent_request_timestamps.len());
+            let last_used_rank = candidate.last_used_at.unwrap_or_default() as usize;
+
+            let should_replace = match best.as_ref() {
+                None => true,
+                Some((_, best_quota, best_preferred, best_rpm_remaining, best_last_used_rank)) => {
+                    if preferred_rank != *best_preferred {
+                        preferred_rank < *best_preferred
+                    } else if effective_quota.unwrap_or(-1) != best_quota.unwrap_or(-1) {
+                        effective_quota.unwrap_or(-1) > best_quota.unwrap_or(-1)
+                    } else if rpm_remaining != *best_rpm_remaining {
+                        rpm_remaining > *best_rpm_remaining
+                    } else {
+                        last_used_rank < *best_last_used_rank
+                    }
+                }
+            };
+
+            if should_replace {
+                best = Some((
+                    candidate,
+                    effective_quota,
+                    preferred_rank,
+                    rpm_remaining,
+                    last_used_rank,
+                ));
+            }
+        }
+
+        let Some((candidate, _, _, _, _)) = best else {
+            return Err(ProxyError::NoAvailableKeys);
+        };
+
+        let state = guard.entry(candidate.id.clone()).or_default();
+        Self::prune_key_runtime_state(state, now);
+        for _ in 0..requirement.rpm_cost.max(1) {
+            state.recent_request_timestamps.push_back(now);
+            while state.recent_request_timestamps.len() > rpm_limit {
+                state.recent_request_timestamps.pop_front();
+            }
+        }
+        state.inflight_credit_reservations = state
+            .inflight_credit_reservations
+            .saturating_add(requirement.credit_cost.max(0));
+        state.last_selected_at = Some(now);
+        drop(guard);
+
+        self.key_store.touch_key(&candidate.secret, now).await?;
+
+        Ok(KeyBudgetLease {
+            lease: ApiKeyLease {
+                id: candidate.id.clone(),
+                secret: candidate.secret,
+            },
+            reservation: KeyBudgetReservation {
+                key_id: candidate.id,
+                reserved_credits: requirement.credit_cost.max(0),
+            },
+        })
+    }
+
+    async fn reserve_specific_key_if_budgeted(
+        &self,
+        key_id: &str,
+        requirement: &KeyBudgetRequirement,
+    ) -> Result<Option<KeyBudgetLease>, ProxyError> {
+        let candidates = self.key_store.list_api_key_budget_candidates().await?;
+        let Some(candidate) = candidates.into_iter().find(|candidate| candidate.id == key_id) else {
+            return Ok(None);
+        };
+        if candidate.status != STATUS_ACTIVE || candidate.quarantined {
+            return Ok(None);
+        }
+
+        let now = Utc::now().timestamp();
+        let rpm_limit = effective_key_rpm_limit_per_minute().max(1) as usize;
+        let mut guard = self.key_runtime_budgets.lock().await;
+        let state = guard.entry(candidate.id.clone()).or_default();
+        Self::prune_key_runtime_state(state, now);
+
+        let required_rpm = requirement.rpm_cost.max(1) as usize;
+        if state.cooldown_until.is_some_and(|until| until > now)
+            || state.recent_request_timestamps.len().saturating_add(required_rpm) > rpm_limit
+        {
+            return Ok(None);
+        }
+
+        let effective_quota = Self::compute_effective_quota_remaining(&candidate, state);
+        if requirement.credit_cost > 0
+            && effective_quota.is_some_and(|remaining| remaining < requirement.credit_cost)
+        {
+            return Ok(None);
+        }
+
+        for _ in 0..requirement.rpm_cost.max(1) {
+            state.recent_request_timestamps.push_back(now);
+            while state.recent_request_timestamps.len() > rpm_limit {
+                state.recent_request_timestamps.pop_front();
+            }
+        }
+        state.inflight_credit_reservations = state
+            .inflight_credit_reservations
+            .saturating_add(requirement.credit_cost.max(0));
+        state.last_selected_at = Some(now);
+        drop(guard);
+
+        self.key_store.touch_key(&candidate.secret, now).await?;
+
+        Ok(Some(KeyBudgetLease {
+            lease: ApiKeyLease {
+                id: candidate.id.clone(),
+                secret: candidate.secret,
+            },
+            reservation: KeyBudgetReservation {
+                key_id: candidate.id,
+                reserved_credits: requirement.credit_cost.max(0),
+            },
+        }))
+    }
+
+    async fn settle_key_budget_reservation(
+        &self,
+        key_id: &str,
+        reserved_credits: i64,
+        actual_charged_credits: i64,
+    ) {
+        let now = Utc::now().timestamp();
+        let mut guard = self.key_runtime_budgets.lock().await;
+        let state = guard.entry(key_id.to_string()).or_default();
+        Self::prune_key_runtime_state(state, now);
+        state.inflight_credit_reservations = state
+            .inflight_credit_reservations
+            .saturating_sub(reserved_credits.max(0));
+        state.local_billed_credits = state
+            .local_billed_credits
+            .saturating_add(actual_charged_credits.max(0));
+    }
+
+    async fn reset_key_quota_overlay_after_sync(&self, key_id: &str) {
+        let now = Utc::now().timestamp();
+        let mut guard = self.key_runtime_budgets.lock().await;
+        let state = guard.entry(key_id.to_string()).or_default();
+        Self::prune_key_runtime_state(state, now);
+        state.local_billed_credits = 0;
+    }
+
+    async fn apply_key_rpm_cooldown(&self, key_id: &str, reason: &str) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        let cooldown_until = now + effective_key_rpm_cooldown_secs().max(1);
+        {
+            let mut guard = self.key_runtime_budgets.lock().await;
+            let state = guard.entry(key_id.to_string()).or_default();
+            state.cooldown_until = Some(cooldown_until);
+            state.cooldown_reason = Some(reason.to_string());
+        }
+        self.key_store
+            .upsert_api_key_runtime_state(
+                key_id,
+                Some(cooldown_until),
+                Some(reason),
+                None,
+                None,
+                now,
+            )
+            .await
+    }
+
+    async fn note_key_migration(&self, key_id: &str, reason: &str) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        {
+            let mut guard = self.key_runtime_budgets.lock().await;
+            let state = guard.entry(key_id.to_string()).or_default();
+            state.last_migration_at = Some(now);
+            state.last_migration_reason = Some(reason.to_string());
+        }
+        self.key_store
+            .upsert_api_key_runtime_state(key_id, None, None, Some(now), Some(reason), now)
+            .await
+    }
+
+    fn merge_runtime_budget_metrics(
+        &self,
+        mut metrics: ApiKeyMetrics,
+        runtime_states: &HashMap<String, KeyRuntimeBudgetState>,
+        now: i64,
+    ) -> ApiKeyMetrics {
+        let state = runtime_states.get(&metrics.id).cloned().unwrap_or_default();
+        let mut state = state;
+        Self::prune_key_runtime_state(&mut state, now);
+        let candidate = ApiKeyBudgetCandidate {
+            id: metrics.id.clone(),
+            secret: String::new(),
+            status: metrics.status.clone(),
+            last_used_at: metrics.last_used_at,
+            quota_limit: metrics.quota_limit,
+            quota_remaining: metrics.quota_remaining,
+            quota_synced_at: metrics.quota_synced_at,
+            quarantined: metrics.quarantine.is_some(),
+        };
+        let rpm_limit = effective_key_rpm_limit_per_minute();
+        metrics.effective_quota_remaining = Self::compute_effective_quota_remaining(&candidate, &state);
+        metrics.runtime_rpm_limit = Some(rpm_limit);
+        metrics.runtime_rpm_used = Some(state.recent_request_timestamps.len() as i64);
+        metrics.runtime_rpm_remaining = Some(
+            rpm_limit.saturating_sub(state.recent_request_timestamps.len() as i64),
+        );
+        metrics.cooldown_until = state.cooldown_until;
+        metrics.budget_block_reason =
+            Self::compute_runtime_budget_block_reason(&candidate, &state, now);
+        metrics.last_migration_at = state.last_migration_at;
+        metrics.last_migration_reason = state.last_migration_reason;
+        metrics
     }
 
     pub async fn get_forward_proxy_settings(
@@ -3088,10 +3501,14 @@ impl TavilyProxy {
     pub(crate) async fn acquire_key_for(
         &self,
         auth_token_id: Option<&str>,
-    ) -> Result<ApiKeyLease, ProxyError> {
+        requirement: &KeyBudgetRequirement,
+        excluded_key_ids: &[String],
+    ) -> Result<KeyBudgetLease, ProxyError> {
         let Some(token_id) = auth_token_id else {
             // No token id (e.g. certain internal or dev flows) → plain global scheduling.
-            return self.key_store.acquire_key().await;
+            return self
+                .select_budgeted_key(&[], excluded_key_ids, requirement)
+                .await;
         };
 
         if let Some(user_id) = self.key_store.find_user_id_by_token(token_id).await? {
@@ -3131,24 +3548,11 @@ impl TavilyProxy {
                 candidates.push(legacy_primary.clone());
             }
 
-            for key_id in candidates {
-                if let Some(lease) = self.key_store.try_acquire_specific_key(&key_id).await? {
-                    self.key_store
-                        .sync_user_primary_api_key_affinity(&user_id, &lease.id)
-                        .await?;
-                    return Ok(lease);
-                }
-            }
-
-            if user_primary.is_some() || token_primary.is_some() {
-                return self
-                    .rebind_user_primary_affinity(&user_id, user_primary.as_deref())
-                    .await;
-            }
-
-            let lease = self.key_store.acquire_key().await?;
+            let lease = self
+                .select_budgeted_key(&candidates, excluded_key_ids, requirement)
+                .await?;
             self.key_store
-                .sync_user_primary_api_key_affinity(&user_id, &lease.id)
+                .sync_user_primary_api_key_affinity(&user_id, &lease.lease.id)
                 .await?;
             return Ok(lease);
         }
@@ -3158,25 +3562,24 @@ impl TavilyProxy {
             .get_token_primary_api_key_affinity(token_id)
             .await?
         {
-            if let Some(lease) = self
-                .key_store
-                .try_acquire_specific_key(&token_primary.api_key_id)
-                .await?
-            {
-                self.key_store
-                    .set_token_primary_api_key_affinity(token_id, None, &lease.id)
-                    .await?;
-                return Ok(lease);
-            }
-
-            return self
-                .rebind_token_primary_affinity(token_id, Some(&token_primary.api_key_id))
-                .await;
+            let lease = self
+                .select_budgeted_key(
+                    &[token_primary.api_key_id.clone()],
+                    excluded_key_ids,
+                    requirement,
+                )
+                .await?;
+            self.key_store
+                .set_token_primary_api_key_affinity(token_id, None, &lease.lease.id)
+                .await?;
+            return Ok(lease);
         }
 
-        let lease = self.key_store.acquire_key().await?;
+        let lease = self
+            .select_budgeted_key(&[], excluded_key_ids, requirement)
+            .await?;
         self.key_store
-            .set_token_primary_api_key_affinity(token_id, None, &lease.id)
+            .set_token_primary_api_key_affinity(token_id, None, &lease.lease.id)
             .await?;
         Ok(lease)
     }
@@ -3185,7 +3588,9 @@ impl TavilyProxy {
         &self,
         auth_token_id: Option<&str>,
         research_request_id: Option<&str>,
-    ) -> Result<ApiKeyLease, ProxyError> {
+        requirement: &KeyBudgetRequirement,
+        excluded_key_ids: &[String],
+    ) -> Result<KeyBudgetLease, ProxyError> {
         let now = Utc::now().timestamp();
 
         if let Some(request_id) = research_request_id {
@@ -3211,14 +3616,14 @@ impl TavilyProxy {
             }
 
             if let Some(key_id) = candidate_key_id {
-                if let Some(lease) = self.key_store.try_acquire_specific_key(&key_id).await? {
-                    return Ok(lease);
-                }
-                return Err(ProxyError::NoAvailableKeys);
+                return self
+                    .select_budgeted_key(&[key_id], excluded_key_ids, requirement)
+                    .await;
             }
         }
 
-        self.acquire_key_for(auth_token_id).await
+        self.acquire_key_for(auth_token_id, requirement, excluded_key_ids)
+            .await
     }
 
     pub(crate) async fn populate_research_request_affinity_caches(
@@ -3470,18 +3875,45 @@ impl TavilyProxy {
         Ok(())
     }
 
-    /// 将请求透传到 Tavily upstream 并记录日志。
-    pub async fn proxy_request(&self, request: ProxyRequest) -> Result<ProxyResponse, ProxyError> {
-        let lease = if let Some(key_id) = request.pinned_api_key_id.as_deref() {
-            let Some(lease) = self.key_store.try_acquire_specific_key(key_id).await? else {
-                return Err(ProxyError::PinnedMcpSessionUnavailable);
-            };
-            lease
-        } else {
-            self.acquire_key_for(request.auth_token_id.as_deref())
-                .await?
-        };
+    fn should_retry_key_budget_attempt(
+        status: StatusCode,
+        outcome: &AttemptAnalysis,
+    ) -> Option<&'static str> {
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Some("upstream_429");
+        }
+        if outcome.status == OUTCOME_QUOTA_EXHAUSTED {
+            return Some("quota_exhausted");
+        }
+        None
+    }
 
+    fn build_internal_mcp_headers(
+        protocol_version: Option<&str>,
+        upstream_session_id: Option<&str>,
+    ) -> Result<HeaderMap, ProxyError> {
+        let mut headers = HeaderMap::new();
+        if let Some(protocol_version) = protocol_version
+            && let Ok(value) = HeaderValue::from_str(protocol_version)
+        {
+            headers.insert("mcp-protocol-version", value);
+        }
+        if let Some(session_id) = upstream_session_id
+            && let Ok(value) = HeaderValue::from_str(session_id)
+        {
+            headers.insert("mcp-session-id", value);
+        }
+        Ok(headers)
+    }
+
+    async fn execute_mcp_proxy_attempt(
+        &self,
+        request: &ProxyRequest,
+        lease: &ApiKeyLease,
+        reserved_key_credits: i64,
+        upstream_session_id_override: Option<&str>,
+        visibility: Option<&str>,
+    ) -> Result<(ProxyResponse, AttemptAnalysis), ProxyError> {
         let mut url = build_mcp_upstream_url(&self.upstream, request.path.as_str());
 
         {
@@ -3496,7 +3928,15 @@ impl TavilyProxy {
 
         drop(url.query_pairs_mut());
 
-        let sanitized_headers = self.sanitize_headers(&request.headers, &request.path);
+        let mut headers = request.headers.clone();
+        if let Some(upstream_session_id) = upstream_session_id_override {
+            headers.insert(
+                "mcp-session-id",
+                HeaderValue::from_str(upstream_session_id)
+                    .map_err(|err| ProxyError::Other(err.to_string()))?,
+            );
+        }
+        let sanitized_headers = self.sanitize_headers(&headers, &request.path);
         let request_method = request.method.clone();
         let request_body = request.body.clone();
         let request_url = url.clone();
@@ -3533,12 +3973,18 @@ impl TavilyProxy {
 
                 let key_effect = self
                     .reconcile_key_health(
-                        &lease,
+                        lease,
                         request.path.as_str(),
                         &outcome,
                         request.auth_token_id.as_deref(),
                     )
                     .await?;
+
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    let _ = self
+                        .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
+                        .await;
+                }
 
                 let request_log_id = self
                     .key_store
@@ -3559,18 +4005,23 @@ impl TavilyProxy {
                         key_effect_summary: key_effect.summary.as_deref(),
                         forwarded_headers: &sanitized_headers.forwarded,
                         dropped_headers: &sanitized_headers.dropped,
+                        visibility,
                     })
                     .await?;
 
-                Ok(ProxyResponse {
-                    status,
-                    headers,
-                    body: body_bytes,
-                    api_key_id: Some(lease.id.clone()),
-                    request_log_id: Some(request_log_id),
-                    key_effect_code: key_effect.code,
-                    key_effect_summary: key_effect.summary,
-                })
+                Ok((
+                    ProxyResponse {
+                        status,
+                        headers,
+                        body: body_bytes,
+                        api_key_id: Some(lease.id.clone()),
+                        request_log_id: Some(request_log_id),
+                        key_effect_code: key_effect.code,
+                        key_effect_summary: key_effect.summary,
+                        reserved_key_credits,
+                    },
+                    outcome,
+                ))
             }
             Err(err) => {
                 log_proxy_error(
@@ -3598,11 +4049,320 @@ impl TavilyProxy {
                         key_effect_summary: None,
                         forwarded_headers: &sanitized_headers.forwarded,
                         dropped_headers: &sanitized_headers.dropped,
+                        visibility,
                     })
                     .await?;
                 Err(err)
             }
         }
+    }
+
+    async fn replay_mcp_session_on_new_key(
+        &self,
+        session: &McpSessionBinding,
+        auth_token_id: Option<&str>,
+        actual_request_credits: i64,
+        excluded_key_ids: &[String],
+        migration_reason: &str,
+    ) -> Result<(McpSessionBinding, KeyBudgetLease), ProxyError> {
+        let control_plane_hops = if session.initialized_notification_seen {
+            3
+        } else {
+            2
+        };
+        let selection = self
+            .acquire_key_for(
+                auth_token_id,
+                &KeyBudgetRequirement::billable(actual_request_credits)
+                    .with_rpm_cost(control_plane_hops),
+                excluded_key_ids,
+            )
+            .await?;
+
+        let initialize_headers =
+            Self::build_internal_mcp_headers(session.protocol_version.as_deref(), None)?;
+        let initialize_request = ProxyRequest {
+            method: Method::POST,
+            path: "/mcp".to_string(),
+            query: None,
+            headers: initialize_headers,
+            body: Bytes::from(session.initialize_request_body.clone()),
+            auth_token_id: auth_token_id.map(str::to_string),
+            pinned_api_key_id: Some(selection.lease.id.clone()),
+            proxy_session_id: None,
+            reserved_key_credits: 0,
+            allow_transparent_retry: false,
+            is_mcp_initialize: true,
+            is_mcp_initialized_notification: false,
+        };
+        let (initialize_response, _) = match self
+            .execute_mcp_proxy_attempt(
+                &initialize_request,
+                &selection.lease,
+                0,
+                None,
+                Some(REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                self.settle_key_budget_reservation(
+                    &selection.lease.id,
+                    selection.reservation.reserved_credits,
+                    0,
+                )
+                .await;
+                return Err(err);
+            }
+        };
+        let Some(new_upstream_session_id) = initialize_response
+            .headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            self.settle_key_budget_reservation(
+                &selection.lease.id,
+                selection.reservation.reserved_credits,
+                0,
+            )
+            .await;
+            return Err(ProxyError::Other(
+                "migration initialize response missing upstream session id".to_string(),
+            ));
+        };
+
+        if session.initialized_notification_seen {
+            let initialized_headers = Self::build_internal_mcp_headers(
+                session.protocol_version.as_deref(),
+                Some(new_upstream_session_id.as_str()),
+            )?;
+            let initialized_request = ProxyRequest {
+                method: Method::POST,
+                path: "/mcp".to_string(),
+                query: None,
+                headers: initialized_headers,
+                body: Bytes::from_static(
+                    br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                ),
+                auth_token_id: auth_token_id.map(str::to_string),
+                pinned_api_key_id: Some(selection.lease.id.clone()),
+                proxy_session_id: None,
+                reserved_key_credits: 0,
+                allow_transparent_retry: false,
+                is_mcp_initialize: false,
+                is_mcp_initialized_notification: true,
+            };
+            if let Err(err) = self
+                .execute_mcp_proxy_attempt(
+                    &initialized_request,
+                    &selection.lease,
+                    0,
+                    Some(new_upstream_session_id.as_str()),
+                    Some(REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW),
+                )
+                .await
+            {
+                self.settle_key_budget_reservation(
+                    &selection.lease.id,
+                    selection.reservation.reserved_credits,
+                    0,
+                )
+                .await;
+                return Err(err);
+            }
+        }
+
+        let protocol_version = initialize_response
+            .headers
+            .get("mcp-protocol-version")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or(session.protocol_version.as_deref());
+
+        self.update_mcp_session_upstream_identity(
+            &session.proxy_session_id,
+            &new_upstream_session_id,
+            &selection.lease.id,
+            protocol_version,
+        )
+        .await?;
+        self.touch_mcp_session(
+            &session.proxy_session_id,
+            protocol_version,
+            session.last_event_id.as_deref(),
+            Some(session.initialized_notification_seen),
+        )
+        .await?;
+        let _ = self
+            .note_key_migration(&session.upstream_key_id, migration_reason)
+            .await;
+
+        let updated = self
+            .get_active_mcp_session(&session.proxy_session_id)
+            .await?
+            .ok_or(ProxyError::PinnedMcpSessionUnavailable)?;
+        Ok((updated, selection))
+    }
+
+    /// 将请求透传到 Tavily upstream 并记录日志。
+    pub async fn proxy_request(&self, request: ProxyRequest) -> Result<ProxyResponse, ProxyError> {
+        let requirement = if request.reserved_key_credits > 0 {
+            KeyBudgetRequirement::billable(request.reserved_key_credits)
+        } else {
+            KeyBudgetRequirement::control_plane()
+        };
+        let mut excluded_key_ids: Vec<String> = Vec::new();
+        let mut session = if let Some(proxy_session_id) = request.proxy_session_id.as_deref() {
+            self.get_active_mcp_session(proxy_session_id).await?
+        } else {
+            None
+        };
+        let mut preselected: Option<KeyBudgetLease> = None;
+
+        for attempt in 0..=MAX_TRANSPARENT_KEY_MIGRATIONS {
+            let selection = if let Some(selection) = preselected.take() {
+                selection
+            } else if let Some(active_session) = session.clone() {
+                if let Some(selection) = self
+                    .reserve_specific_key_if_budgeted(&active_session.upstream_key_id, &requirement)
+                    .await?
+                {
+                    selection
+                } else {
+                    let mut migration_excluded = excluded_key_ids.clone();
+                    migration_excluded.push(active_session.upstream_key_id.clone());
+                    let (updated_session, selection) = self
+                        .replay_mcp_session_on_new_key(
+                            &active_session,
+                            request.auth_token_id.as_deref(),
+                            request.reserved_key_credits,
+                            &migration_excluded,
+                            "pinned_key_budget_unavailable",
+                        )
+                        .await?;
+                    session = Some(updated_session);
+                    selection
+                }
+            } else if let Some(key_id) = request.pinned_api_key_id.as_deref() {
+                let Some(selection) = self.reserve_specific_key_if_budgeted(key_id, &requirement).await? else {
+                    return Err(ProxyError::PinnedMcpSessionUnavailable);
+                };
+                selection
+            } else {
+                self.acquire_key_for(
+                    request.auth_token_id.as_deref(),
+                    &requirement,
+                    &excluded_key_ids,
+                )
+                .await?
+            };
+
+            let upstream_session_id_override =
+                session.as_ref().map(|session| session.upstream_session_id.as_str());
+            match self
+                .execute_mcp_proxy_attempt(
+                    &request,
+                    &selection.lease,
+                    selection.reservation.reserved_credits,
+                    upstream_session_id_override,
+                    None,
+                )
+                .await
+            {
+                Ok((response, outcome)) => {
+                    let retry_reason = Self::should_retry_key_budget_attempt(response.status, &outcome);
+                    if request.allow_transparent_retry
+                        && attempt < MAX_TRANSPARENT_KEY_MIGRATIONS
+                        && let Some(retry_reason) = retry_reason
+                    {
+                        if let Some(key_id) = response.api_key_id.as_deref() {
+                            excluded_key_ids.push(key_id.to_string());
+                        }
+                        if let Some(active_session) = session.clone() {
+                            let (updated_session, migrated_selection) = match self
+                                .replay_mcp_session_on_new_key(
+                                    &active_session,
+                                    request.auth_token_id.as_deref(),
+                                    request.reserved_key_credits,
+                                    &excluded_key_ids,
+                                    retry_reason,
+                                )
+                                .await
+                            {
+                                Ok(result) => result,
+                                Err(ProxyError::NoAvailableKeys) => return Ok(response),
+                                Err(err) => return Err(err),
+                            };
+                            self.settle_key_budget_reservation(
+                                &selection.lease.id,
+                                selection.reservation.reserved_credits,
+                                0,
+                            )
+                            .await;
+                            if let Some(request_log_id) = response.request_log_id {
+                                let _ = self
+                                    .key_store
+                                    .set_request_log_visibility(
+                                        request_log_id,
+                                        REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW,
+                                    )
+                                    .await;
+                            }
+                            session = Some(updated_session);
+                            preselected = Some(migrated_selection);
+                        } else {
+                            let next_selection = match self
+                                .acquire_key_for(
+                                    request.auth_token_id.as_deref(),
+                                    &requirement,
+                                    &excluded_key_ids,
+                                )
+                                .await
+                            {
+                                Ok(selection) => selection,
+                                Err(ProxyError::NoAvailableKeys) => return Ok(response),
+                                Err(err) => return Err(err),
+                            };
+                            let _ = self.note_key_migration(&selection.lease.id, retry_reason).await;
+                            self.settle_key_budget_reservation(
+                                &selection.lease.id,
+                                selection.reservation.reserved_credits,
+                                0,
+                            )
+                            .await;
+                            if let Some(request_log_id) = response.request_log_id {
+                                let _ = self
+                                    .key_store
+                                    .set_request_log_visibility(
+                                        request_log_id,
+                                        REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW,
+                                    )
+                                    .await;
+                            }
+                            preselected = Some(next_selection);
+                        }
+                        continue;
+                    }
+                    return Ok(response);
+                }
+                Err(err) => {
+                    self.settle_key_budget_reservation(
+                        &selection.lease.id,
+                        selection.reservation.reserved_credits,
+                        0,
+                    )
+                    .await;
+                    return Err(err);
+                }
+            }
+        }
+
+        Err(ProxyError::NoAvailableKeys)
     }
 
     /// Generic helper to proxy a Tavily HTTP JSON endpoint (e.g. `/search`, `/extract`).
@@ -3619,8 +4379,13 @@ impl TavilyProxy {
         options: Value,
         original_headers: &HeaderMap,
         inject_upstream_bearer_auth: bool,
+        reserved_key_credits: i64,
     ) -> Result<(ProxyResponse, AttemptAnalysis), ProxyError> {
-        let lease = self.acquire_key_for(auth_token_id).await?;
+        let requirement = KeyBudgetRequirement::billable(reserved_key_credits);
+        let allow_transparent_retry =
+            matches!(upstream_path, "/search" | "/extract" | "/crawl" | "/map");
+        let mut excluded_key_ids: Vec<String> = Vec::new();
+        let mut preselected: Option<KeyBudgetLease> = None;
 
         let base = Url::parse(usage_base).map_err(|source| ProxyError::InvalidEndpoint {
             endpoint: usage_base.to_owned(),
@@ -3633,9 +4398,10 @@ impl TavilyProxy {
         let sanitized_headers = sanitize_headers_inner(original_headers, &base, &origin);
 
         // Build upstream request body by injecting Tavily key into api_key field.
-        let mut upstream_options = options;
-        if let Value::Object(ref mut map) = upstream_options {
-            // Remove any existing api_key field (case-insensitive) before inserting the Tavily key.
+        let mut upstream_options_template = options;
+        if let Value::Object(ref mut map) = upstream_options_template {
+            // Remove any existing api_key field (case-insensitive); each attempt injects its
+            // selected key just before dispatch.
             let keys_to_remove: Vec<String> = map
                 .keys()
                 .filter(|k| k.eq_ignore_ascii_case("api_key"))
@@ -3644,103 +4410,113 @@ impl TavilyProxy {
             for key in keys_to_remove {
                 map.remove(&key);
             }
-            map.insert("api_key".to_string(), Value::String(lease.secret.clone()));
         } else {
             // Unexpected payload shape; wrap it so we still send a valid JSON object upstream.
             let mut map = serde_json::Map::new();
-            map.insert("api_key".to_string(), Value::String(lease.secret.clone()));
-            map.insert("payload".to_string(), upstream_options);
-            upstream_options = Value::Object(map);
+            map.insert("payload".to_string(), upstream_options_template);
+            upstream_options_template = Value::Object(map);
         }
 
         // Force Tavily to return usage for predictable endpoints so we can charge credits 1:1.
         // Tavily does not document/support this on `/research` (we use /usage diff for that).
         if matches!(upstream_path, "/search" | "/extract" | "/crawl" | "/map")
-            && let Value::Object(ref mut map) = upstream_options
+            && let Value::Object(ref mut map) = upstream_options_template
         {
             map.insert("include_usage".to_string(), Value::Bool(true));
         }
 
-        let request_body =
-            serde_json::to_vec(&upstream_options).map_err(|e| ProxyError::Other(e.to_string()))?;
-        let redacted_request_body = redact_api_key_bytes(&request_body);
+        for attempt in 0..=MAX_TRANSPARENT_KEY_MIGRATIONS {
+            let selection = if let Some(selection) = preselected.take() {
+                selection
+            } else {
+                self.acquire_key_for(auth_token_id, &requirement, &excluded_key_ids)
+                    .await?
+            };
+            let reserved_key_credits = selection.reservation.reserved_credits;
+            let lease = selection.lease;
 
-        let request_method = method.clone();
-        let request_url = url.clone();
-        let upstream_secret = lease.secret.clone();
-        let response = self
-            .send_with_forward_proxy(&lease.id, upstream_path.trim_start_matches('/'), |client| {
-                let mut builder = client.request(request_method.clone(), request_url.clone());
-                for (name, value) in sanitized_headers.headers.iter() {
-                    if name == HOST || name == CONTENT_LENGTH {
-                        continue;
+            let mut upstream_options = upstream_options_template.clone();
+            if let Value::Object(ref mut map) = upstream_options {
+                map.insert("api_key".to_string(), Value::String(lease.secret.clone()));
+            }
+            let request_body = serde_json::to_vec(&upstream_options)
+                .map_err(|e| ProxyError::Other(e.to_string()))?;
+            let redacted_request_body = redact_api_key_bytes(&request_body);
+
+            let request_method = method.clone();
+            let request_url = url.clone();
+            let upstream_secret = lease.secret.clone();
+            let response = self
+                .send_with_forward_proxy(&lease.id, upstream_path.trim_start_matches('/'), |client| {
+                    let mut builder = client.request(request_method.clone(), request_url.clone());
+                    for (name, value) in sanitized_headers.headers.iter() {
+                        if name == HOST || name == CONTENT_LENGTH {
+                            continue;
+                        }
+                        builder = builder.header(name, value);
                     }
-                    builder = builder.header(name, value);
-                }
-                if inject_upstream_bearer_auth {
-                    builder =
-                        builder.header("Authorization", format!("Bearer {}", upstream_secret));
-                }
-                builder.body(request_body.clone())
-            })
-            .await;
+                    if inject_upstream_bearer_auth {
+                        builder =
+                            builder.header("Authorization", format!("Bearer {}", upstream_secret));
+                    }
+                    builder.body(request_body.clone())
+                })
+                .await;
 
-        match response {
-            Ok((response, _selected_proxy)) => {
-                let status = response.status();
-                let headers = response.headers().clone();
-                let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
+            match response {
+                Ok((response, _selected_proxy)) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
 
-                let mut analysis = analyze_http_attempt(status, &body_bytes);
-                analysis.api_key_id = Some(lease.id.clone());
-                if analysis.failure_kind.is_none() && analysis.status == OUTCOME_ERROR {
-                    analysis.failure_kind = classify_failure_kind(
-                        display_path,
-                        Some(status.as_u16() as i64),
-                        analysis.tavily_status_code,
-                        None,
-                        &body_bytes,
-                    );
-                }
-                let redacted_response_body = redact_api_key_bytes(&body_bytes);
-                if status.is_success()
-                    && upstream_path == "/research"
-                    && let Some(request_id) = extract_research_request_id(&body_bytes)
-                    && let Some(token_id) = auth_token_id
-                {
-                    self.record_research_request_affinity(&request_id, &lease.id, token_id)
+                    let mut analysis = analyze_http_attempt(status, &body_bytes);
+                    analysis.api_key_id = Some(lease.id.clone());
+                    if analysis.failure_kind.is_none() && analysis.status == OUTCOME_ERROR {
+                        analysis.failure_kind = classify_failure_kind(
+                            display_path,
+                            Some(status.as_u16() as i64),
+                            analysis.tavily_status_code,
+                            None,
+                            &body_bytes,
+                        );
+                    }
+                    let redacted_response_body = redact_api_key_bytes(&body_bytes);
+
+                    let key_effect = self
+                        .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                         .await?;
-                }
 
-                let key_effect = self
-                    .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
-                    .await?;
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        let _ = self
+                            .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
+                            .await;
+                    }
 
-                let request_log_id = self
-                    .key_store
-                    .log_attempt(AttemptLog {
-                        key_id: Some(&lease.id),
-                        auth_token_id,
-                        method,
-                        path: display_path,
-                        query: None,
-                        status: Some(status),
-                        tavily_status_code: analysis.tavily_status_code,
-                        error: None,
-                        request_body: &redacted_request_body,
-                        response_body: &redacted_response_body,
-                        outcome: analysis.status,
-                        failure_kind: analysis.failure_kind.as_deref(),
-                        key_effect_code: key_effect.code.as_str(),
-                        key_effect_summary: key_effect.summary.as_deref(),
-                        forwarded_headers: &sanitized_headers.forwarded,
-                        dropped_headers: &sanitized_headers.dropped,
-                    })
-                    .await?;
-                analysis.key_effect = key_effect.clone();
+                    let request_log_id = self
+                        .key_store
+                        .log_attempt(AttemptLog {
+                            key_id: Some(&lease.id),
+                            auth_token_id,
+                            method,
+                            path: display_path,
+                            query: None,
+                            status: Some(status),
+                            tavily_status_code: analysis.tavily_status_code,
+                            error: None,
+                            request_body: &redacted_request_body,
+                            response_body: &redacted_response_body,
+                            outcome: analysis.status,
+                            failure_kind: analysis.failure_kind.as_deref(),
+                            key_effect_code: key_effect.code.as_str(),
+                            key_effect_summary: key_effect.summary.as_deref(),
+                            forwarded_headers: &sanitized_headers.forwarded,
+                            dropped_headers: &sanitized_headers.dropped,
+                            visibility: None,
+                        })
+                        .await?;
+                    analysis.key_effect = key_effect.clone();
 
-                Ok((
-                    ProxyResponse {
+                    let proxy_response = ProxyResponse {
                         status,
                         headers,
                         body: body_bytes,
@@ -3748,36 +4524,74 @@ impl TavilyProxy {
                         request_log_id: Some(request_log_id),
                         key_effect_code: key_effect.code,
                         key_effect_summary: key_effect.summary,
-                    },
-                    analysis,
-                ))
-            }
-            Err(err) => {
-                log_proxy_error(&lease.secret, method, display_path, None, &err);
-                let redacted_empty: Vec<u8> = Vec::new();
-                self.key_store
-                    .log_attempt(AttemptLog {
-                        key_id: Some(&lease.id),
-                        auth_token_id,
-                        method,
-                        path: display_path,
-                        query: None,
-                        status: None,
-                        tavily_status_code: None,
-                        error: Some(&err.to_string()),
-                        request_body: &redacted_request_body,
-                        response_body: &redacted_empty,
-                        outcome: OUTCOME_ERROR,
-                        failure_kind: None,
-                        key_effect_code: KEY_EFFECT_NONE,
-                        key_effect_summary: None,
-                        forwarded_headers: &sanitized_headers.forwarded,
-                        dropped_headers: &sanitized_headers.dropped,
-                    })
-                    .await?;
-                Err(err)
+                        reserved_key_credits,
+                    };
+                    let retry_reason = Self::should_retry_key_budget_attempt(status, &analysis);
+                    if allow_transparent_retry
+                        && attempt < MAX_TRANSPARENT_KEY_MIGRATIONS
+                        && let Some(retry_reason) = retry_reason
+                    {
+                        excluded_key_ids.push(lease.id.clone());
+                        let next_selection = match self
+                            .acquire_key_for(auth_token_id, &requirement, &excluded_key_ids)
+                            .await
+                        {
+                            Ok(selection) => selection,
+                            Err(ProxyError::NoAvailableKeys) => return Ok((proxy_response, analysis)),
+                            Err(err) => return Err(err),
+                        };
+                        let _ = self.note_key_migration(&lease.id, retry_reason).await;
+                        self.settle_key_budget_reservation(
+                            &lease.id,
+                            reserved_key_credits,
+                            0,
+                        )
+                        .await;
+                        let _ = self
+                            .key_store
+                            .set_request_log_visibility(
+                                request_log_id,
+                                REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW,
+                            )
+                            .await;
+                        preselected = Some(next_selection);
+                        continue;
+                    }
+
+                    return Ok((proxy_response, analysis));
+                }
+                Err(err) => {
+                    self.settle_key_budget_reservation(&lease.id, reserved_key_credits, 0)
+                        .await;
+                    log_proxy_error(&lease.secret, method, display_path, None, &err);
+                    let redacted_empty: Vec<u8> = Vec::new();
+                    self.key_store
+                        .log_attempt(AttemptLog {
+                            key_id: Some(&lease.id),
+                            auth_token_id,
+                            method,
+                            path: display_path,
+                            query: None,
+                            status: None,
+                            tavily_status_code: None,
+                            error: Some(&err.to_string()),
+                            request_body: &redacted_request_body,
+                            response_body: &redacted_empty,
+                            outcome: OUTCOME_ERROR,
+                            failure_kind: None,
+                            key_effect_code: KEY_EFFECT_NONE,
+                            key_effect_summary: None,
+                            forwarded_headers: &sanitized_headers.forwarded,
+                            dropped_headers: &sanitized_headers.dropped,
+                            visibility: None,
+                        })
+                        .await?;
+                    return Err(err);
+                }
             }
         }
+
+        Err(ProxyError::NoAvailableKeys)
     }
 
     /// Proxy Tavily `/research` while charging credits via `/usage` (research_usage) diff.
@@ -3796,8 +4610,17 @@ impl TavilyProxy {
         options: Value,
         original_headers: &HeaderMap,
         inject_upstream_bearer_auth: bool,
+        reserved_key_credits: i64,
     ) -> Result<(ProxyResponse, AttemptAnalysis, Option<i64>), ProxyError> {
-        let lease = self.acquire_key_for(auth_token_id).await?;
+        let selection = self
+            .acquire_key_for(
+                auth_token_id,
+                &KeyBudgetRequirement::billable(reserved_key_credits),
+                &[],
+            )
+            .await?;
+        let reserved_key_credits = selection.reservation.reserved_credits;
+        let lease = selection.lease;
         // Research billing uses /usage diff of a key-scoped counter; protect it from concurrent
         // research calls sharing the same upstream key, otherwise deltas can be misattributed.
         let _key_guard = self.lock_research_key_usage(&lease.id).await?;
@@ -3813,6 +4636,8 @@ impl TavilyProxy {
         {
             Ok(usage) => usage,
             Err(err) => {
+                self.settle_key_budget_reservation(&lease.id, reserved_key_credits, 0)
+                    .await;
                 self.maybe_quarantine_usage_error(&lease.id, "/api/tavily/research#usage", &err)
                     .await?;
                 return Err(err);
@@ -3901,6 +4726,11 @@ impl TavilyProxy {
                 let key_effect = self
                     .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                     .await?;
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    let _ = self
+                        .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
+                        .await;
+                }
 
                 let request_log_id = self
                     .key_store
@@ -3921,6 +4751,7 @@ impl TavilyProxy {
                         key_effect_summary: key_effect.summary.as_deref(),
                         forwarded_headers: &sanitized_headers.forwarded,
                         dropped_headers: &sanitized_headers.dropped,
+                        visibility: None,
                     })
                     .await?;
                 analysis.key_effect = key_effect.clone();
@@ -3959,12 +4790,15 @@ impl TavilyProxy {
                         request_log_id: Some(request_log_id),
                         key_effect_code: key_effect.code,
                         key_effect_summary: key_effect.summary,
+                        reserved_key_credits,
                     },
                     analysis,
                     delta,
                 ))
             }
             Err(err) => {
+                self.settle_key_budget_reservation(&lease.id, reserved_key_credits, 0)
+                    .await;
                 log_proxy_error(&lease.secret, method, display_path, None, &err);
                 let redacted_empty: Vec<u8> = Vec::new();
                 self.key_store
@@ -3985,6 +4819,7 @@ impl TavilyProxy {
                         key_effect_summary: None,
                         forwarded_headers: &sanitized_headers.forwarded,
                         dropped_headers: &sanitized_headers.dropped,
+                        visibility: None,
                     })
                     .await?;
                 Err(err)
@@ -4006,9 +4841,16 @@ impl TavilyProxy {
         inject_upstream_bearer_auth: bool,
     ) -> Result<(ProxyResponse, AttemptAnalysis), ProxyError> {
         let research_request_id = extract_research_request_id_from_path(upstream_path);
-        let lease = self
-            .acquire_key_for_research_request(auth_token_id, research_request_id.as_deref())
+        let selection = self
+            .acquire_key_for_research_request(
+                auth_token_id,
+                research_request_id.as_deref(),
+                &KeyBudgetRequirement::control_plane(),
+                &[],
+            )
             .await?;
+        let reserved_key_credits = selection.reservation.reserved_credits;
+        let lease = selection.lease;
 
         let base = Url::parse(usage_base).map_err(|source| ProxyError::InvalidEndpoint {
             endpoint: usage_base.to_owned(),
@@ -4070,6 +4912,11 @@ impl TavilyProxy {
                 let key_effect = self
                     .reconcile_key_health(&lease, display_path, &analysis, auth_token_id)
                     .await?;
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    let _ = self
+                        .apply_key_rpm_cooldown(&lease.id, "upstream_rate_limited_429")
+                        .await;
+                }
 
                 let request_log_id = self
                     .key_store
@@ -4090,6 +4937,7 @@ impl TavilyProxy {
                         key_effect_summary: key_effect.summary.as_deref(),
                         forwarded_headers: &sanitized_headers.forwarded,
                         dropped_headers: &sanitized_headers.dropped,
+                        visibility: None,
                     })
                     .await?;
                 analysis.key_effect = key_effect.clone();
@@ -4103,11 +4951,14 @@ impl TavilyProxy {
                         request_log_id: Some(request_log_id),
                         key_effect_code: key_effect.code,
                         key_effect_summary: key_effect.summary,
+                        reserved_key_credits,
                     },
                     analysis,
                 ))
             }
             Err(err) => {
+                self.settle_key_budget_reservation(&lease.id, reserved_key_credits, 0)
+                    .await;
                 log_proxy_error(&lease.secret, method, display_path, None, &err);
                 let redacted_empty: Vec<u8> = Vec::new();
                 self.key_store
@@ -4128,6 +4979,7 @@ impl TavilyProxy {
                         key_effect_summary: None,
                         forwarded_headers: &sanitized_headers.forwarded,
                         dropped_headers: &sanitized_headers.dropped,
+                        visibility: None,
                     })
                     .await?;
                 Err(err)
@@ -4145,6 +4997,7 @@ impl TavilyProxy {
         display_path: &str,
         options: Value,
         original_headers: &HeaderMap,
+        reserved_key_credits: i64,
     ) -> Result<(ProxyResponse, AttemptAnalysis), ProxyError> {
         self.proxy_http_json_endpoint(
             usage_base,
@@ -4155,13 +5008,20 @@ impl TavilyProxy {
             options,
             original_headers,
             true,
+            reserved_key_credits,
         )
         .await
     }
 
     /// 获取全部 API key 的统计信息，按状态与最近使用时间排序。
     pub async fn list_api_key_metrics(&self) -> Result<Vec<ApiKeyMetrics>, ProxyError> {
-        self.key_store.fetch_api_key_metrics(false).await
+        let metrics = self.key_store.fetch_api_key_metrics(false).await?;
+        let runtime = self.key_runtime_budgets.lock().await.clone();
+        let now = Utc::now().timestamp();
+        Ok(metrics
+            .into_iter()
+            .map(|metric| self.merge_runtime_budget_metrics(metric, &runtime, now))
+            .collect())
     }
 
     /// Admin: list API key metrics with pagination and optional filters.
@@ -4174,9 +5034,18 @@ impl TavilyProxy {
         registration_ip: Option<&str>,
         regions: &[String],
     ) -> Result<PaginatedApiKeyMetrics, ProxyError> {
-        self.key_store
+        let mut page_data = self
+            .key_store
             .fetch_api_key_metrics_page(page, per_page, groups, statuses, registration_ip, regions)
-            .await
+            .await?;
+        let runtime = self.key_runtime_budgets.lock().await.clone();
+        let now = Utc::now().timestamp();
+        page_data.items = page_data
+            .items
+            .into_iter()
+            .map(|metric| self.merge_runtime_budget_metrics(metric, &runtime, now))
+            .collect();
+        Ok(page_data)
     }
 
     /// 获取单个 API key 的完整统计信息，包含隔离详情。
@@ -4184,7 +5053,10 @@ impl TavilyProxy {
         &self,
         key_id: &str,
     ) -> Result<Option<ApiKeyMetrics>, ProxyError> {
-        self.key_store.fetch_api_key_metric_by_id(key_id).await
+        let metric = self.key_store.fetch_api_key_metric_by_id(key_id).await?;
+        let runtime = self.key_runtime_budgets.lock().await.clone();
+        let now = Utc::now().timestamp();
+        Ok(metric.map(|metric| self.merge_runtime_budget_metrics(metric, &runtime, now)))
     }
 
     /// 获取最近的请求日志，按时间倒序排列。
@@ -5208,6 +6080,7 @@ impl TavilyProxy {
                 key_effect_summary: None,
                 forwarded_headers,
                 dropped_headers,
+                visibility: None,
             })
             .await
     }
@@ -6350,6 +7223,7 @@ impl TavilyProxy {
         user_id: Option<&str>,
         protocol_version: Option<&str>,
         last_event_id: Option<&str>,
+        initialize_request_body: &[u8],
     ) -> Result<String, ProxyError> {
         let now = Utc::now().timestamp();
         let proxy_session_id = nanoid!(24);
@@ -6362,6 +7236,8 @@ impl TavilyProxy {
                 user_id: user_id.map(str::to_string),
                 protocol_version: protocol_version.map(str::to_string),
                 last_event_id: last_event_id.map(str::to_string),
+                initialize_request_body: initialize_request_body.to_vec(),
+                initialized_notification_seen: false,
                 created_at: now,
                 updated_at: now,
                 expires_at: now + MCP_SESSION_IDLE_TTL_SECS,
@@ -6377,6 +7253,7 @@ impl TavilyProxy {
         proxy_session_id: &str,
         protocol_version: Option<&str>,
         last_event_id: Option<&str>,
+        initialized_notification_seen: Option<bool>,
     ) -> Result<(), ProxyError> {
         let now = Utc::now().timestamp();
         self.key_store
@@ -6384,6 +7261,7 @@ impl TavilyProxy {
                 proxy_session_id,
                 protocol_version,
                 last_event_id,
+                initialized_notification_seen,
                 now,
                 now + MCP_SESSION_IDLE_TTL_SECS,
             )
@@ -6394,6 +7272,7 @@ impl TavilyProxy {
         &self,
         proxy_session_id: &str,
         upstream_session_id: &str,
+        upstream_key_id: &str,
         protocol_version: Option<&str>,
     ) -> Result<(), ProxyError> {
         let now = Utc::now().timestamp();
@@ -6401,6 +7280,7 @@ impl TavilyProxy {
             .update_mcp_session_upstream_identity(
                 proxy_session_id,
                 upstream_session_id,
+                upstream_key_id,
                 protocol_version,
                 now,
                 now + MCP_SESSION_IDLE_TTL_SECS,
@@ -6416,6 +7296,18 @@ impl TavilyProxy {
         self.key_store
             .revoke_mcp_session(proxy_session_id, reason)
             .await
+    }
+
+    pub async fn settle_key_budget_charge(
+        &self,
+        key_id: Option<&str>,
+        reserved_credits: i64,
+        actual_charged_credits: i64,
+    ) {
+        if let Some(key_id) = key_id {
+            self.settle_key_budget_reservation(key_id, reserved_credits, actual_charged_credits)
+                .await;
+        }
     }
 }
 
@@ -7107,6 +7999,7 @@ impl TavilyProxy {
         self.key_store
             .record_quota_sync_sample(key_id, limit, remaining, now, source)
             .await?;
+        self.reset_key_quota_overlay_after_sync(key_id).await;
         Ok((limit, remaining))
     }
 

@@ -24,6 +24,7 @@ pub(crate) struct AttemptLog<'a> {
     pub(crate) key_effect_summary: Option<&'a str>,
     pub(crate) forwarded_headers: &'a [String],
     pub(crate) dropped_headers: &'a [String],
+    pub(crate) visibility: Option<&'a str>,
 }
 
 /// 透传请求描述。
@@ -36,6 +37,11 @@ pub struct ProxyRequest {
     pub body: Bytes,
     pub auth_token_id: Option<String>,
     pub pinned_api_key_id: Option<String>,
+    pub proxy_session_id: Option<String>,
+    pub reserved_key_credits: i64,
+    pub allow_transparent_retry: bool,
+    pub is_mcp_initialize: bool,
+    pub is_mcp_initialized_notification: bool,
 }
 
 /// 透传响应。
@@ -48,6 +54,7 @@ pub struct ProxyResponse {
     pub request_log_id: Option<i64>,
     pub key_effect_code: String,
     pub key_effect_summary: Option<String>,
+    pub reserved_key_credits: i64,
 }
 
 /// Token quota verdict used by the HTTP layer to decide whether to forward.
@@ -302,6 +309,14 @@ pub struct ApiKeyMetrics {
     pub success_count: i64,
     pub error_count: i64,
     pub quota_exhausted_count: i64,
+    pub effective_quota_remaining: Option<i64>,
+    pub runtime_rpm_limit: Option<i64>,
+    pub runtime_rpm_used: Option<i64>,
+    pub runtime_rpm_remaining: Option<i64>,
+    pub cooldown_until: Option<i64>,
+    pub budget_block_reason: Option<String>,
+    pub last_migration_at: Option<i64>,
+    pub last_migration_reason: Option<String>,
     pub quarantine: Option<ApiKeyQuarantine>,
 }
 
@@ -409,6 +424,8 @@ pub struct McpSessionBinding {
     pub user_id: Option<String>,
     pub protocol_version: Option<String>,
     pub last_event_id: Option<String>,
+    pub initialize_request_body: Vec<u8>,
+    pub initialized_notification_seen: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub expires_at: i64,
@@ -461,6 +478,40 @@ pub struct RequestLogPageFacets {
     pub key_effects: Vec<LogFacetOption>,
     pub tokens: Vec<LogFacetOption>,
     pub keys: Vec<LogFacetOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApiKeyBudgetCandidate {
+    pub(crate) id: String,
+    pub(crate) secret: String,
+    pub(crate) status: String,
+    pub(crate) last_used_at: Option<i64>,
+    pub(crate) quota_limit: Option<i64>,
+    pub(crate) quota_remaining: Option<i64>,
+    pub(crate) quota_synced_at: Option<i64>,
+    pub(crate) quarantined: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PersistedApiKeyRuntimeState {
+    pub(crate) key_id: String,
+    pub(crate) cooldown_until: Option<i64>,
+    pub(crate) cooldown_reason: Option<String>,
+    pub(crate) last_migration_at: Option<i64>,
+    pub(crate) last_migration_reason: Option<String>,
+    pub(crate) updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyRecentRequestEvent {
+    pub(crate) key_id: String,
+    pub(crate) created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyQuotaOverlaySeed {
+    pub(crate) key_id: String,
+    pub(crate) local_billed_credits: i64,
 }
 
 #[derive(Debug, Clone)]

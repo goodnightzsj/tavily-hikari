@@ -437,6 +437,8 @@ const ALLOWED_PREFIXES: &[&str] = &["x-mcp-", "x-tavily-", "tavily-"];
 pub const TOKEN_HOURLY_LIMIT: i64 = 100;
 pub const TOKEN_DAILY_LIMIT: i64 = 500;
 pub const TOKEN_MONTHLY_LIMIT: i64 = 5000;
+pub const KEY_RPM_LIMIT_PER_MINUTE_DEFAULT: i64 = 100;
+pub const KEY_RPM_COOLDOWN_SECS_DEFAULT: i64 = 60;
 // Default per-token raw request limit (any request type) per hour.
 // This is enforced separately from the business quota above, and counts every
 // successful token-authenticated request regardless of MCP method.
@@ -619,6 +621,16 @@ pub fn effective_token_monthly_limit() -> i64 {
 /// Environment variable: `TOKEN_HOURLY_REQUEST_LIMIT` (must be a positive integer).
 pub fn effective_token_hourly_request_limit() -> i64 {
     token_limit_from_env("TOKEN_HOURLY_REQUEST_LIMIT", TOKEN_HOURLY_REQUEST_LIMIT)
+}
+
+/// Effective upstream key RPM limit, including environment overrides.
+pub fn effective_key_rpm_limit_per_minute() -> i64 {
+    token_limit_from_env("KEY_RPM_LIMIT_PER_MINUTE", KEY_RPM_LIMIT_PER_MINUTE_DEFAULT)
+}
+
+/// Effective cooldown duration after an upstream 429, including environment overrides.
+pub fn effective_key_rpm_cooldown_secs() -> i64 {
+    token_limit_from_env("KEY_RPM_COOLDOWN_SECS", KEY_RPM_COOLDOWN_SECS_DEFAULT)
 }
 
 #[derive(Debug, Clone)]

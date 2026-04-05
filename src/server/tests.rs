@@ -21391,6 +21391,11 @@ colo=LAX
                 body: bytes::Bytes::new(),
                 auth_token_id: None,
                 pinned_api_key_id: None,
+                proxy_session_id: None,
+                reserved_key_credits: 0,
+                allow_transparent_retry: true,
+                is_mcp_initialize: false,
+                is_mcp_initialized_notification: false,
             })
             .await;
 

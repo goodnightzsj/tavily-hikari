@@ -241,6 +241,49 @@ fn mcp_request_contains_method(body: &[u8], needle: &str) -> bool {
     }
 }
 
+fn mcp_request_allows_transparent_retry(body: &[u8], has_proxy_session: bool) -> bool {
+    if has_proxy_session {
+        return true;
+    }
+
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+
+    let is_retryable_tool = |name: &str| {
+        matches!(
+            name.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+            "tavily-search" | "tavily-extract" | "tavily-crawl" | "tavily-map"
+        )
+    };
+
+    let is_retryable_message = |value: &Value| {
+        let Some(method) = value.get("method").and_then(|method| method.as_str()) else {
+            return false;
+        };
+        if matches!(method, "initialize" | "ping" | "tools/list")
+            || method.starts_with("resources/")
+            || method.starts_with("prompts/")
+            || method.starts_with("notifications/")
+        {
+            return true;
+        }
+        if method != "tools/call" {
+            return false;
+        }
+        value.get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(|name| name.as_str())
+            .is_some_and(is_retryable_tool)
+    };
+
+    match value {
+        Value::Object(_) => is_retryable_message(&value),
+        Value::Array(_) => false,
+        _ => false,
+    }
+}
+
 fn is_mcp_session_delete_request(method: &Method, path: &str) -> bool {
     *method == Method::DELETE && path == "/mcp"
 }
@@ -807,6 +850,11 @@ async fn proxy_handler(
         }
     }
 
+    let is_mcp_initialized_notification =
+        is_mcp_request && mcp_request_contains_method(&body_bytes, "notifications/initialized");
+    let allow_transparent_retry =
+        is_mcp_request && mcp_request_allows_transparent_retry(&body_bytes, incoming_proxy_session_id.is_some());
+
     let proxy_request = ProxyRequest {
         method: method.clone(),
         path: path.clone(),
@@ -815,6 +863,11 @@ async fn proxy_handler(
         body: forwarded_body.clone(),
         auth_token_id: token_id.clone(),
         pinned_api_key_id,
+        proxy_session_id: incoming_proxy_session_id.clone(),
+        reserved_key_credits: reserved_billable_credits.unwrap_or(0),
+        allow_transparent_retry,
+        is_mcp_initialize,
+        is_mcp_initialized_notification,
     };
 
     // Serialize per-token billable tool calls to keep `peek -> upstream -> charge` consistent.
@@ -1003,25 +1056,40 @@ async fn proxy_handler(
                                     .as_deref()
                                     .or(incoming_protocol_version.as_deref()),
                                 incoming_last_event_id.as_deref(),
+                                is_mcp_initialized_notification.then_some(true),
                             )
                             .await;
-                        if let Some(upstream_session_id) = resp
-                            .headers
-                            .get("mcp-session-id")
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
+                        if let (Some(upstream_session_id), Some(api_key_id)) = (
+                            resp.headers
+                                .get("mcp-session-id")
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty()),
+                            resp.api_key_id.as_deref(),
+                        )
                         {
                             let _ = state
                                 .proxy
                                 .update_mcp_session_upstream_identity(
                                     proxy_session_id,
                                     upstream_session_id,
+                                    api_key_id,
                                     response_protocol_version
                                         .as_deref()
                                         .or(incoming_protocol_version.as_deref()),
                                 )
                                 .await;
+                            if let Ok(proxy_header) = ReqHeaderValue::from_str(proxy_session_id) {
+                                resp.headers
+                                    .insert(HeaderName::from_static("mcp-session-id"), proxy_header);
+                            }
+                        } else if let Some(upstream_session_id) = resp
+                            .headers
+                            .get("mcp-session-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                        {
                             if let Ok(proxy_header) = ReqHeaderValue::from_str(proxy_session_id) {
                                 resp.headers
                                     .insert(HeaderName::from_static("mcp-session-id"), proxy_header);
@@ -1048,6 +1116,7 @@ async fn proxy_handler(
                                 token_user_id.as_deref(),
                                 incoming_protocol_version.as_deref(),
                                 incoming_last_event_id.as_deref(),
+                                body_bytes.as_ref(),
                             )
                             .await
                             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1060,6 +1129,7 @@ async fn proxy_handler(
                 }
             }
             let mut billing_error: Option<String> = None;
+            let mut actual_key_credits: i64 = 0;
             if let Some(tid) = token_id.as_deref() {
                 let analysis = analyze_mcp_attempt(resp.status, &resp.body);
                 let api_key_id = resp.api_key_id.as_deref();
@@ -1172,6 +1242,7 @@ async fn proxy_handler(
                     };
 
                     if credits > 0 {
+                        actual_key_credits = credits;
                         match if let Some(subject) = billing_subject.as_deref() {
                             state
                                 .proxy
@@ -1296,6 +1367,14 @@ async fn proxy_handler(
                         .await;
                 }
             }
+            state
+                .proxy
+                .settle_key_budget_charge(
+                    resp.api_key_id.as_deref(),
+                    resp.reserved_key_credits,
+                    actual_key_credits,
+                )
+                .await;
             // Always return the upstream response, even if local billing persistence fails.
             // Returning a 5xx here can trigger client retries and cause duplicate upstream charges.
             Ok(build_response(resp))
@@ -1479,6 +1558,14 @@ impl ApiKeyView {
             quota_limit: metrics.quota_limit,
             quota_remaining: metrics.quota_remaining,
             quota_synced_at: metrics.quota_synced_at,
+            effective_quota_remaining: metrics.effective_quota_remaining,
+            runtime_rpm_limit: metrics.runtime_rpm_limit,
+            runtime_rpm_used: metrics.runtime_rpm_used,
+            runtime_rpm_remaining: metrics.runtime_rpm_remaining,
+            cooldown_until: metrics.cooldown_until,
+            budget_block_reason: metrics.budget_block_reason,
+            last_migration_at: metrics.last_migration_at,
+            last_migration_reason: metrics.last_migration_reason,
             total_requests: metrics.total_requests,
             success_count: metrics.success_count,
             error_count: metrics.error_count,

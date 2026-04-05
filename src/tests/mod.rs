@@ -936,6 +936,7 @@ async fn successful_request_logs_do_not_backfill_failure_kind() {
             key_effect_summary: None,
             forwarded_headers: &[],
             dropped_headers: &[],
+            visibility: None,
         })
         .await
         .expect("log success attempt");
@@ -1025,6 +1026,11 @@ async fn user_tokens_share_persistent_primary_key_affinity_after_restart() {
         body: Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
         auth_token_id: Some(token_id.to_string()),
         pinned_api_key_id: None,
+        proxy_session_id: None,
+        reserved_key_credits: 0,
+        allow_transparent_retry: true,
+        is_mcp_initialize: false,
+        is_mcp_initialized_notification: false,
     };
 
     let first = proxy
@@ -1146,6 +1152,11 @@ async fn token_primary_rebind_falls_back_to_exhausted_key_when_no_other_active_k
         body: Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
         auth_token_id: Some(token.id.clone()),
         pinned_api_key_id: None,
+        proxy_session_id: None,
+        reserved_key_credits: 0,
+        allow_transparent_retry: true,
+        is_mcp_initialize: false,
+        is_mcp_initialized_notification: false,
     };
 
     let first = proxy
@@ -5692,6 +5703,7 @@ async fn proxy_http_search_marks_key_exhausted_on_quota_status() {
             "/api/tavily/search",
             options,
             &headers,
+            1,
         )
         .await
         .expect("proxy search succeeded");
@@ -5708,6 +5720,304 @@ async fn proxy_http_search_marks_key_exhausted_on_quota_status() {
         .await
         .expect("key row exists");
     assert_eq!(status, STATUS_EXHAUSTED);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn proxy_http_search_retries_on_upstream_429_with_alternate_key() {
+    let db_path = temp_db_path("http-search-retry-429");
+    let db_str = db_path.to_string_lossy().to_string();
+
+    let primary_api_key = "tvly-http-retry-primary";
+    let secondary_api_key = "tvly-http-retry-secondary";
+    let proxy = TavilyProxy::with_endpoint(
+        vec![primary_api_key.to_string(), secondary_api_key.to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let now = Utc::now().timestamp();
+    for (api_key, quota_remaining) in [(primary_api_key, 1000_i64), (secondary_api_key, 100_i64)] {
+        sqlx::query("UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?")
+            .bind(quota_remaining)
+            .bind(now)
+            .bind(api_key)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("seed key quota snapshot");
+    }
+
+    let hits = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let app = Router::new().route(
+        "/search",
+        post({
+            let hits = Arc::clone(&hits);
+            move |Json(body): Json<Value>| {
+                let hits = Arc::clone(&hits);
+                let primary_api_key = primary_api_key.to_string();
+                async move {
+                    let api_key = body
+                        .get("api_key")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    hits.lock().await.push(api_key.clone());
+                    if api_key == primary_api_key {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            Json(serde_json::json!({
+                                "error": "rate limited",
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "status": 200,
+                                "results": [],
+                                "usage": { "credits": 1 },
+                            })),
+                        )
+                    }
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let usage_base = format!("http://{addr}");
+    let headers = HeaderMap::new();
+    let options = serde_json::json!({ "query": "retry me" });
+
+    let (resp, analysis) = proxy
+        .proxy_http_search(
+            &usage_base,
+            Some("tok1"),
+            &Method::POST,
+            "/api/tavily/search",
+            options,
+            &headers,
+            1,
+        )
+        .await
+        .expect("proxy search succeeded after retry");
+
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(analysis.status, OUTCOME_SUCCESS);
+    assert_eq!(
+        hits.lock().await.clone(),
+        vec![
+            primary_api_key.to_string(),
+            secondary_api_key.to_string(),
+        ]
+    );
+
+    let visible_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE visibility = ?")
+            .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count visible request logs");
+    let shadow_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE visibility = ?")
+            .bind(REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count shadow request logs");
+    assert_eq!(visible_count, 1);
+    assert_eq!(shadow_count, 1);
+
+    let visible_outcome: String = sqlx::query_scalar(
+        "SELECT result_status FROM request_logs WHERE visibility = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("visible request log outcome");
+    assert_eq!(visible_outcome, OUTCOME_SUCCESS);
+
+    let runtime_state = sqlx::query(
+        r#"
+        SELECT cooldown_until, last_migration_reason
+        FROM api_key_runtime_state
+        WHERE key_id = (SELECT id FROM api_keys WHERE api_key = ?)
+        "#,
+    )
+    .bind(primary_api_key)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("runtime state row exists");
+    let cooldown_until: Option<i64> = runtime_state.try_get("cooldown_until").expect("cooldown");
+    let last_migration_reason: Option<String> = runtime_state
+        .try_get("last_migration_reason")
+        .expect("migration reason");
+    assert!(cooldown_until.is_some(), "429 should put the key into cooldown");
+    assert_eq!(
+        last_migration_reason.as_deref(),
+        Some("upstream_429"),
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn proxy_http_search_retries_on_quota_exhausted_with_alternate_key() {
+    let db_path = temp_db_path("http-search-retry-quota");
+    let db_str = db_path.to_string_lossy().to_string();
+
+    let primary_api_key = "tvly-http-quota-primary";
+    let secondary_api_key = "tvly-http-quota-secondary";
+    let proxy = TavilyProxy::with_endpoint(
+        vec![primary_api_key.to_string(), secondary_api_key.to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let now = Utc::now().timestamp();
+    for (api_key, quota_remaining) in [(primary_api_key, 1000_i64), (secondary_api_key, 100_i64)] {
+        sqlx::query("UPDATE api_keys SET quota_remaining = ?, quota_synced_at = ? WHERE api_key = ?")
+            .bind(quota_remaining)
+            .bind(now)
+            .bind(api_key)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("seed key quota snapshot");
+    }
+
+    let hits = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let app = Router::new().route(
+        "/search",
+        post({
+            let hits = Arc::clone(&hits);
+            move |Json(body): Json<Value>| {
+                let hits = Arc::clone(&hits);
+                let primary_api_key = primary_api_key.to_string();
+                async move {
+                    let api_key = body
+                        .get("api_key")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    hits.lock().await.push(api_key.clone());
+                    if api_key == primary_api_key {
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "status": 432,
+                                "error": "quota_exhausted",
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "status": 200,
+                                "results": [],
+                                "usage": { "credits": 1 },
+                            })),
+                        )
+                    }
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let usage_base = format!("http://{addr}");
+    let headers = HeaderMap::new();
+    let options = serde_json::json!({ "query": "quota retry me" });
+
+    let (resp, analysis) = proxy
+        .proxy_http_search(
+            &usage_base,
+            Some("tok1"),
+            &Method::POST,
+            "/api/tavily/search",
+            options,
+            &headers,
+            1,
+        )
+        .await
+        .expect("proxy search succeeded after quota retry");
+
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(analysis.status, OUTCOME_SUCCESS);
+    assert_eq!(
+        hits.lock().await.clone(),
+        vec![
+            primary_api_key.to_string(),
+            secondary_api_key.to_string(),
+        ]
+    );
+
+    let primary_status: String = sqlx::query_scalar("SELECT status FROM api_keys WHERE api_key = ?")
+        .bind(primary_api_key)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("primary key status");
+    assert_eq!(primary_status, STATUS_EXHAUSTED);
+
+    let visible_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE visibility = ?")
+            .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count visible request logs");
+    let shadow_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE visibility = ?")
+            .bind(REQUEST_LOG_VISIBILITY_SUPPRESSED_RETRY_SHADOW)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count shadow request logs");
+    assert_eq!(visible_count, 1);
+    assert_eq!(shadow_count, 1);
+
+    let visible_outcome: String = sqlx::query_scalar(
+        "SELECT result_status FROM request_logs WHERE visibility = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("visible request log outcome");
+    assert_eq!(visible_outcome, OUTCOME_SUCCESS);
+
+    let runtime_state = sqlx::query(
+        r#"
+        SELECT last_migration_reason
+        FROM api_key_runtime_state
+        WHERE key_id = (SELECT id FROM api_keys WHERE api_key = ?)
+        "#,
+    )
+    .bind(primary_api_key)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("runtime state row exists");
+    let last_migration_reason: Option<String> = runtime_state
+        .try_get("last_migration_reason")
+        .expect("migration reason");
+    assert_eq!(
+        last_migration_reason.as_deref(),
+        Some("quota_exhausted"),
+    );
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -5783,6 +6093,7 @@ async fn proxy_http_json_endpoint_injects_bearer_auth_when_enabled() {
             options,
             &headers,
             true,
+            1,
         )
         .await
         .expect("proxy request succeeds");
@@ -5838,6 +6149,7 @@ async fn proxy_http_json_endpoint_quarantines_key_on_401_deactivated() {
             "/api/tavily/search",
             options,
             &headers,
+            1,
         )
         .await
         .expect("proxy search succeeded");
@@ -5919,6 +6231,11 @@ async fn proxy_request_quarantines_key_on_mcp_unauthorized() {
         body: Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#),
         auth_token_id: Some("tok1".to_string()),
         pinned_api_key_id: None,
+        proxy_session_id: None,
+        reserved_key_credits: 0,
+        allow_transparent_retry: true,
+        is_mcp_initialize: false,
+        is_mcp_initialized_notification: false,
     };
 
     let response = proxy.proxy_request(request).await.expect("proxy response");
@@ -5978,6 +6295,11 @@ async fn proxy_request_quarantines_key_on_mcp_error_body_without_http_status() {
         body: Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#),
         auth_token_id: Some("tok1".to_string()),
         pinned_api_key_id: None,
+        proxy_session_id: None,
+        reserved_key_credits: 0,
+        allow_transparent_retry: true,
+        is_mcp_initialize: false,
+        is_mcp_initialized_notification: false,
     };
 
     let response = proxy.proxy_request(request).await.expect("proxy response");
@@ -8068,6 +8390,7 @@ async fn research_usage_probe_401_quarantines_key() {
             options,
             &headers,
             false,
+            1,
         )
         .await
         .expect_err("research should fail when usage probe is unauthorized");
@@ -8218,6 +8541,7 @@ async fn proxy_http_json_endpoint_does_not_inject_bearer_auth_when_disabled() {
             options,
             &headers,
             false,
+            1,
         )
         .await
         .expect("proxy request succeeds");

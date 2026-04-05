@@ -1511,6 +1511,8 @@ impl KeyStore {
                 user_id TEXT,
                 protocol_version TEXT,
                 last_event_id TEXT,
+                initialize_request_body BLOB,
+                initialized_notification_seen INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
@@ -1540,6 +1542,49 @@ impl KeyStore {
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS idx_mcp_sessions_expires_at
                ON mcp_sessions(expires_at, revoked_at)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        if !self
+            .table_column_exists("mcp_sessions", "initialize_request_body")
+            .await?
+        {
+            sqlx::query("ALTER TABLE mcp_sessions ADD COLUMN initialize_request_body BLOB")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !self
+            .table_column_exists("mcp_sessions", "initialized_notification_seen")
+            .await?
+        {
+            sqlx::query(
+                "ALTER TABLE mcp_sessions ADD COLUMN initialized_notification_seen INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS api_key_runtime_state (
+                key_id TEXT PRIMARY KEY,
+                cooldown_until INTEGER,
+                cooldown_reason TEXT,
+                last_migration_at INTEGER,
+                last_migration_reason TEXT,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (key_id) REFERENCES api_keys(id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_api_key_runtime_state_cooldown
+               ON api_key_runtime_state(cooldown_until, updated_at DESC)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -7533,13 +7578,15 @@ impl KeyStore {
                 user_id,
                 protocol_version,
                 last_event_id,
+                initialize_request_body,
+                initialized_notification_seen,
                 created_at,
                 updated_at,
                 expires_at,
                 revoked_at,
                 revoke_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(proxy_session_id) DO UPDATE SET
                 upstream_session_id = excluded.upstream_session_id,
                 upstream_key_id = excluded.upstream_key_id,
@@ -7547,6 +7594,8 @@ impl KeyStore {
                 user_id = excluded.user_id,
                 protocol_version = excluded.protocol_version,
                 last_event_id = excluded.last_event_id,
+                initialize_request_body = excluded.initialize_request_body,
+                initialized_notification_seen = excluded.initialized_notification_seen,
                 updated_at = excluded.updated_at,
                 expires_at = excluded.expires_at,
                 revoked_at = excluded.revoked_at,
@@ -7560,6 +7609,8 @@ impl KeyStore {
         .bind(binding.user_id.as_deref())
         .bind(binding.protocol_version.as_deref())
         .bind(binding.last_event_id.as_deref())
+        .bind(binding.initialize_request_body.as_slice())
+        .bind(i64::from(binding.initialized_notification_seen))
         .bind(binding.created_at)
         .bind(binding.updated_at)
         .bind(binding.expires_at)
@@ -7585,6 +7636,8 @@ impl KeyStore {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<Vec<u8>>,
+                i64,
                 i64,
                 i64,
                 i64,
@@ -7601,6 +7654,8 @@ impl KeyStore {
                 user_id,
                 protocol_version,
                 last_event_id,
+                initialize_request_body,
+                initialized_notification_seen,
                 created_at,
                 updated_at,
                 expires_at,
@@ -7627,6 +7682,8 @@ impl KeyStore {
                 user_id,
                 protocol_version,
                 last_event_id,
+                initialize_request_body,
+                initialized_notification_seen,
                 created_at,
                 updated_at,
                 expires_at,
@@ -7640,6 +7697,8 @@ impl KeyStore {
                 user_id,
                 protocol_version,
                 last_event_id,
+                initialize_request_body: initialize_request_body.unwrap_or_default(),
+                initialized_notification_seen: initialized_notification_seen > 0,
                 created_at,
                 updated_at,
                 expires_at,
@@ -7654,6 +7713,7 @@ impl KeyStore {
         proxy_session_id: &str,
         protocol_version: Option<&str>,
         last_event_id: Option<&str>,
+        initialized_notification_seen: Option<bool>,
         now: i64,
         expires_at: i64,
     ) -> Result<(), ProxyError> {
@@ -7663,6 +7723,7 @@ impl KeyStore {
             SET
                 protocol_version = COALESCE(?, protocol_version),
                 last_event_id = COALESCE(?, last_event_id),
+                initialized_notification_seen = COALESCE(?, initialized_notification_seen),
                 updated_at = ?,
                 expires_at = ?
             WHERE proxy_session_id = ?
@@ -7671,6 +7732,7 @@ impl KeyStore {
         )
         .bind(protocol_version)
         .bind(last_event_id)
+        .bind(initialized_notification_seen.map(i64::from))
         .bind(now)
         .bind(expires_at)
         .bind(proxy_session_id)
@@ -7683,6 +7745,7 @@ impl KeyStore {
         &self,
         proxy_session_id: &str,
         upstream_session_id: &str,
+        upstream_key_id: &str,
         protocol_version: Option<&str>,
         now: i64,
         expires_at: i64,
@@ -7692,6 +7755,7 @@ impl KeyStore {
             UPDATE mcp_sessions
             SET
                 upstream_session_id = ?,
+                upstream_key_id = ?,
                 protocol_version = COALESCE(?, protocol_version),
                 updated_at = ?,
                 expires_at = ?
@@ -7700,6 +7764,7 @@ impl KeyStore {
             "#,
         )
         .bind(upstream_session_id)
+        .bind(upstream_key_id)
         .bind(protocol_version)
         .bind(now)
         .bind(expires_at)
@@ -7770,6 +7835,198 @@ impl KeyStore {
         .bind(reason)
         .bind(now)
         .bind(token_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn list_api_key_budget_candidates(
+        &self,
+    ) -> Result<Vec<ApiKeyBudgetCandidate>, ProxyError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                ak.id,
+                ak.api_key,
+                ak.status,
+                ak.last_used_at,
+                ak.quota_limit,
+                ak.quota_remaining,
+                ak.quota_synced_at,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM api_key_quarantines aq
+                        WHERE aq.key_id = ak.id AND aq.cleared_at IS NULL
+                    ) THEN 1
+                    ELSE 0
+                END AS quarantined
+            FROM api_keys ak
+            WHERE ak.deleted_at IS NULL
+            ORDER BY ak.id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ApiKeyBudgetCandidate {
+                    id: row.try_get("id")?,
+                    secret: row.try_get("api_key")?,
+                    status: row.try_get("status")?,
+                    last_used_at: normalize_timestamp(row.try_get("last_used_at")?),
+                    quota_limit: row.try_get("quota_limit")?,
+                    quota_remaining: row.try_get("quota_remaining")?,
+                    quota_synced_at: row
+                        .try_get::<Option<i64>, _>("quota_synced_at")?
+                        .and_then(normalize_timestamp),
+                    quarantined: row.try_get::<i64, _>("quarantined")? > 0,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(ProxyError::Database)
+    }
+
+    pub(crate) async fn list_recent_key_request_events(
+        &self,
+        since: i64,
+    ) -> Result<Vec<KeyRecentRequestEvent>, ProxyError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT api_key_id, created_at
+            FROM request_logs
+            WHERE api_key_id IS NOT NULL
+              AND created_at >= ?
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(KeyRecentRequestEvent {
+                    key_id: row.try_get("api_key_id")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(ProxyError::Database)
+    }
+
+    pub(crate) async fn list_key_quota_overlay_seeds(
+        &self,
+    ) -> Result<Vec<KeyQuotaOverlaySeed>, ProxyError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                ak.id AS key_id,
+                COALESCE(SUM(CASE
+                    WHEN rl.created_at >= COALESCE(ak.quota_synced_at, 0)
+                        THEN COALESCE(rl.business_credits, 0)
+                    ELSE 0
+                END), 0) AS local_billed_credits
+            FROM api_keys ak
+            LEFT JOIN request_logs rl
+              ON rl.api_key_id = ak.id
+             AND COALESCE(rl.business_credits, 0) > 0
+            WHERE ak.deleted_at IS NULL
+            GROUP BY ak.id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(KeyQuotaOverlaySeed {
+                    key_id: row.try_get("key_id")?,
+                    local_billed_credits: row.try_get("local_billed_credits")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(ProxyError::Database)
+    }
+
+    pub(crate) async fn list_persisted_api_key_runtime_states(
+        &self,
+        now: i64,
+    ) -> Result<Vec<PersistedApiKeyRuntimeState>, ProxyError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                key_id,
+                cooldown_until,
+                cooldown_reason,
+                last_migration_at,
+                last_migration_reason,
+                updated_at
+            FROM api_key_runtime_state
+            WHERE cooldown_until IS NULL
+               OR cooldown_until > ?
+               OR last_migration_at IS NOT NULL
+            ORDER BY key_id ASC
+            "#,
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(PersistedApiKeyRuntimeState {
+                    key_id: row.try_get("key_id")?,
+                    cooldown_until: row
+                        .try_get::<Option<i64>, _>("cooldown_until")?
+                        .and_then(normalize_timestamp),
+                    cooldown_reason: row.try_get("cooldown_reason")?,
+                    last_migration_at: row
+                        .try_get::<Option<i64>, _>("last_migration_at")?
+                        .and_then(normalize_timestamp),
+                    last_migration_reason: row.try_get("last_migration_reason")?,
+                    updated_at: row.try_get("updated_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(ProxyError::Database)
+    }
+
+    pub(crate) async fn upsert_api_key_runtime_state(
+        &self,
+        key_id: &str,
+        cooldown_until: Option<i64>,
+        cooldown_reason: Option<&str>,
+        last_migration_at: Option<i64>,
+        last_migration_reason: Option<&str>,
+        updated_at: i64,
+    ) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            INSERT INTO api_key_runtime_state (
+                key_id,
+                cooldown_until,
+                cooldown_reason,
+                last_migration_at,
+                last_migration_reason,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key_id) DO UPDATE SET
+                cooldown_until = excluded.cooldown_until,
+                cooldown_reason = excluded.cooldown_reason,
+                last_migration_at = COALESCE(excluded.last_migration_at, api_key_runtime_state.last_migration_at),
+                last_migration_reason = COALESCE(excluded.last_migration_reason, api_key_runtime_state.last_migration_reason),
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(key_id)
+        .bind(cooldown_until)
+        .bind(cooldown_reason)
+        .bind(last_migration_at)
+        .bind(last_migration_reason)
+        .bind(updated_at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -12607,8 +12864,9 @@ impl KeyStore {
                 response_body,
                 forwarded_headers,
                 dropped_headers,
+                visibility,
                 created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -12632,6 +12890,7 @@ impl KeyStore {
         .bind(entry.response_body)
         .bind(forwarded_json)
         .bind(dropped_json)
+        .bind(entry.visibility.unwrap_or(REQUEST_LOG_VISIBILITY_VISIBLE))
         .bind(created_at)
         .fetch_one(&mut *tx)
         .await?;
@@ -12689,6 +12948,19 @@ impl KeyStore {
         tx.commit().await?;
 
         Ok(request_log_id)
+    }
+
+    pub(crate) async fn set_request_log_visibility(
+        &self,
+        log_id: i64,
+        visibility: &str,
+    ) -> Result<(), ProxyError> {
+        sqlx::query("UPDATE request_logs SET visibility = ? WHERE id = ?")
+            .bind(visibility)
+            .bind(log_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub(crate) fn api_key_metrics_from_clause() -> &'static str {
@@ -12787,6 +13059,14 @@ impl KeyStore {
             success_count,
             error_count,
             quota_exhausted_count,
+            effective_quota_remaining: None,
+            runtime_rpm_limit: None,
+            runtime_rpm_used: None,
+            runtime_rpm_remaining: None,
+            cooldown_until: None,
+            budget_block_reason: None,
+            last_migration_at: None,
+            last_migration_reason: None,
             quarantine: quarantine_source.map(|source| ApiKeyQuarantine {
                 source,
                 reason_code: quarantine_reason_code.unwrap_or_default(),
@@ -13183,6 +13463,14 @@ impl KeyStore {
                 success_count,
                 error_count,
                 quota_exhausted_count,
+                effective_quota_remaining: None,
+                runtime_rpm_limit: None,
+                runtime_rpm_used: None,
+                runtime_rpm_remaining: None,
+                cooldown_until: None,
+                budget_block_reason: None,
+                last_migration_at: None,
+                last_migration_reason: None,
                 quarantine: quarantine_source.map(|source| ApiKeyQuarantine {
                     source,
                     reason_code: quarantine_reason_code.unwrap_or_default(),
