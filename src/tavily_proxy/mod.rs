@@ -2,7 +2,7 @@ use crate::analysis::*;
 use crate::models::*;
 use crate::store::*;
 use crate::*;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use std::collections::VecDeque;
 
 const KEY_BUDGET_WINDOW_SECS: i64 = 60;
@@ -4113,6 +4113,10 @@ impl TavilyProxy {
         upstream_session_id: Option<&str>,
     ) -> Result<HeaderMap, ProxyError> {
         let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(protocol_version) = protocol_version
             && let Ok(value) = HeaderValue::from_str(protocol_version)
@@ -4427,10 +4431,23 @@ impl TavilyProxy {
             session.proxy_session_id, session.upstream_key_id, selection.lease.id
         );
 
-        let updated = self
-            .get_active_mcp_session(&session.proxy_session_id)
-            .await?
-            .ok_or(ProxyError::PinnedMcpSessionUnavailable)?;
+        let now = Utc::now().timestamp();
+        let updated = McpSessionBinding {
+            proxy_session_id: session.proxy_session_id.clone(),
+            upstream_session_id: new_upstream_session_id,
+            upstream_key_id: selection.lease.id.clone(),
+            auth_token_id: session.auth_token_id.clone(),
+            user_id: session.user_id.clone(),
+            protocol_version: protocol_version.map(str::to_string),
+            last_event_id: session.last_event_id.clone(),
+            initialize_request_body: session.initialize_request_body.clone(),
+            initialized_notification_seen: session.initialized_notification_seen,
+            created_at: session.created_at,
+            updated_at: now,
+            expires_at: now + MCP_SESSION_IDLE_TTL_SECS,
+            revoked_at: None,
+            revoke_reason: None,
+        };
         Ok((updated, selection))
     }
 

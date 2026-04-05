@@ -661,6 +661,10 @@ mod tests {
                             .get("mcp-protocol-version")
                             .and_then(|value| value.to_str().ok())
                             .map(str::to_string);
+                        let accept = headers
+                            .get("accept")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
                         let last_event_id = headers
                             .get("last-event-id")
                             .and_then(|value| value.to_str().ok())
@@ -676,6 +680,7 @@ mod tests {
                             method: method.clone(),
                             session_id: session_id.clone(),
                             protocol_version: protocol_version.clone(),
+                            accept,
                             last_event_id: last_event_id.clone(),
                             leaked_forwarded,
                             user_agent,
@@ -773,11 +778,221 @@ mod tests {
         (addr, calls)
     }
 
+    async fn spawn_mock_mcp_upstream_for_session_migration_replay(
+        allowed_api_keys: Vec<String>,
+    ) -> (
+        SocketAddr,
+        Arc<Mutex<Vec<SessionHeaderCall>>>,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().route(
+            "/mcp",
+            any({
+                let calls = calls.clone();
+                move |headers: HeaderMap,
+                      Query(params): Query<HashMap<String, String>>,
+                      Json(body): Json<Value>| {
+                    let allowed_api_keys = allowed_api_keys.clone();
+                    let calls = calls.clone();
+                    async move {
+                        let received = params.get("tavilyApiKey").cloned();
+                        assert!(
+                            received
+                                .as_ref()
+                                .is_some_and(|key| allowed_api_keys.iter().any(|allowed| allowed == key)),
+                            "missing or incorrect tavilyApiKey: {received:?}, allowed={allowed_api_keys:?}"
+                        );
+
+                        let method = body
+                            .get("method")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let session_id = headers
+                            .get("mcp-session-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let protocol_version = headers
+                            .get("mcp-protocol-version")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let accept = headers
+                            .get("accept")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let last_event_id = headers
+                            .get("last-event-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let leaked_forwarded = headers.contains_key("x-forwarded-for")
+                            || headers.contains_key("x-real-ip");
+                        let user_agent = headers
+                            .get("user-agent")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+
+                        calls.lock().expect("session replay calls lock poisoned").push(
+                            SessionHeaderCall {
+                                method: method.clone(),
+                                session_id: session_id.clone(),
+                                protocol_version: protocol_version.clone(),
+                                accept: accept.clone(),
+                                last_event_id: last_event_id.clone(),
+                                leaked_forwarded,
+                                user_agent,
+                                tavily_api_key: received.clone(),
+                            },
+                        );
+
+                        let accept_ok = accept.as_deref().is_some_and(|value| {
+                            value.contains("application/json")
+                                && value.contains("text/event-stream")
+                        });
+                        if !accept_ok {
+                            return Response::builder()
+                                .status(StatusCode::NOT_ACCEPTABLE)
+                                .header(CONTENT_TYPE, "application/json")
+                                .body(Body::from(
+                                    serde_json::json!({
+                                        "error": "missing accept",
+                                        "detail": "expected application/json, text/event-stream"
+                                    })
+                                    .to_string(),
+                                ))
+                                .expect("build 406 response");
+                        }
+
+                        let api_key = received.expect("validated api key");
+                        let key_index = allowed_api_keys
+                            .iter()
+                            .position(|allowed| allowed == &api_key)
+                            .expect("allowed key index");
+                        let upstream_session_id = format!("session-{}", key_index + 1);
+
+                        match method.as_str() {
+                            "initialize" => Response::builder()
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, "application/json")
+                                .header("mcp-session-id", upstream_session_id.as_str())
+                                .body(Body::from(
+                                    serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": body.get("id").cloned().unwrap_or_else(|| serde_json::json!(1)),
+                                        "result": {
+                                            "protocolVersion": "2025-03-26",
+                                            "serverInfo": { "name": "mock-mcp", "version": "1.0.0" },
+                                            "capabilities": {}
+                                        }
+                                    })
+                                    .to_string(),
+                                ))
+                                .expect("build initialize response"),
+                            "notifications/initialized" => {
+                                assert_eq!(
+                                    session_id.as_deref(),
+                                    Some(upstream_session_id.as_str()),
+                                    "notifications/initialized should use current upstream session id"
+                                );
+                                Response::builder()
+                                    .status(StatusCode::ACCEPTED)
+                                    .body(Body::empty())
+                                    .expect("build notifications/initialized response")
+                            }
+                            "tools/call" => {
+                                assert_eq!(
+                                    session_id.as_deref(),
+                                    Some(upstream_session_id.as_str()),
+                                    "tools/call should use current upstream session id"
+                                );
+                                assert_eq!(
+                                    body.get("params")
+                                        .and_then(|value| value.get("name"))
+                                        .and_then(|value| value.as_str()),
+                                    Some("tavily-search"),
+                                    "expected tavily-search tool call"
+                                );
+                                if key_index == 0 {
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header(CONTENT_TYPE, "application/json")
+                                        .body(Body::from(
+                                            serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": body.get("id").cloned().unwrap_or_else(|| serde_json::json!(1)),
+                                                "result": {
+                                                    "content": [
+                                                        {
+                                                            "type": "text",
+                                                            "text": "{\"error\":\"Search request failed\",\"status\":429}"
+                                                        }
+                                                    ],
+                                                    "structuredContent": {
+                                                        "error": "Search request failed",
+                                                        "status": 429,
+                                                        "detail": {
+                                                            "error": "Your request has been blocked due to excessive requests."
+                                                        }
+                                                    },
+                                                    "isError": false
+                                                }
+                                            })
+                                            .to_string(),
+                                        ))
+                                        .expect("build logical 429 response")
+                                } else {
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header(CONTENT_TYPE, "application/json")
+                                        .body(Body::from(
+                                            serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": body.get("id").cloned().unwrap_or_else(|| serde_json::json!(1)),
+                                                "result": {
+                                                    "content": [
+                                                        {
+                                                            "type": "text",
+                                                            "text": "{\"status\":200}"
+                                                        }
+                                                    ],
+                                                    "structuredContent": {
+                                                        "status": 200,
+                                                        "usage": { "credits": 1 }
+                                                    },
+                                                    "isError": false
+                                                }
+                                            })
+                                            .to_string(),
+                                        ))
+                                        .expect("build success response")
+                                }
+                            }
+                            other => (
+                                StatusCode::BAD_REQUEST,
+                                Body::from(format!("unexpected MCP method: {other}")),
+                            )
+                                .into_response(),
+                        }
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        (addr, calls)
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct SessionHeaderCall {
         method: String,
         session_id: Option<String>,
         protocol_version: Option<String>,
+        accept: Option<String>,
         last_event_id: Option<String>,
         leaked_forwarded: bool,
         user_agent: Option<String>,
@@ -20070,6 +20285,170 @@ colo=LAX
         assert_eq!(recorded[2].session_id.as_deref(), Some("session-123"));
         assert_eq!(recorded[2].protocol_version.as_deref(), Some("2025-03-26"));
         assert_eq!(recorded[2].last_event_id, None);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn mcp_session_migration_replays_initialize_and_initialized_with_accept() {
+        let db_path = temp_db_path("mcp-session-migration-replay-accept");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let first_api_key = "tvly-mcp-migration-a".to_string();
+        let second_api_key = "tvly-mcp-migration-b".to_string();
+        let (upstream_addr, calls) = spawn_mock_mcp_upstream_for_session_migration_replay(vec![
+            first_api_key.clone(),
+            second_api_key.clone(),
+        ])
+        .await;
+        let upstream = format!("http://{}", upstream_addr);
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec![first_api_key.clone(), second_api_key.clone()],
+            &upstream,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+        let access_token = proxy
+            .create_access_token(Some("mcp-session-migration-replay"))
+            .await
+            .expect("create access token");
+        let pool = connect_sqlite_test_pool(&db_str).await;
+        let key_rows = fetch_api_key_rows(&pool).await;
+        let first_key_id = find_api_key_id(&key_rows, first_api_key.as_str());
+        sqlx::query(
+            r#"
+            INSERT INTO token_primary_api_key_affinity (
+                token_id,
+                user_id,
+                api_key_id,
+                created_at,
+                updated_at
+            )
+            VALUES (?, NULL, ?, unixepoch(), unixepoch())
+            ON CONFLICT(token_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                api_key_id = excluded.api_key_id,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&access_token.id)
+        .bind(&first_key_id)
+        .execute(&pool)
+        .await
+        .expect("pin token affinity to first key");
+
+        let proxy_addr = spawn_proxy_server(proxy.clone(), upstream.clone()).await;
+        let url = format!("http://{}/mcp?tavilyApiKey={}", proxy_addr, access_token.token);
+        let client = Client::new();
+
+        let initialize = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "init-migrate",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {}
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize request");
+
+        assert!(initialize.status().is_success());
+        let proxy_session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("proxy session id")
+            .to_string();
+
+        let initialized = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", proxy_session_id.as_str())
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }))
+            .send()
+            .await
+            .expect("initialized notification");
+        assert_eq!(initialized.status(), StatusCode::ACCEPTED);
+
+        let search = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", proxy_session_id.as_str())
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "search-migrate",
+                "method": "tools/call",
+                "params": {
+                    "name": "tavily-search",
+                    "arguments": {
+                        "query": "retry after logical 429",
+                        "search_depth": "basic"
+                    }
+                }
+            }))
+            .send()
+            .await
+            .expect("search request");
+
+        assert_eq!(search.status(), StatusCode::OK);
+        let body: Value = search.json().await.expect("parse search response");
+        assert_eq!(
+            body.get("result")
+                .and_then(|value| value.get("structuredContent"))
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_i64()),
+            Some(200),
+            "follow-up request should succeed after session migration"
+        );
+
+        let recorded = calls
+            .lock()
+            .expect("session replay calls lock poisoned")
+            .clone();
+        assert_eq!(
+            recorded.len(),
+            6,
+            "expected initialize + initialized + first tools/call + replay initialize + replay initialized + retry tools/call"
+        );
+
+        assert_eq!(recorded[0].method, "initialize");
+        assert_eq!(recorded[0].tavily_api_key.as_deref(), Some(first_api_key.as_str()));
+        assert_eq!(recorded[1].method, "notifications/initialized");
+        assert_eq!(recorded[1].tavily_api_key.as_deref(), Some(first_api_key.as_str()));
+        assert_eq!(recorded[2].method, "tools/call");
+        assert_eq!(recorded[2].tavily_api_key.as_deref(), Some(first_api_key.as_str()));
+
+        assert_eq!(recorded[3].method, "initialize");
+        assert_eq!(recorded[3].tavily_api_key.as_deref(), Some(second_api_key.as_str()));
+        assert_eq!(
+            recorded[3].accept.as_deref(),
+            Some("application/json, text/event-stream")
+        );
+        assert_eq!(recorded[4].method, "notifications/initialized");
+        assert_eq!(recorded[4].tavily_api_key.as_deref(), Some(second_api_key.as_str()));
+        assert_eq!(
+            recorded[4].accept.as_deref(),
+            Some("application/json, text/event-stream")
+        );
+        assert_eq!(recorded[5].method, "tools/call");
+        assert_eq!(recorded[5].tavily_api_key.as_deref(), Some(second_api_key.as_str()));
+        assert_eq!(recorded[5].session_id.as_deref(), Some("session-2"));
 
         let _ = std::fs::remove_file(db_path);
     }
